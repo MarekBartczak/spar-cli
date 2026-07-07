@@ -137,6 +137,14 @@ def _dict_to_config(config_dict: dict) -> Config:
         if key not in allowed_top_level:
             raise ConfigError(f"Unknown top-level key: {key}")
 
+    # Validate that sides is a dict (table) if present
+    if "sides" in config_dict and not isinstance(config_dict["sides"], dict):
+        raise ConfigError(f"sides must be a table (dict), got {type(config_dict['sides']).__name__}")
+
+    # Validate that debate is a dict (table) if present
+    if "debate" in config_dict and not isinstance(config_dict["debate"], dict):
+        raise ConfigError(f"debate must be a table (dict), got {type(config_dict['debate']).__name__}")
+
     # Process sides
     sides_dict = config_dict.get("sides", {})
     sides = {}

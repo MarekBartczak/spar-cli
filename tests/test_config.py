@@ -542,6 +542,49 @@ class TestValidationMalformedTOML:
         assert len(str(exc_info.value)) > 0
 
 
+class TestValidationMalformedShape:
+    """Test validation of malformed config shapes (sides/debate not tables)."""
+
+    def test_sides_as_string_raises_error(self, tmp_path):
+        """Test that sides = "oops" raises ConfigError naming the key."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text('sides = "oops"')
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(project_dir)
+
+        assert "sides" in str(exc_info.value).lower()
+
+    def test_debate_as_integer_raises_error(self, tmp_path):
+        """Test that debate = 5 raises ConfigError naming the key."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text("debate = 5")
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(project_dir)
+
+        assert "debate" in str(exc_info.value).lower()
+
+    def test_side_with_non_table_value_raises_error(self, tmp_path):
+        """Test that [sides.claude] with non-table value raises ConfigError."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text('[sides]\nclaude = "oops"')
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(project_dir)
+
+        assert "claude" in str(exc_info.value).lower() and "table" in str(exc_info.value).lower()
+
+
 class TestConfigErrorException:
     """Test ConfigError exception."""
 
