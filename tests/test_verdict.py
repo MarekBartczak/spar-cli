@@ -195,6 +195,50 @@ remarks:
         assert verdict.status == "AGREE"
         assert verdict.remarks == (Remark(severity=Severity.NICE, text="final remark"),)
 
+    def test_stray_verdict_tag_in_prose_before_complete_block_still_errors(self):
+        """A literal, unclosed '<verdict>' mention in prose *before* the real
+        block gets swallowed into the same non-greedy regex match (it pairs
+        with the real block's closing tag), which corrupts the captured
+        content and raises. This is the chosen/documented behavior for this
+        edge case: a stray earlier opening tag does not trigger the
+        "truncated trailing block" error (it's not after the last complete
+        pair), but it does still make the block content unparsable.
+        """
+        text = (
+            "Some prose mentioning <verdict> casually without closing it here.\n\n"
+            "<verdict>\n"
+            "status: AGREE\n"
+            "remarks:\n"
+            "- [NICE] ok\n"
+            "</verdict>\n"
+        )
+        with pytest.raises(VerdictError):
+            parse_verdict(text)
+
+
+class TestTruncatedTrailingBlock:
+    def test_complete_block_then_truncated_second_block_raises(self):
+        """A complete block followed later by a second '<verdict>' that never
+        closes must not silently fall back to the earlier (possibly stale)
+        complete block -- the reply was truncated and that's an error.
+        """
+        text = """
+<verdict>
+status: CONTINUE
+remarks:
+- [MUST] real remark that must not be silently used
+</verdict>
+
+More back and forth happens here, then the response gets cut off mid-stream.
+
+<verdict>
+status: AGREE
+remarks:
+- [NICE] this second block never closes
+"""
+        with pytest.raises(VerdictError):
+            parse_verdict(text)
+
 
 class TestResolvedEntries:
     def test_accepted_entry(self):
@@ -268,6 +312,11 @@ class TestErrors:
             "<verdict>\nstatus: CONTINUE\nresolved:\n"
             "- #7 accepted\n- #7 rejected: changed my mind\n</verdict>"
         )
+        with pytest.raises(VerdictError):
+            parse_verdict(text)
+
+    def test_duplicate_status_line_raises(self):
+        text = "<verdict>\nstatus: AGREE\nstatus: CONTINUE\n</verdict>"
         with pytest.raises(VerdictError):
             parse_verdict(text)
 

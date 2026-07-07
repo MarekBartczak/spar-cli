@@ -20,7 +20,7 @@ Grammar::
 
 import enum
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class VerdictError(Exception):
@@ -59,8 +59,8 @@ class Verdict:
     """Fully parsed verdict block."""
 
     status: str  # "AGREE" | "CONTINUE"
-    resolutions: tuple[Resolution, ...] = field(default_factory=tuple)
-    remarks: tuple[Remark, ...] = field(default_factory=tuple)
+    resolutions: tuple[Resolution, ...]
+    remarks: tuple[Remark, ...]
 
     @property
     def has_new_must(self) -> bool:
@@ -84,7 +84,17 @@ def _extract_block(reply_text: str) -> str:
     """Return the contents of the last <verdict>...</verdict> block, or raise."""
     matches = list(_VERDICT_BLOCK_RE.finditer(reply_text))
     if matches:
-        return matches[-1].group(1)
+        last = matches[-1]
+        # If another <verdict> opening tag appears after the end of the last
+        # complete pair, that later block was truncated (never closed) — the
+        # reply is malformed and we must not silently fall back to the
+        # earlier, possibly-stale complete block.
+        if "<verdict>" in reply_text[last.end():]:
+            raise VerdictError(
+                "unclosed <verdict> block after the last complete block: found a "
+                "<verdict> opening tag with no matching </verdict>"
+            )
+        return last.group(1)
     if "<verdict>" in reply_text:
         raise VerdictError("unclosed <verdict> block: found <verdict> with no matching </verdict>")
     raise VerdictError("no <verdict>...</verdict> block found in reply")
@@ -95,8 +105,10 @@ def parse_verdict(reply_text: str) -> Verdict:
     Parse the last <verdict>...</verdict> block found in ``reply_text``.
 
     Raises:
-        VerdictError: on a missing/unclosed block, missing or invalid status,
-            a malformed resolved/remark entry, or a duplicate resolution id.
+        VerdictError: on a missing/unclosed block (including a truncated
+            trailing block after the last complete one), missing/invalid/
+            duplicate status, a malformed resolved/remark entry, or a
+            duplicate resolution id.
     """
     block = _extract_block(reply_text)
 
@@ -117,6 +129,8 @@ def parse_verdict(reply_text: str) -> Verdict:
 
         status_match = _STATUS_RE.match(line)
         if status_match:
+            if status is not None:
+                raise VerdictError("duplicate 'status:' line in verdict block")
             value = status_match.group(1).strip()
             if value not in _VALID_STATUSES:
                 raise VerdictError(
