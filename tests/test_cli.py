@@ -1,113 +1,110 @@
 """Tests for the spar CLI module."""
 
 import pytest
+
+import spar.cli as cli
 from spar.cli import main
 
 
-class TestHelpFlag:
-    """Test --help flag behavior."""
+class _FakeOrch:
+    """Records which run method the CLI drives and returns a sentinel code."""
 
+    def __init__(self, code):
+        self.code = code
+        self.ran_new = None
+        self.ran_continue = False
+
+    def run_new(self, task_prompt):
+        self.ran_new = task_prompt
+        return self.code
+
+    def run_continue(self):
+        self.ran_continue = True
+        return self.code
+
+
+@pytest.fixture
+def fake_orch(monkeypatch):
+    """Replace ``_build_orchestrator`` so no real adapters/subprocesses run."""
+    holder = {}
+
+    def _build(args, config):
+        orch = _FakeOrch(code=holder.get("code", 0))
+        holder["orch"] = orch
+        return orch
+
+    monkeypatch.setattr(cli, "_build_orchestrator", _build)
+    return holder
+
+
+class TestHelpFlag:
     def test_help_exits_zero(self, capsys):
-        """Test that --help exits with code 0."""
         with pytest.raises(SystemExit) as exc_info:
             main(["--help"])
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "usage:" in captured.out or "usage" in captured.out
+        assert "usage" in captured.out
 
 
-class TestNoArguments:
-    """Test behavior with no arguments."""
-
+class TestUsageErrors:
     def test_no_args_errors(self):
-        """Test that no arguments produces an error."""
         with pytest.raises(SystemExit) as exc_info:
             main([])
         assert exc_info.value.code == 2
 
-
-class TestMutualExclusion:
-    """Test mutual exclusion of prompt and --continue."""
-
     def test_prompt_and_continue_together_errors(self):
-        """Test that prompt and --continue together produce an error."""
         with pytest.raises(SystemExit) as exc_info:
             main(["some prompt", "--continue"])
         assert exc_info.value.code == 2
 
-    def test_empty_string_prompt_and_continue_errors(self):
-        """Test that empty string prompt and --continue together produce an error."""
-        with pytest.raises(SystemExit) as exc_info:
-            main(["", "--continue"])
-        assert exc_info.value.code == 2
-
-
-class TestFirstValidation:
-    """Test --first validation against --sides."""
-
     def test_first_not_in_sides_errors(self):
-        """Test that --first must be one of the --sides values."""
         with pytest.raises(SystemExit) as exc_info:
             main(["prompt", "--first", "gemini"])
         assert exc_info.value.code == 2
 
 
-class TestValidPrompt:
-    """Test valid prompt invocation."""
-
-    def test_valid_prompt_returns_2_and_prints_stub(self, capsys):
-        """Test that valid prompt returns 2 and prints the stub message."""
+class TestWiring:
+    def test_valid_prompt_runs_new(self, fake_orch):
+        fake_orch["code"] = 0
         result = main(["my prompt"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+        assert result == 0
+        assert fake_orch["orch"].ran_new == "my prompt"
+        assert fake_orch["orch"].ran_continue is False
 
-    def test_empty_string_prompt_returns_2_and_prints_stub(self, capsys):
-        """Test that empty string prompt is accepted and returns 2 with stub message."""
-        result = main([""])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
-
-
-class TestValidContinue:
-    """Test valid --continue invocation."""
-
-    def test_valid_continue_returns_2_and_prints_stub(self, capsys):
-        """Test that valid --continue returns 2 and prints the stub message."""
+    def test_continue_runs_continue(self, fake_orch):
+        fake_orch["code"] = 3
         result = main(["--continue"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+        assert result == 3
+        assert fake_orch["orch"].ran_continue is True
+        assert fake_orch["orch"].ran_new is None
+
+    def test_exit_code_is_propagated(self, fake_orch):
+        fake_orch["code"] = 5
+        assert main(["do a thing"]) == 5
 
 
-class TestArgumentParsing:
-    """Test argument parsing with various combinations."""
+class TestBuildOrchestrator:
+    def test_order_places_first_side_first(self):
+        from spar.config import load_config
+        from pathlib import Path
 
-    def test_valid_prompt_with_sides(self, capsys):
-        """Test valid prompt with custom sides."""
-        result = main(["prompt", "--sides", "claude,openai"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt", "--sides", "claude,codex", "--first", "codex"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.order == ["codex", "claude"]
 
-    def test_valid_prompt_with_first_in_sides(self, capsys):
-        """Test valid prompt with --first that is in --sides."""
-        result = main(["prompt", "--sides", "claude,codex", "--first", "codex"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+    def test_unknown_side_is_usage_error(self):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["prompt", "--sides", "claude,ghost", "--first", "ghost"])
+        assert exc_info.value.code == 2
 
-    def test_valid_prompt_with_max_rounds(self, capsys):
-        """Test valid prompt with custom max-rounds."""
-        result = main(["prompt", "--max-rounds", "10"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+    def test_max_rounds_override(self):
+        from spar.config import load_config
+        from pathlib import Path
 
-    def test_valid_prompt_with_artifact(self, capsys):
-        """Test valid prompt with custom artifact path."""
-        result = main(["prompt", "--artifact", "output.md"])
-        assert result == 2
-        captured = capsys.readouterr()
-        assert captured.err == "spar: not implemented yet\n"
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt", "--max-rounds", "11"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.debate.max_rounds == 11
