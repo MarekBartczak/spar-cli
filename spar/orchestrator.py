@@ -420,6 +420,11 @@ class Orchestrator:
             self.log(f"spar: cannot load debate state: {exc}")
             return 3
 
+        mismatch = self._check_sides_match(state)
+        if mismatch is not None:
+            self.log(mismatch)
+            return 3
+
         task_prompt = self._load_task()
         if task_prompt is None:
             self.log(
@@ -492,13 +497,46 @@ class Orchestrator:
         self.log(f"spar: unknown recovery status {status!r}.")  # pragma: no cover
         return None
 
+    def _check_sides_match(self, state: DebateState) -> str | None:
+        """Verify the persisted debate's sides match this orchestrator's.
+
+        Returns an error message (and does not raise) if ``state.sides``
+        or ``state.last_actor`` reference side names outside ``self.order``,
+        so the caller can abort cleanly instead of hitting an uncaught
+        ``ValueError``/``KeyError`` deeper in the debate loop.
+        """
+        persisted = set(state.sides.keys())
+        configured = set(self.order)
+        if persisted != configured:
+            return (
+                "spar: persisted debate sides do not match the configured "
+                f"sides: persisted={sorted(persisted)}, "
+                f"configured={sorted(configured)}."
+            )
+        if state.last_actor is not None and state.last_actor not in self.order:
+            return (
+                "spar: persisted last_actor "
+                f"{state.last_actor!r} is not among the configured sides "
+                f"{sorted(self.order)}."
+            )
+        return None
+
     # -- the debate loop -----------------------------------------------
 
     def _debate_loop(
         self, state: DebateState, task_prompt: str, next_idx: int, budget: int
     ) -> int:
         while True:
-            if is_consensus(state, state.artifact_hash, self.order):
+            try:
+                current_artifact_hash = hash_artifact(self.artifact_path)
+            except StateError:
+                self.log(
+                    "spar: cannot check consensus — artifact file missing: "
+                    f"{self.artifact_path}"
+                )
+                raise _Abort(4)
+
+            if is_consensus(state, current_artifact_hash, self.order):
                 code = self._handle_consensus(state)
                 if code is not None:
                     return code

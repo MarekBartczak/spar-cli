@@ -630,6 +630,106 @@ def test_continue_artifact_changed_consults_recovery_gate(tmp_path):
     assert gate.recovery_calls[0][1] == old_hash
 
 
+def test_continue_out_of_band_edit_blocks_stale_consensus(tmp_path):
+    # Both sides AGREEd and their recorded hashes (and state.artifact_hash)
+    # all match h1. But the artifact was then edited out-of-band (no turn in
+    # progress), so the file on disk is now h2. Consensus must be re-checked
+    # against the actual on-disk hash, not the stale recorded one -> both
+    # sides must speak again before consensus can fire.
+    gate = FakeGate(consensus=[GateDecision("accept")])
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(tmp_path, steps, order, gate)
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v1", encoding="utf-8")
+    h1 = hash_artifact(artifact)
+
+    state = DebateState(
+        round=1,
+        last_actor="B",
+        artifact_hash=h1,
+        turn_in_progress=None,
+        sides={
+            "A": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+            "B": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+        },
+    )
+    _seed_state(store, artifact, state)
+
+    # Out-of-band edit after both AGREEd: disk now differs from h1, though
+    # state.artifact_hash and both sides' recorded hashes still say h1.
+    artifact.write_text("v1-edited-outside-the-debate", encoding="utf-8")
+
+    adapters["A"].steps = [Step(vblock("AGREE"), artifact=artifact)]
+    adapters["B"].steps = [Step(vblock("AGREE"), artifact=artifact)]
+
+    code = orch.run_continue()
+    assert code == 0
+    # Consensus did NOT fire immediately off the stale recorded hash: both
+    # sides had to actually take a turn and re-confirm at the new hash.
+    assert len(adapters["A"].calls) == 1
+    assert len(adapters["B"].calls) == 1
+    assert len(gate.consensus_calls) == 1
+
+
+def test_continue_consensus_fires_when_disk_matches_recorded_hash(tmp_path):
+    # Same setup as above, but nobody touched the file out-of-band: the
+    # on-disk hash still matches the recorded consensus hash, so consensus
+    # must fire immediately without requiring another turn from either side.
+    gate = FakeGate(consensus=[GateDecision("accept")])
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(tmp_path, steps, order, gate)
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v1", encoding="utf-8")
+    h1 = hash_artifact(artifact)
+
+    state = DebateState(
+        round=1,
+        last_actor="B",
+        artifact_hash=h1,
+        turn_in_progress=None,
+        sides={
+            "A": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+            "B": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+        },
+    )
+    _seed_state(store, artifact, state)
+
+    code = orch.run_continue()
+    assert code == 0
+    assert adapters["A"].calls == []
+    assert adapters["B"].calls == []
+    assert len(gate.consensus_calls) == 1
+
+
+def test_debate_loop_aborts_4_when_artifact_missing_at_consensus_check(tmp_path):
+    gate = FakeGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(tmp_path, steps, order, gate)
+
+    h1 = "sha256:" + "0" * 64
+    state = DebateState(
+        round=1,
+        last_actor="B",
+        artifact_hash=h1,
+        turn_in_progress=None,
+        sides={
+            "A": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+            "B": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+        },
+    )
+    _seed_state(store, artifact, state)
+    # artifact.md is never written -> missing on disk.
+
+    code = orch.run_continue()
+    assert code == 4
+    assert any("missing" in m and str(artifact) in m for m in logs)
+
+
 def test_continue_missing_state_returns_3(tmp_path):
     gate = FakeGate()
     order = ["A", "B"]
@@ -637,6 +737,66 @@ def test_continue_missing_state_returns_3(tmp_path):
     orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
     code = orch.run_continue()
     assert code == 3
+
+
+def test_continue_side_mismatch_returns_3_no_traceback(tmp_path):
+    # Persisted debate was between "claude"/"codex"; this orchestrator is
+    # configured with a completely different pair of side names.
+    gate = FakeGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(tmp_path, steps, order, gate)
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v0", encoding="utf-8")
+    h0 = hash_artifact(artifact)
+
+    state = DebateState(
+        round=0,
+        last_actor="claude",
+        artifact_hash=h0,
+        sides={
+            "claude": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h0),
+            "codex": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h0),
+        },
+    )
+    _seed_state(store, artifact, state)
+
+    code = orch.run_continue()
+    assert code == 3
+    assert any("claude" in m and "codex" in m for m in logs)
+    assert any("A" in m and "B" in m for m in logs)
+    # no adapter was ever invoked
+    assert adapters["A"].calls == []
+    assert adapters["B"].calls == []
+
+
+def test_continue_last_actor_outside_order_returns_3(tmp_path):
+    # sides match self.order, but last_actor references a name that isn't
+    # one of them (corrupted/foreign state file).
+    gate = FakeGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(tmp_path, steps, order, gate)
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v0", encoding="utf-8")
+    h0 = hash_artifact(artifact)
+
+    state = DebateState(
+        round=0,
+        last_actor="ghost",
+        artifact_hash=h0,
+        sides={
+            "A": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h0),
+            "B": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h0),
+        },
+    )
+    _seed_state(store, artifact, state)
+
+    code = orch.run_continue()
+    assert code == 3
+    assert any("ghost" in m for m in logs)
 
 
 # ---------------------------------------------------------------------------
