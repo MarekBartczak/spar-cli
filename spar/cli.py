@@ -7,6 +7,7 @@ from pathlib import Path
 from spar.adapters.claude import ClaudeAdapter
 from spar.adapters.codex import CodexAdapter
 from spar.config import ConfigError, DebateConfig, load_config
+from spar.guard import Guard
 from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
 
@@ -78,14 +79,16 @@ def _build_orchestrator(args, config) -> Orchestrator:
         )
 
     store = StateStore(Path(".spar"))
+    artifact_path = Path(args.artifact)
+    guard = Guard(repo_dir=cwd, artifact_path=artifact_path, spar_dir=Path(".spar"))
     return Orchestrator(
         sides=adapters,
         order=order,
         store=store,
-        artifact_path=Path(args.artifact),
+        artifact_path=artifact_path,
         debate=debate,
         gate=ConsoleGate(),
-        guard=None,
+        guard=guard,
     )
 
 

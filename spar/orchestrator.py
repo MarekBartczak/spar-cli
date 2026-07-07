@@ -621,6 +621,10 @@ class Orchestrator:
         guard_warning: str | None = None
 
         for attempt in range(2):  # attempt 0, plus at most one guard retry
+            pre_turn = getattr(self.guard, "pre_turn", None)
+            if pre_turn is not None:
+                pre_turn()
+
             hash_before = (
                 None if kind == "creation" else hash_artifact(self.artifact_path)
             )

@@ -500,6 +500,50 @@ def test_guard_violation_retries_whole_turn(tmp_path):
     assert state.sides["A"].last_verdict_status == "CONTINUE"
 
 
+def test_guard_with_pre_turn_is_called_before_each_adapter_turn(tmp_path):
+    class RecordingGuard:
+        def __init__(self):
+            self.pre_turn_calls = 0
+            self.call_calls = 0
+
+        def pre_turn(self):
+            self.pre_turn_calls += 1
+
+        def __call__(self, ctx: GuardContext):
+            self.call_calls += 1
+
+    guard = RecordingGuard()
+    gate = FakeGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate, guard=guard)
+
+    adapters["A"].steps = [Step(vblock("CONTINUE"), write="v0", artifact=artifact)]
+    state = DebateState(sides={"A": SideState(), "B": SideState()})
+    orch._take_turn(state, "A", "creation", "t", is_round_end=False)
+
+    assert guard.pre_turn_calls == 1
+    assert guard.call_calls == 1
+
+
+def test_plain_callable_guard_without_pre_turn_still_works(tmp_path):
+    # A guard that is just a plain callable (no pre_turn attribute) must not
+    # break -- the getattr-based pre_turn wiring should simply skip it.
+    def guard(ctx: GuardContext):
+        pass
+
+    gate = FakeGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate, guard=guard)
+
+    adapters["A"].steps = [Step(vblock("CONTINUE"), write="v0", artifact=artifact)]
+    state = DebateState(sides={"A": SideState(), "B": SideState()})
+    orch._take_turn(state, "A", "creation", "t", is_round_end=False)
+
+    assert state.sides["A"].last_verdict_status == "CONTINUE"
+
+
 def test_guard_second_violation_aborts_4(tmp_path):
     def guard(ctx: GuardContext):
         raise GuardViolation("nope")
