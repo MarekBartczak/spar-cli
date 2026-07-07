@@ -35,6 +35,12 @@ class TestMutualExclusion:
             main(["some prompt", "--continue"])
         assert exc_info.value.code == 2
 
+    def test_empty_string_prompt_and_continue_errors(self):
+        """Test that empty string prompt and --continue together produce an error."""
+        with pytest.raises(SystemExit) as exc_info:
+            main(["", "--continue"])
+        assert exc_info.value.code == 2
+
 
 class TestFirstValidation:
     """Test --first validation against --sides."""
@@ -52,6 +58,13 @@ class TestValidPrompt:
     def test_valid_prompt_returns_2_and_prints_stub(self, capsys):
         """Test that valid prompt returns 2 and prints the stub message."""
         result = main(["my prompt"])
+        assert result == 2
+        captured = capsys.readouterr()
+        assert captured.err == "spar: not implemented yet\n"
+
+    def test_empty_string_prompt_returns_2_and_prints_stub(self, capsys):
+        """Test that empty string prompt is accepted and returns 2 with stub message."""
+        result = main([""])
         assert result == 2
         captured = capsys.readouterr()
         assert captured.err == "spar: not implemented yet\n"

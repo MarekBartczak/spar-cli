@@ -55,11 +55,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     # Validation 1: prompt and --continue are mutually exclusive
-    if args.prompt and args.cont:
+    if args.prompt is not None and args.cont:
         parser.error("prompt and --continue are mutually exclusive")
 
     # Validation 2: one of them is required
-    if not args.prompt and not args.cont:
+    if args.prompt is None and not args.cont:
         parser.error("either prompt or --continue is required")
 
     # Validation 3: --first must be one of the --sides values
