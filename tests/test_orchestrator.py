@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from spar.adapters.base import SessionLost, TurnResult
-from spar.config import DebateConfig
+from spar.config import DebateConfig, SideConfig
 from spar.orchestrator import (
     ConsoleGate,
     GateDecision,
@@ -106,14 +106,32 @@ class FakeGate:
         return self.recovery.pop(0)
 
 
-def build_orch(tmp_path, sides_steps, order, gate, guard=None, max_rounds=6):
+def build_orch(
+    tmp_path,
+    sides_steps,
+    order,
+    gate,
+    guard=None,
+    max_rounds=6,
+    side_configs=None,
+    require_tasks=False,
+):
     adapters = {name: FakeAdapter(name, steps) for name, steps in sides_steps.items()}
     store = StateStore(tmp_path / ".spar")
     artifact = tmp_path / ".spar" / "artifact.md"
     debate = DebateConfig(max_rounds=max_rounds, turn_timeout_sec=10)
     logs = []
     orch = Orchestrator(
-        adapters, order, store, artifact, debate, gate, guard=guard, log=logs.append
+        adapters,
+        order,
+        store,
+        artifact,
+        debate,
+        gate,
+        guard=guard,
+        log=logs.append,
+        side_configs=side_configs,
+        require_tasks=require_tasks,
     )
     return orch, adapters, artifact, store, logs
 
@@ -181,6 +199,127 @@ def test_build_verdict_retry_prompt_variant():
     assert "valid <verdict> block" in prompt
     assert "Do NOT edit the artifact" in prompt
     assert "prose" not in prompt  # quotes nothing
+
+
+def test_build_turn_prompt_require_tasks_injects_tasks_contract():
+    prompt = build_turn_prompt(
+        side_name="claude",
+        artifact_path=Path("art.md"),
+        artifact_hash="sha256:z",
+        open_remarks=[],
+        task_prompt="t",
+        require_tasks=True,
+        catalogs={"claude": ("opus", "sonnet"), "codex": ("gpt-5.5",)},
+    )
+    # The machine-parsable section is demanded, with the §4.1 grammar skeleton.
+    assert "## Tasks" in prompt
+    assert "side=" in prompt
+    assert "model=" in prompt
+    assert "review=" in prompt
+    assert "deps=" in prompt
+    assert "files=" in prompt
+    # Each side's available models are listed so agents assign valid ones.
+    assert "opus" in prompt
+    assert "sonnet" in prompt
+    assert "gpt-5.5" in prompt
+    # It must appear before the protocol block.
+    assert prompt.index("## Tasks") < prompt.index("<verdict>")
+
+
+def test_build_turn_prompt_default_omits_tasks_contract():
+    prompt = build_turn_prompt(
+        side_name="claude",
+        artifact_path=Path("art.md"),
+        artifact_hash="sha256:z",
+        open_remarks=[],
+        task_prompt="t",
+    )
+    assert "## Tasks" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Task-list bridge (--tasks): consensus gating on the ## Tasks section
+# ---------------------------------------------------------------------------
+
+
+_BRIDGE_SIDES = {
+    "A": SideConfig(adapter="claude", command="claude", models=("opus", "sonnet")),
+    "B": SideConfig(adapter="codex", command="codex", models=("gpt-5.5", "gpt-5.4")),
+}
+
+NO_TASKS_ARTIFACT = "# Plan\nno tasks here\n"
+
+VALID_TASKS_ARTIFACT = (
+    "# Plan\nstuff\n"
+    "## Tasks\n"
+    "- [t1] do a thing | side=A | model=opus | review=gpt-5.5 | deps=- | files=x.py\n"
+)
+
+
+def test_require_tasks_blocks_consensus_until_tasks_valid(tmp_path):
+    gate = FakeGate(consensus=[GateDecision("accept")])
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(
+        tmp_path, steps, order, gate, side_configs=_BRIDGE_SIDES, require_tasks=True
+    )
+
+    adapters["A"].steps = [
+        Step(vblock("DONE"), write=NO_TASKS_ARTIFACT, artifact=artifact),  # creation -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (invalid-tasks consensus)
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (valid-tasks consensus)
+    ]
+    adapters["B"].steps = [
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (invalid-tasks consensus)
+        # After the MUST remark is injected, B fixes the ## Tasks section.
+        Step(
+            vblock("AGREE", resolved=["#1 accepted"]),
+            write=VALID_TASKS_ARTIFACT,
+            artifact=artifact,
+        ),
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> real consensus
+    ]
+
+    code = orch.run_new("plan a thing")
+    assert code == 0
+    # The user gate is reached exactly once, only after tasks parse.
+    assert len(gate.consensus_calls) == 1
+
+    st = store.load()
+    assert st.sides["A"].last_verdict_status == "DONE"
+    assert st.sides["B"].last_verdict_status == "DONE"
+    # A MUST remark authored by "spar" was injected and later resolved.
+    assert len(st.resolved_remarks) == 1
+    injected = st.resolved_remarks[0].remark
+    assert injected.severity == Severity.MUST
+    assert injected.author == "spar"
+    assert "## Tasks" in injected.text
+    assert st.pending_remarks == []
+    # The final artifact carries a parsable ## Tasks section.
+    assert "## Tasks" in artifact.read_text()
+
+
+def test_require_tasks_false_finalizes_without_tasks_section(tmp_path):
+    """Regression guard: with the bridge off, a plan lacking ## Tasks still
+    reaches consensus immediately (generic debate behavior unchanged)."""
+    gate = FakeGate(consensus=[GateDecision("accept")])
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(
+        tmp_path, steps, order, gate, side_configs=_BRIDGE_SIDES, require_tasks=False
+    )
+
+    adapters["A"].steps = [
+        Step(vblock("DONE"), write=NO_TASKS_ARTIFACT, artifact=artifact),  # creation -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE
+    ]
+    adapters["B"].steps = [
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus immediately
+    ]
+
+    code = orch.run_new("plan a thing")
+    assert code == 0
+    assert len(gate.consensus_calls) == 1
 
 
 # ---------------------------------------------------------------------------

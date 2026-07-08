@@ -46,6 +46,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Artifact file path (default: .spar/artifact.md)",
     )
     parser.add_argument(
+        "--tasks", dest="tasks", action="store_true",
+        help="Require the agreed plan to end with a machine-parsable '## Tasks' "
+             "section (opt-in bridge to 'spar exec'); off by default",
+    )
+    parser.add_argument(
         "-m", "--adapter", choices=sorted(_ADAPTERS),
         help="Side whose CLI command to configure (used with -setCommand)",
     )
@@ -105,6 +110,8 @@ def _build_orchestrator(args, config) -> Orchestrator:
         debate=debate,
         gate=ConsoleGate(),
         guard=guard,
+        side_configs=config.sides,
+        require_tasks=args.tasks,
     )
 
 

@@ -111,6 +111,53 @@ class TestBuildOrchestrator:
         orch = cli._build_orchestrator(args, config)
         assert orch.debate.max_rounds == 11
 
+    def test_tasks_flag_threads_require_tasks_and_side_configs(self):
+        from spar.config import load_config
+        from pathlib import Path
+
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt", "--tasks"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.require_tasks is True
+        assert orch.side_configs == config.sides
+
+    def test_default_has_require_tasks_false(self):
+        from spar.config import load_config
+        from pathlib import Path
+
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.require_tasks is False
+
+
+class TestTasksFlagWiring:
+    """`main(...)` threads the --tasks flag through to _build_orchestrator."""
+
+    def test_tasks_flag_reaches_build(self, monkeypatch):
+        captured = {}
+
+        def _build(args, config):
+            captured["tasks"] = args.tasks
+            return _FakeOrch(code=0)
+
+        monkeypatch.setattr(cli, "_build_orchestrator", _build)
+        assert main(["prompt", "--tasks"]) == 0
+        assert captured["tasks"] is True
+
+    def test_no_tasks_flag_defaults_false(self, monkeypatch):
+        captured = {}
+
+        def _build(args, config):
+            captured["tasks"] = args.tasks
+            return _FakeOrch(code=0)
+
+        monkeypatch.setattr(cli, "_build_orchestrator", _build)
+        assert main(["prompt"]) == 0
+        assert captured["tasks"] is False
+
 
 class TestSetCommandMode:
     """`spar -m <side> -setCommand <binary>` persists a global command override."""

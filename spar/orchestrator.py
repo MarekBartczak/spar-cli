@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from spar.adapters.base import Adapter, AdapterError, SessionLost, TurnResult
-from spar.config import DebateConfig
+from spar.config import DebateConfig, SideConfig
+from spar.exec.tasklist import TaskListError, parse_task_list
 from spar.state import (
     DebateState,
     LockHeld,
@@ -244,6 +245,47 @@ def _format_remarks(open_remarks: list[StateRemark]) -> str:
     return "\n".join(lines)
 
 
+def _format_tasks_contract(catalogs: dict[str, tuple[str, ...]] | None) -> str:
+    """The opt-in `## Tasks` planning contract appended to a turn prompt.
+
+    Instructs the sides that the final agreed plan MUST end with a machine-
+    parsable ``## Tasks`` section (the §4.1 grammar), lists each side's model
+    catalog so assignments are valid, and states that consensus is gated on
+    the section parsing.
+    """
+    catalogs = catalogs or {}
+    lines = [
+        "TASK-LIST REQUIREMENT (this debate feeds the execution engine):",
+        "The final agreed plan MUST end with a `## Tasks` section listing one "
+        "task per line in EXACTLY this grammar:",
+        "",
+        "## Tasks",
+        "- [t<n>] <desc> | side=<side> | model=<impl-model> | "
+        "review=<review-model> | deps=<id,id|-> | files=<glob,glob>",
+        "",
+        "Rules:",
+        "- side is one of the configured sides: "
+        + ", ".join(catalogs.keys())
+        + ".",
+        "- model is one of THAT side's models (its catalog, below).",
+        "- review is one of the OTHER side's models (the reviewer is the "
+        "non-implementing side).",
+        "- deps is a comma list of earlier task ids this task depends on, or "
+        "`-` for none.",
+        "- files is a comma list of globs naming the task's file scope.",
+        "",
+        "Model catalogs (assign only models a side actually has):",
+    ]
+    for side, models in catalogs.items():
+        lines.append(f"- {side}: {', '.join(models)}")
+    lines.append("")
+    lines.append(
+        "Consensus is NOT accepted until this `## Tasks` section parses; a "
+        "missing or malformed section will be sent back as a blocking remark."
+    )
+    return "\n".join(lines)
+
+
 def build_turn_prompt(
     *,
     side_name: str,
@@ -252,6 +294,8 @@ def build_turn_prompt(
     open_remarks: list[StateRemark],
     task_prompt: str,
     kind: str = "turn",
+    catalogs: dict[str, tuple[str, ...]] | None = None,
+    require_tasks: bool = False,
 ) -> str:
     """Pure, unit-testable builder for the prompt handed to a side.
 
@@ -307,8 +351,10 @@ def build_turn_prompt(
         "Original task (for context):",
         task_prompt,
         "",
-        PROTOCOL_BLOCK,
     ]
+    if require_tasks:
+        parts += [_format_tasks_contract(catalogs), ""]
+    parts.append(PROTOCOL_BLOCK)
     return "\n".join(parts)
 
 
@@ -368,6 +414,8 @@ class Orchestrator:
         gate: UserGate,
         guard: GuardHook | None = None,
         log=print,
+        side_configs: dict[str, SideConfig] | None = None,
+        require_tasks: bool = False,
     ) -> None:
         if len(order) < 2:
             raise ValueError("a debate needs at least two sides")
@@ -382,6 +430,8 @@ class Orchestrator:
         self.gate = gate
         self.guard = guard
         self.log = log
+        self.side_configs = side_configs
+        self.require_tasks = require_tasks
 
     # -- public entry points -------------------------------------------
 
@@ -550,6 +600,8 @@ class Orchestrator:
                 raise _Abort(4)
 
             if is_consensus(state, self.order):
+                if self.require_tasks and not self._tasks_section_valid(state):
+                    continue  # tasks invalid; remark injected, keep debating
                 code = self._handle_consensus(state)
                 if code is not None:
                     return code
@@ -566,6 +618,44 @@ class Orchestrator:
             is_round_end = next_idx == len(self.order) - 1
             self._take_turn(state, actor, "turn", task_prompt, is_round_end)
             next_idx = 0 if is_round_end else next_idx + 1
+
+    def _tasks_section_valid(self, state: DebateState) -> bool:
+        """Validate the artifact's ``## Tasks`` section at consensus.
+
+        On success returns True (the debate may finalize). On a
+        :class:`TaskListError` the debate is un-consensus'd: a blocking
+        ``MUST`` remark describing the failure is injected, every side's
+        ``last_verdict_status`` is reset to ``None`` (so the sides must speak
+        again after fixing the section), the state is persisted, and False is
+        returned so the loop keeps debating.
+        """
+        artifact_text = self.artifact_path.read_text(encoding="utf-8")
+        try:
+            parse_task_list(
+                artifact_text, sides=self.side_configs or {}, order=self.order
+            )
+            return True
+        except TaskListError as exc:
+            text = (
+                "The plan's `## Tasks` section is missing or invalid: "
+                f"{exc}. Fix its format per the grammar."
+            )
+            state.pending_remarks.append(
+                StateRemark(
+                    remark_id=state.next_remark_id,
+                    severity=Severity.MUST,
+                    author="spar",
+                    text=text,
+                )
+            )
+            state.next_remark_id += 1
+            for name in self.order:
+                state.sides[name] = replace(
+                    state.sides[name], last_verdict_status=None
+                )
+            self.store.save(state)
+            self.log(f"spar: consensus rejected — {text}")
+            return False
 
     def _handle_consensus(self, state: DebateState) -> int | None:
         nice = [r for r in state.pending_remarks if r.severity == Severity.NICE]
@@ -858,6 +948,7 @@ class Orchestrator:
         task_prompt: str,
         warning: str | None,
     ) -> str:
+        catalogs = self._catalogs() if self.require_tasks else None
         if kind == "creation":
             base = build_turn_prompt(
                 side_name=side,
@@ -866,6 +957,8 @@ class Orchestrator:
                 open_remarks=[],
                 task_prompt=task_prompt,
                 kind="creation",
+                catalogs=catalogs,
+                require_tasks=self.require_tasks,
             )
         else:
             base = build_turn_prompt(
@@ -875,10 +968,21 @@ class Orchestrator:
                 open_remarks=list(state.pending_remarks),
                 task_prompt=task_prompt,
                 kind="turn",
+                catalogs=catalogs,
+                require_tasks=self.require_tasks,
             )
         if warning:
             return f"{warning}\n\n{base}"
         return base
+
+    def _catalogs(self) -> dict[str, tuple[str, ...]]:
+        """Per-side model catalogs (in debate order) for the tasks contract."""
+        cfgs = self.side_configs or {}
+        return {
+            name: cfgs[name].models
+            for name in self.order
+            if name in cfgs
+        }
 
     def _save_task(self, task_prompt: str) -> None:
         (self.store.spar_dir / _TASK_FILENAME).write_text(task_prompt, encoding="utf-8")
