@@ -26,8 +26,12 @@ def test_impl_prompt_does_not_invite_self_judgment():
     p = build_impl_prompt(
         T, Path(".spar/artifact.md"), [StateRemark(3, Severity.MUST, "codex", "fix X")]
     )
-    assert "raise your own" not in p.lower()
-    assert "remarks:" not in p
+    low = p.lower()
+    assert "raise your own" not in low
+    # the prompt explicitly forbids a `remarks:` section (the implementer never
+    # raises remarks) -- the literal substring "remarks:" appears only inside
+    # that prohibition, never as an invitation to emit one.
+    assert "do not include a `remarks:` section" in low or "you do not raise remarks" in low
     assert "resolved:" in p
 
 
@@ -74,3 +78,40 @@ def test_impl_prompt_review_response_requires_edit_for_accepted():
     # the code change is primary but the verdict still records it
     assert "resolved:" in p
     assert "DONE" in p and "do not emit done" in low
+    # still forbid raising remarks
+    assert "do not include a `remarks:` section" in low or "you do not raise remarks" in low
+
+
+def test_impl_prompt_no_remarks_leads_with_imperative_not_review():
+    # The primary directive must be unmistakable: write the files now, this is
+    # not a review. The verdict is a trailing formality.
+    p = build_impl_prompt(T, Path(".spar/artifact.md"), [])
+    low = p.lower()
+    assert "create/edit" in low
+    assert "on disk now" in low
+    for f in T.files:
+        assert f in p
+    assert "not a review" in low
+    # with no open remarks, the prompt must tell the model to OMIT resolved:
+    # entirely rather than write any placeholder line.
+    assert "omit" in low and "resolved:" in low
+    assert "placeholder" in low
+    # forbid remarks:/DONE
+    assert "do not include a `remarks:` section" in low or "you do not raise remarks" in low
+    assert "do not emit done" in low
+
+
+def test_impl_prompt_with_remarks_resolves_ids_and_still_forces_edit():
+    # Open remarks -> must instruct resolving each id AND still making the real
+    # edit on disk; still forbid remarks:/DONE.
+    p = build_impl_prompt(
+        T,
+        Path(".spar/artifact.md"),
+        [StateRemark(7, Severity.MUST, "codex", "fix X")],
+    )
+    low = p.lower()
+    assert "#7" in p
+    assert "create/edit" in low or "on disk" in low
+    assert "accepted" in low and "rejected" in low
+    assert "do not include a `remarks:` section" in low or "you do not raise remarks" in low
+    assert "do not emit done" in low

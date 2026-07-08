@@ -448,6 +448,58 @@ def test_anti_spin_does_not_trip_legit_progress(env):
     assert "work.py" in _branch_files(env)
 
 
+def test_implementer_wrong_status_is_coerced_to_continue(env):
+    # A live model treated the implementer turn as a review and emitted the
+    # wrong status (AGREE) while still writing the file and resolving the
+    # remark. The loop must coerce the status to CONTINUE rather than let a
+    # non-reviewer status derail or terminate the cross-review loop.
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(
+            vblock("AGREE", resolved=["#1 accepted"]),
+            edits={"work.py": "print('hi')\n"},
+        ),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] add a docstring"])),
+        Step(vblock("DONE")),
+    ]
+    impl, review, task_state, exec_state, logs = _run(env, task, impl_steps, review_steps)
+
+    assert len(review.calls) == 2
+    assert len(impl.calls) == 1
+    assert len(task_state.resolved_remarks) == 1
+    assert task_state.resolved_remarks[0].resolution == "accepted"
+    assert not [
+        r for r in task_state.pending_remarks if r.severity in (Severity.MUST, Severity.USER)
+    ]
+    assert "work.py" in _branch_files(env)
+    assert exec_state.turn_in_progress is None
+    assert any("coerc" in line.lower() for line in logs)
+
+
+def test_implementer_bare_continue_verdict_with_no_open_remarks_parses(env):
+    # First implementer turn with NO open remarks yet (the reviewer's first
+    # turn raised nothing). A bare `status: CONTINUE` verdict with neither a
+    # `resolved:` nor a `remarks:` section must parse fine and the turn must
+    # apply normally.
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE"), edits={"work.py": "print('hi')\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE")),
+        Step(vblock("DONE")),
+    ]
+    impl, review, task_state, exec_state, logs = _run(env, task, impl_steps, review_steps)
+
+    assert len(review.calls) == 2
+    assert len(impl.calls) == 1
+    assert task_state.pending_remarks == []
+    assert task_state.resolved_remarks == []
+    assert "work.py" in _branch_files(env)
+
+
 def test_impl_own_remarks_not_added_to_ledger(env):
     task = _task(files=("work.py",))
     impl_steps = [

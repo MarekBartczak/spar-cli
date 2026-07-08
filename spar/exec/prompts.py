@@ -37,6 +37,14 @@ def build_impl_prompt(
         A formatted prompt string
     """
     files_list = "\n".join(f"  - {f}" for f in task.files)
+    files_inline = ", ".join(task.files)
+
+    lead = (
+        f"You are IMPLEMENTING task {task.id}. This is a coding task, NOT a review. Using "
+        f"your file-editing tools, CREATE/EDIT the following file(s) on disk NOW with real, "
+        f"working content per the plan: {files_inline}. Do not comment on other tasks, do "
+        "not review the plan, do not just describe changes — write the code."
+    )
 
     if open_remarks:
         remarks_lines = ["Open remarks to address:"]
@@ -44,19 +52,14 @@ def build_impl_prompt(
             remarks_lines.append(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
         remarks_section = "\n" + "\n".join(remarks_lines)
         instruction = (
-            "Your task is to implement the changes according to the plan and address the "
-            "remarks below. For each remark you accept, you MUST make the corresponding real "
-            "code change to the file(s) this turn — a remark marked `accepted` requires an "
-            "actual edit on disk, not a prose acknowledgment. Use your file-editing tools. "
-            "Reject (with a reason) any remark you will not act on."
+            "Implement the task according to the plan and address the remarks below. For "
+            "each remark you accept, you MUST make the corresponding real code change on "
+            "disk this turn — a remark marked `accepted` requires an actual edit, not a "
+            "prose acknowledgment. Reject (with a reason) any remark you will not act on."
         )
     else:
         remarks_section = ""
-        instruction = (
-            "Your task is to implement the task according to the plan. Create/edit the "
-            "file(s) in your scope now, on disk, with real content per the plan. Use your "
-            "file-editing tools. Do not merely describe the change."
-        )
+        instruction = "Implement the task according to the plan. Do not merely describe the change."
 
     warning_section = ""
     if warning:
@@ -65,13 +68,15 @@ def build_impl_prompt(
     protocol = _IMPL_PROTOCOL_BLOCK
 
     return f"""\
+{lead}
+
 Task ID: {task.id}
 Description: {task.description}
 
 Files in scope (edit ONLY these files):
 {files_list}
 
-The implementation plan is located at: {artifact_plan_path}
+Read the plan at {artifact_plan_path} for context.
 
 {instruction}{remarks_section}{warning_section}
 
@@ -121,7 +126,9 @@ Review the following diff (read-only — you must NOT edit code):
 
 
 _IMPL_PROTOCOL_BLOCK = """\
-End your reply with EXACTLY ONE verdict block, using this syntax verbatim:
+After you have written the files, end your reply with a verdict block. This is a trailing
+formality that records what you already did on disk — it does not substitute for the edit
+itself:
 
 <verdict>
 status: CONTINUE
@@ -130,18 +137,15 @@ resolved:
 - #9 rejected: <one-line reason you disagree>
 </verdict>
 
-Protocol for implementation:
-- Make the change by creating/editing files ON DISK with your file-editing tools — real
-  content per the plan, not a description of it. The verdict only RECORDS what you did on
-  disk; the actual edit is what counts.
-- Edit ONLY the files listed in the file scope above.
-- A remark you mark `accepted` REQUIRES a matching real edit on disk this turn. Never mark a
-  remark accepted without making the corresponding code change; if you will not make the
-  edit, mark it `#<id> rejected: <reason>` instead.
-- In `resolved:` you MUST address EVERY open remark id listed above, each as either
-  `#<id> accepted` (with the edit made) or `#<id> rejected: <why>`.
-- Your verdict status must be CONTINUE — do not emit DONE (only the reviewer emits DONE).
-- Do not raise new remarks and do not judge your own work — only the reviewer raises remarks and decides DONE/CONTINUE.
+Protocol for the verdict:
+- status is always CONTINUE — you are the implementer, you never end the review; only the
+  reviewer emits DONE. Do not emit DONE.
+- Include a `resolved:` section ONLY if there are open remarks listed above, resolving
+  EVERY one of them as `#<id> accepted` (with the edit made on disk) or
+  `#<id> rejected: <why>`.
+- If there are NO open remarks, OMIT the `resolved:` section entirely — do not write any
+  placeholder line (e.g. do NOT write "(no open remarks listed this turn)").
+- Do NOT include a `remarks:` section — you do not raise remarks; only the reviewer does.
 """
 
 _REVIEW_PROTOCOL_BLOCK = """\

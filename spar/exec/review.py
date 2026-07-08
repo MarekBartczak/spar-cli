@@ -334,6 +334,19 @@ def _implementer_turn(
             timeout_sec=timeout_sec,
         )
 
+        # The implementer never ends the review — only the reviewer's DONE does.
+        # A model that treats this turn as a review (e.g. emitting AGREE, or
+        # even DONE) must not derail or terminate the loop: coerce to CONTINUE
+        # and keep going.
+        if verdict.status != "CONTINUE":
+            log(
+                f"[t={task.id}] implementer emitted status={verdict.status!r}; "
+                "coercing to CONTINUE (only the reviewer emits DONE)."
+            )
+            verdict = Verdict(
+                status="CONTINUE", resolutions=verdict.resolutions, remarks=verdict.remarks
+            )
+
         changes = _worktree_changes(worktree)
         violations = _scope_violations(changes, task.files)
         if violations:
