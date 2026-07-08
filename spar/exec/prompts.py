@@ -38,12 +38,15 @@ def build_impl_prompt(
     """
     files_list = "\n".join(f"  - {f}" for f in task.files)
 
-    remarks_section = ""
     if open_remarks:
         remarks_lines = ["Open remarks to address:"]
         for r in open_remarks:
             remarks_lines.append(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
         remarks_section = "\n" + "\n".join(remarks_lines)
+        instruction = "Your task is to implement the changes according to the plan and address the remarks below."
+    else:
+        remarks_section = ""
+        instruction = "Your task is to implement the task according to the plan."
 
     warning_section = ""
     if warning:
@@ -60,7 +63,7 @@ Files in scope (edit ONLY these files):
 
 The implementation plan is located at: {artifact_plan_path}
 
-Your task is to implement the changes according to the plan and address the remarks below.{remarks_section}{warning_section}
+{instruction}{remarks_section}{warning_section}
 
 {protocol}\
 """
@@ -115,9 +118,6 @@ status: CONTINUE
 resolved:
 - #7 accepted
 - #9 rejected: <one-line reason you disagree>
-remarks:
-- [MUST] <a blocking concern that must be fixed before you can agree>
-- [NICE] <an optional, non-blocking suggestion>
 </verdict>
 
 Protocol for implementation:
@@ -125,17 +125,14 @@ Protocol for implementation:
 - Address each open remark by resolving it in the verdict block (either accepted or rejected).
 - Your verdict status must be CONTINUE — do not emit DONE (only the reviewer emits DONE).
 - In `resolved:` you MUST address EVERY open remark id listed above, each as either `#<id> accepted` or `#<id> rejected: <why>`.
-- In `remarks:` raise your own new concerns if needed, tagged `[MUST]` (blocking) or `[NICE]` (optional). Omit the section if you have none.
+- Do not raise new remarks and do not judge your own work — only the reviewer raises remarks and decides DONE/CONTINUE.
 """
 
 _REVIEW_PROTOCOL_BLOCK = """\
 End your reply with EXACTLY ONE verdict block, using this syntax verbatim:
 
 <verdict>
-status: DONE
-resolved:
-- #7 accepted
-- #9 rejected: <one-line reason you disagree>
+status: CONTINUE
 remarks:
 - [MUST] <a blocking concern that must be fixed>
 - [NICE] <an optional, non-blocking suggestion>
@@ -143,8 +140,7 @@ remarks:
 
 Protocol for review:
 - Do not edit the code — this is read-only. You are reviewing only, not implementing.
-- In `resolved:` address any open remarks by accepting or rejecting them.
 - In `remarks:` raise new concerns, tagged `[MUST]` (blocking) or `[NICE]` (optional).
-- Use `status: DONE` only if you have NO blocking (MUST/USER) remarks remaining.
-- Use `status: CONTINUE` if you have open blocking concerns that must be addressed.
+- Use `status: DONE` only if you have NO blocking `[MUST]` remarks remaining.
+- Use `status: CONTINUE` if you have open `[MUST]`/`[NICE]` remarks to raise.
 """
