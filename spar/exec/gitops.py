@@ -54,6 +54,10 @@ def create_branch(repo: Path, name: str, base: str) -> None:
     _run_ok(repo, "branch", name, base)
 
 
+def checkout(repo: Path, ref: str) -> None:
+    _run_ok(repo, "checkout", ref)
+
+
 def delete_branch(repo: Path, name: str) -> None:
     _run_ok(repo, "branch", "-D", name)
 
