@@ -18,3 +18,9 @@ spar = "spar.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["spar*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "contract: opt-in contract tests for real AI CLIs (set SPAR_CONTRACT_TESTS=1)",
+    "timeout: mark test with timeout",
+]
