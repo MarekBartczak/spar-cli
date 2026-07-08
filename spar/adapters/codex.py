@@ -60,8 +60,10 @@ class CodexAdapter:
     def _extract_session_id(stdout: str) -> str | None:
         """Scan the JSONL event stream for the first session id.
 
-        Tolerates malformed/non-JSON lines (skips them). Recognizes a
-        top-level ``session_id`` field or a nested ``msg.session_id``.
+        Tolerates malformed/non-JSON lines (skips them). Current codex emits
+        the id as ``thread_id`` on a ``thread.started`` event; older builds
+        used ``session_id`` (top-level or nested under ``msg``). All forms are
+        accepted so the adapter survives CLI version drift in either direction.
         """
         for line in stdout.splitlines():
             line = line.strip()
@@ -73,11 +75,16 @@ class CodexAdapter:
                 continue
             if not isinstance(obj, dict):
                 continue
+            if "thread_id" in obj:
+                return obj["thread_id"]
             if "session_id" in obj:
                 return obj["session_id"]
             msg = obj.get("msg")
-            if isinstance(msg, dict) and "session_id" in msg:
-                return msg["session_id"]
+            if isinstance(msg, dict):
+                if "thread_id" in msg:
+                    return msg["thread_id"]
+                if "session_id" in msg:
+                    return msg["session_id"]
         return None
 
     def run_turn(self, prompt: str, session_id: str | None, timeout_sec: int) -> TurnResult:

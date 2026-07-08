@@ -171,9 +171,14 @@ def test_happy_path_extracts_session_and_reply_from_last_msg_file(tmp_path, monk
         "FAKE_CODEX_STDOUT",
         "\n".join(
             [
-                json.dumps({"type": "session.created", "session_id": "abc-123"}),
+                json.dumps({"type": "thread.started", "thread_id": "abc-123"}),
                 "not json at all",
-                json.dumps({"type": "agent_message", "message": "ignored, not the reply"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "item_0", "type": "agent_message", "text": "ignored, not the reply"},
+                    }
+                ),
             ]
         )
         + "\n",
@@ -192,9 +197,12 @@ def test_happy_path_extracts_session_and_reply_from_last_msg_file(tmp_path, monk
     # raw JSONL stream is preserved verbatim in the events file
     raw = result.events_path.read_text()
     lines = raw.splitlines()
-    assert json.loads(lines[0]) == {"type": "session.created", "session_id": "abc-123"}
+    assert json.loads(lines[0]) == {"type": "thread.started", "thread_id": "abc-123"}
     assert lines[1] == "not json at all"
-    assert json.loads(lines[2]) == {"type": "agent_message", "message": "ignored, not the reply"}
+    assert json.loads(lines[2]) == {
+        "type": "item.completed",
+        "item": {"id": "item_0", "type": "agent_message", "text": "ignored, not the reply"},
+    }
 
 
 def test_events_file_naming(tmp_path):

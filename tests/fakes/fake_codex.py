@@ -6,9 +6,11 @@ it, driven entirely by environment variables:
 
 - ``FAKE_CODEX_ARGS_FILE``: if set, this script appends its argv (as a
   JSON line) to the given file, so tests can assert the exact argv contract.
-- ``FAKE_CODEX_STDOUT``: literal stdout to print. Defaults to three JSONL
-  lines: a ``session.created`` event with a ``session_id``, a line of
-  noise that is not valid JSON, and an ``agent_message`` event.
+- ``FAKE_CODEX_STDOUT``: literal stdout to print. Defaults to the current
+  codex event schema: a ``thread.started`` event carrying ``thread_id``, a
+  ``turn.started`` event, a line of noise that is not valid JSON, an
+  ``item.completed`` event wrapping an ``agent_message`` item, and a
+  ``turn.completed`` event.
 - ``FAKE_CODEX_LAST_MSG``: if set, this script writes this string to the
   path given after ``--output-last-message`` in its argv. Defaults to
   ``"fake final reply"``.
@@ -50,9 +52,16 @@ from pathlib import Path
 DEFAULT_STDOUT = (
     "\n".join(
         [
-            json.dumps({"type": "session.created", "session_id": "fake-codex-session-1"}),
+            json.dumps({"type": "thread.started", "thread_id": "fake-codex-session-1"}),
+            json.dumps({"type": "turn.started"}),
             "not json at all",
-            json.dumps({"type": "agent_message", "message": "fake final reply"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "agent_message", "text": "fake final reply"},
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
         ]
     )
     + "\n"
