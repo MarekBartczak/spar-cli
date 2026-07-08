@@ -380,3 +380,174 @@ def test_dirty_target_exits_3(repo, tmp_path):
     assert rc == 3
     # nothing was created
     assert not branch_exists(repo, "spar/integration")
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6 (Bug 1): completion ordering — a task's status is written to
+# "merged" and persisted BEFORE its branch is deleted, so a crash in the
+# merge→cleanup window can never leave "testing" + branch-gone (unrecoverable).
+# ---------------------------------------------------------------------------
+
+
+def test_completion_orders_merged_save_before_branch_delete(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work1.py"], model="ma", review="mb")]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work1.py": "print(1)\n"})],  # impl t1
+        "B": [Step(vblock("DONE"))],  # review t1
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+
+    # Spy on every state write, recording t1's status and whether its branch
+    # still exists in git at the moment of the save.
+    observations = []
+    orig_save = store.save
+
+    def spy(state):
+        ts = state.tasks.get("t1")
+        observations.append(
+            ((ts.status if ts else None), branch_exists(repo, "spar/t1-A"))
+        )
+        return orig_save(state)
+
+    store.save = spy
+    rc = ex.run()
+    assert rc == 0
+
+    # The FIRST save that recorded t1 as "merged" must have happened while the
+    # task branch STILL existed (status durable before the branch disappears).
+    merged_saves = [exists for status, exists in observations if status == "merged"]
+    assert merged_saves, "expected a save recording t1 as merged"
+    assert merged_saves[0] is True, (
+        "status 'merged' was persisted only after the branch was deleted — "
+        "a crash in that window would be unrecoverable"
+    )
+    # And the end state is fully cleaned up: branch gone, status merged.
+    assert not branch_exists(repo, "spar/t1-A")
+    assert store.load().tasks["t1"].status == "merged"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7 (Bug 1): recovery of the merge→cleanup window. A task that really
+# merged into integration but whose status was never advanced past "testing"
+# (branch still lingering, ancestor of integration) is marked merged on
+# --continue without re-invoking any adapter and without double-merging.
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_merged_before_cleanup_save(repo, tmp_path):
+    base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "branch", "spar/integration", "master")
+    git(repo, "branch", "spar/t1-A", "spar/integration")
+    wt = tmp_path / ".spar" / "worktrees" / "A"
+    git(repo, "worktree", "add", "-q", str(wt), "spar/t1-A")
+    (wt / "work.py").write_text("done\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "t1: work")
+    git(repo, "checkout", "-q", "spar/integration")
+    git(repo, "merge", "--no-ff", "-m", "merge t1", "spar/t1-A")
+    git(repo, "worktree", "remove", "--force", str(wt))
+    # Crash window: branch spar/t1-A lingers, status never advanced past testing.
+    integration_oid = git(repo, "rev-parse", "spar/integration").stdout.strip()
+
+    spar_dir = tmp_path / ".spar"
+    store = ExecStateStore(spar_dir)
+    task = make_task("t1", "A", ["work.py"], test="true")
+    state = ExecState(
+        phase="execution",
+        target_branch="master",
+        target_base_oid=base_oid,
+        integration_branch="spar/integration",
+        tasks={"t1": TaskState(task=task, status="testing", branch="spar/t1-A")},
+    )
+    store.save(state)
+
+    # No adapter must EVER be constructed for an already-merged task.
+    steps = {"A": [], "B": []}
+    make_adapter, adapters = make_factory(steps)
+    gate = FakeGate([GateDecision("accept")])
+    logs = []
+    ex = Executor(
+        repo=repo,
+        spar_dir=spar_dir,
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=tmp_path / "plan.md",
+        tasks=(task,),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate,
+        store=store,
+        log=logs.append,
+    )
+    rc = ex.run_continue()
+    assert rc == 0
+    reloaded = store.load()
+    assert reloaded.tasks["t1"].status == "merged"
+    assert reloaded.phase == "done"
+    assert not branch_exists(repo, "spar/t1-A")
+    # integration tip unchanged — no double-merge happened
+    assert git(repo, "rev-parse", "spar/integration").stdout.strip() == integration_oid
+    # zero adapters constructed
+    assert adapters == {}
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8 (Bug 2): the ready+branch-created window. A crash after the task
+# branch/worktree were created but before the first "implementing" save leaves
+# status "ready" with the branch (and worktree) present. --continue must NOT
+# hard-fail (GitError → exit 4) on the leftover branch; it sweeps the stale
+# artifacts and runs the task to completion.
+# ---------------------------------------------------------------------------
+
+
+def test_ready_with_leftover_branch_recovers(repo, tmp_path):
+    base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "branch", "spar/integration", "master")
+    # Leftover task branch + worktree from a crashed prior attempt.
+    git(repo, "branch", "spar/t1-A", "spar/integration")
+    wt = tmp_path / ".spar" / "worktrees" / "A"
+    git(repo, "worktree", "add", "-q", str(wt), "spar/t1-A")
+
+    spar_dir = tmp_path / ".spar"
+    store = ExecStateStore(spar_dir)
+    task = make_task("t1", "A", ["work.py"], test="true")
+    state = ExecState(
+        phase="execution",
+        target_branch="master",
+        target_base_oid=base_oid,
+        integration_branch="spar/integration",
+        tasks={"t1": TaskState(task=task, status="ready", branch="spar/t1-A")},
+    )
+    store.save(state)
+
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "impl\n"})],  # impl t1
+        "B": [Step(vblock("DONE"))],  # review t1
+    }
+    make_adapter, adapters = make_factory(steps)
+    gate = FakeGate([GateDecision("accept")])
+    logs = []
+    ex = Executor(
+        repo=repo,
+        spar_dir=spar_dir,
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=tmp_path / "plan.md",
+        tasks=(task,),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate,
+        store=store,
+        log=logs.append,
+    )
+    rc = ex.run_continue()
+    assert rc == 0, f"leftover branch must not hard-fail; logs={logs}"
+    reloaded = store.load()
+    assert reloaded.tasks["t1"].status == "merged"
+    assert reloaded.phase == "done"
+    assert not branch_exists(repo, "spar/t1-A")
+    assert "work.py" in git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()

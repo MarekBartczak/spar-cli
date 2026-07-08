@@ -37,6 +37,7 @@ Exit codes mirror v1: 0 ok, 3 lock/state guard, 4 protocol/adapter abort,
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Protocol
@@ -221,8 +222,7 @@ class Executor:
             branch = ts.branch or self._task_branch(ts.task)
             if ts.status == "merged":
                 if self._branch_exists(branch):
-                    self._force_remove_worktree(self._worktree_for(ts.task.side))
-                    gitops.delete_branch(self.repo, branch)
+                    self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
                     self.log(f"spar exec: recovery — deleted lingering branch {branch}.")
                 continue
             if ts.status in ("implementing", "review", "testing"):
@@ -230,8 +230,7 @@ class Executor:
                     self.repo, branch, integration
                 ):
                     # crash after merge, before state save: the merge happened.
-                    self._force_remove_worktree(self._worktree_for(ts.task.side))
-                    gitops.delete_branch(self.repo, branch)
+                    self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
                     ts.status = "merged"
                     self.log(
                         f"spar exec: recovery — {ts.task.id} already merged into "
@@ -239,15 +238,24 @@ class Executor:
                     )
                 else:
                     # mid-turn / mid-test: restart the task from a clean slate.
-                    self._force_remove_worktree(self._worktree_for(ts.task.side))
-                    if self._branch_exists(branch):
-                        gitops.delete_branch(self.repo, branch)
+                    self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
                     ts.status = "pending"
                     ts.branch = None
                     self.log(
                         f"spar exec: recovery — restarting interrupted task "
                         f"{ts.task.id}."
                     )
+                continue
+            # ``ready``/``pending``: a crash in the branch-created window (before
+            # the first ``implementing`` save) can leave a stale branch/worktree.
+            # Sweep it so the upcoming (re)start never hard-fails on the leftover.
+            if self._branch_exists(branch) or self._worktree_for(ts.task.side).exists():
+                self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
+                ts.branch = None
+                self.log(
+                    f"spar exec: recovery — swept stale branch/worktree for "
+                    f"{ts.task.id} before restart."
+                )
         state.turn_in_progress = None
 
     # -- the FSM driver ------------------------------------------------
@@ -273,10 +281,20 @@ class Executor:
     def _run_task(self, state: ExecState, ts: TaskState) -> None:
         task = ts.task
         branch = self._task_branch(task)
-        ts.branch = branch
         worktree = self._worktree_for(task.side)
         reviewer = self._other_side(task.side)
 
+        # Record intent BEFORE creating any git artifact (§11.1): persist the
+        # branch name and ``implementing`` status first, so a crash between the
+        # branch/worktree creation and the first in-loop save is recoverable
+        # (recovery restarts an ``implementing`` task from a clean slate).
+        ts.branch = branch
+        ts.status = "implementing"
+        self.store.save(state)
+
+        # Idempotent create: sweep any stale branch/worktree left by a crashed
+        # prior attempt so creating the task branch never hard-fails on resume.
+        self._reset_task_artifacts(branch, worktree)
         gitops.create_branch(self.repo, branch, state.integration_branch)
         gitops.add_worktree(self.repo, worktree, branch)
         self.log(f"spar exec: [{task.id}] branch {branch} + worktree {worktree}.")
@@ -326,15 +344,19 @@ class Executor:
             self.store.save(state)
             raise
 
-        # Merge the task branch into integration, then clean up.
+        # Merge the task branch into integration.
         gitops.checkout(self.repo, state.integration_branch)
         gitops.merge_no_ff(
             self.repo, branch, f"spar: merge {task.id} ({task.side}) into integration"
         )
-        gitops.remove_worktree(self.repo, worktree)
-        gitops.delete_branch(self.repo, branch)
+        # Record completion (§11.1) BEFORE deleting the branch: the merge is
+        # only detectable on resume while the branch survives, so ``merged``
+        # must be durable first. A crash after this save leaves a lingering
+        # branch that recovery cleans up idempotently.
         ts.status = "merged"
         self.store.save(state)
+        # Idempotent cleanup, tolerant of an already-removed worktree/branch.
+        self._reset_task_artifacts(branch, worktree)
         self.log(f"spar exec: [{task.id}] merged into integration.")
 
     # -- final Test phase + integration-fix Task + final merge ---------
@@ -569,6 +591,21 @@ class Executor:
             capture_output=True,
             text=True,
         )
+
+    def _reset_task_artifacts(self, branch: str, worktree: Path) -> None:
+        """Idempotently remove a task's worktree + branch.
+
+        Tolerant of an already-removed worktree or branch (best-effort), so it
+        is safe both as post-merge cleanup and as a pre-create sweep of stale
+        artifacts left by a crashed prior attempt. A stray worktree directory
+        that git no longer tracks is removed directly so ``worktree add`` (which
+        refuses a non-empty path) cannot hard-fail on resume.
+        """
+        self._force_remove_worktree(worktree)
+        if worktree.exists():
+            shutil.rmtree(worktree, ignore_errors=True)
+        if self._branch_exists(branch):
+            gitops.delete_branch(self.repo, branch)
 
     def _diffstat(self, base: str, ref: str) -> str:
         result = subprocess.run(
