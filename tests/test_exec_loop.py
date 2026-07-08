@@ -14,6 +14,7 @@ import pytest
 
 from spar.adapters.base import TurnResult
 from spar.config import ExecutionConfig, SideConfig
+from spar.exec import gitops
 from spar.exec.loop import Executor
 from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
@@ -273,6 +274,142 @@ def test_per_task_test_fail_then_pass(repo, tmp_path):
     # two implement + two review turns happened (looped once)
     assert len(adapters["A"].calls) == 2
     assert len(adapters["B"].calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# I1: a per-Task test failure must feed the captured failing output into the
+# NEXT implement turn's prompt, so the testing→implementing loop can converge.
+# ---------------------------------------------------------------------------
+
+
+def test_per_task_test_failure_context_reaches_reimplement_prompt(repo, tmp_path):
+    sentinel = tmp_path / "sent_ctx"
+    marker = "UNIQUE_TEST_FAILURE_MARKER_XYZ"
+    # First run: emit the marker on stdout and fail; second run: pass.
+    per_task = f"test -f {sentinel} || (touch {sentinel}; echo {marker}; exit 1)"
+    tasks = [make_task("t1", "A", ["work.py"], test=per_task)]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # impl attempt 1
+            Step(vblock("CONTINUE"), edits={"work.py": "v2\n"}),  # impl attempt 2
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review attempt 1
+            Step(vblock("DONE")),  # review attempt 2
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    state = store.load()
+    assert state.tasks["t1"].status == "merged"
+
+    # Side A performed exactly the two implement turns (reviewer is B).
+    impl_calls = adapters["A"].calls
+    assert len(impl_calls) == 2
+    # The FIRST implement prompt has no failure context (no test ran yet).
+    assert marker not in impl_calls[0]["prompt"]
+    # The SECOND (re-implement) prompt MUST carry the captured failing output
+    # so the implementer knows what to fix.
+    assert marker in impl_calls[1]["prompt"], (
+        "re-implement turn did not receive the failing test output as context"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I2: §5 branch/worktree collision policy. A FRESH `exec` that finds a leftover
+# spar/integration, spar/t* branch, or .spar/worktrees/* dir with no matching
+# state must REFUSE (exit 3) naming the leftover, and clobber nothing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["integration_branch", "task_branch", "worktree_dir"])
+def test_fresh_refuses_on_leftover_artifacts(repo, tmp_path, kind):
+    spar_dir = tmp_path / ".spar"
+    if kind == "integration_branch":
+        git(repo, "branch", "spar/integration", "master")
+        needle = "spar/integration"
+    elif kind == "task_branch":
+        git(repo, "branch", "spar/t1-claude", "master")
+        needle = "spar/t1-claude"
+    else:  # worktree_dir
+        leftover_wt = spar_dir / "worktrees" / "claude"
+        leftover_wt.mkdir(parents=True)
+        (leftover_wt / "stale.txt").write_text("stale\n", encoding="utf-8")
+        needle = "worktrees"
+
+    tasks = [make_task("t1", "A", ["work.py"])]
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []}, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    rc = ex.run()
+    assert rc == 3
+    # The refusal message names the leftover.
+    assert any(needle in m for m in logs), f"no log named the leftover; logs={logs}"
+    # Nothing was clobbered / created: no exec state, no adapter constructed,
+    # HEAD untouched, and any pre-existing leftover still present.
+    assert not store.exists()
+    assert adapters == {}
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+    if kind == "integration_branch":
+        assert branch_exists(repo, "spar/integration")
+    elif kind == "task_branch":
+        assert branch_exists(repo, "spar/t1-claude")
+    else:
+        assert (spar_dir / "worktrees" / "claude" / "stale.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# I3: aborting after a conflicting final merge must leave the working tree
+# clean (git merge --abort), not stuck mid-merge.
+# ---------------------------------------------------------------------------
+
+
+def test_surface_merge_conflict_abort_cleans_up(repo, tmp_path):
+    # Put the repo into a conflicted, mid-merge state.
+    git(repo, "checkout", "-qb", "feature")
+    (repo / "seed.txt").write_text("feature side\n", encoding="utf-8")
+    git(repo, "commit", "-aqm", "feature change")
+    git(repo, "checkout", "-q", "master")
+    (repo / "seed.txt").write_text("master side\n", encoding="utf-8")
+    git(repo, "commit", "-aqm", "master change")
+    conflict = subprocess.run(
+        ["git", "-C", str(repo), "merge", "feature"], capture_output=True, text=True
+    )
+    assert conflict.returncode != 0, "expected a merge conflict"
+    assert not gitops.is_clean(repo)
+
+    tasks = [make_task("t1", "A", ["work.py"])]
+    gate = FakeGate([GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []}, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    state = ExecState(
+        phase="test",
+        target_branch="master",
+        target_base_oid="deadbeef",
+        integration_branch="spar/integration",
+        tasks={},
+    )
+    rc = ex._surface_merge_conflict(state, gitops.GitError("merge conflict"))
+    assert rc == 5
+    # The abort left a clean working tree (no lingering conflicted merge).
+    assert gitops.is_clean(repo), "aborting left the repo mid-merge"
+
+
+def test_merge_abort_is_noop_without_merge(repo):
+    # No merge in progress: merge_abort must be a safe no-op (no raise).
+    assert gitops.is_clean(repo)
+    gitops.merge_abort(repo)
+    assert gitops.is_clean(repo)
 
 
 # ---------------------------------------------------------------------------

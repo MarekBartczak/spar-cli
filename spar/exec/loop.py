@@ -184,6 +184,21 @@ class Executor:
     # -- fresh run -----------------------------------------------------
 
     def _run_fresh(self) -> int:
+        # §5 collision policy: a fresh run always means these artifacts are
+        # orphans (a matching-state resume goes through ``run_continue``), so
+        # refuse rather than clobber a leftover integration/task branch or a
+        # stale worktree directory from a prior run whose state was removed.
+        leftovers = self._detect_leftovers()
+        if leftovers:
+            self.log(
+                "spar exec: refusing to start — leftover execution artifacts "
+                "exist without matching .spar/ state: "
+                + ", ".join(leftovers)
+                + ". Clean them up (or run 'spar exec --continue' if this is a "
+                "resumable run) before starting a fresh exec."
+            )
+            return 3
+
         target_branch = gitops.current_branch(self.repo)
         target_base_oid = gitops.rev_parse(self.repo, "HEAD")
         if not gitops.is_clean(self.repo):
@@ -317,6 +332,10 @@ class Executor:
         gitops.add_worktree(self.repo, worktree, branch)
         self.log(f"spar exec: [{task.id}] branch {branch} + worktree {worktree}.")
 
+        # Failure context threaded into the NEXT implement turn on a test-fail
+        # re-entry (§6): without it the re-implement prompt would be identical
+        # and the testing→implementing loop could never converge.
+        test_warning: str | None = None
         try:
             while True:
                 ts.status = "implementing"
@@ -335,6 +354,7 @@ class Executor:
                     store=self.store,
                     log=self.log,
                     timeout_sec=_DEFAULT_TIMEOUT_SEC,
+                    warning=test_warning,
                 )
 
                 ts.status = "review"
@@ -355,8 +375,17 @@ class Executor:
 
                 ts.status = "testing"
                 self.store.save(state)
-                if self._run_test(self._task_test_cmd(task), worktree):
+                passed, output = self._run_test_capture(
+                    self._task_test_cmd(task), worktree
+                )
+                if passed:
                     break
+                test_warning = (
+                    "The per-task test command "
+                    f"(`{self._task_test_cmd(task)}`) failed. You MUST change the "
+                    "implementation so the tests pass. Captured failing output:\n"
+                    f"{output}"
+                )
                 self.log(f"spar exec: [{task.id}] per-task test failed; re-implementing.")
         except BaseException:
             self.store.save(state)
@@ -536,6 +565,8 @@ class Executor:
         )
         if self.auto_integration_merge:
             self.log(summary + " (--auto-integration-merge → aborting)")
+            # Leave the working tree clean rather than stuck mid-merge.
+            gitops.merge_abort(self.repo)
             self.store.save(state)
             return 4
         decision = self.gate.final_merge_gate(summary)
@@ -544,6 +575,8 @@ class Executor:
             self.store.save(state)
             self.log("spar exec: user accepted the manual merge resolution; done.")
             return 0
+        # Abort: undo the conflicting merge so the repo is not left mid-merge.
+        gitops.merge_abort(self.repo)
         self.store.save(state)
         self.log("spar exec: aborted by user after a merge conflict.")
         return 5
@@ -562,9 +595,6 @@ class Executor:
 
     def _task_test_cmd(self, task: Task) -> str:
         return task.test if task.test else self.execution.test_command
-
-    def _run_test(self, cmd: str, cwd: Path) -> bool:
-        return self._run_test_capture(cmd, cwd)[0]
 
     def _run_test_capture(self, cmd: str, cwd: Path) -> tuple[bool, str]:
         """Run ``cmd`` (shell) in ``cwd``; empty command is a pass."""
@@ -587,6 +617,34 @@ class Executor:
     def _other_side(self, side: str) -> str:
         others = [s for s in self.order if s != side]
         return others[0]
+
+    def _detect_leftovers(self) -> list[str]:
+        """Names of orphaned §5 artifacts a fresh run must refuse to clobber.
+
+        Reports a leftover ``spar/integration`` branch, any ``spar/t*`` task
+        branch, and any child of ``<spar_dir>/worktrees`` — the artifacts a
+        prior run creates. On a fresh run their presence always signals an
+        orphan (a matching-state resume never reaches ``_run_fresh``).
+        """
+        found: list[str] = []
+        result = subprocess.run(
+            ["git", "-C", str(self.repo), "for-each-ref",
+             "--format=%(refname:short)", "refs/heads/spar/"],
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            name = line.strip()
+            if not name:
+                continue
+            if name == "spar/integration" or re.match(r"spar/t\d+", name):
+                found.append(f"branch {name}")
+
+        worktrees_dir = self.spar_dir / "worktrees"
+        if worktrees_dir.exists():
+            for child in sorted(worktrees_dir.iterdir()):
+                found.append(f"worktree {child}")
+        return found
 
     def _branch_exists(self, name: str) -> bool:
         result = subprocess.run(

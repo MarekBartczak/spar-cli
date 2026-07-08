@@ -258,9 +258,14 @@ def _implementer_turn(
     store: ExecStateStore,
     log,
     timeout_sec: int,
+    warning: str | None = None,
 ) -> None:
+    # ``warning`` seeds the first attempt's prompt with out-of-loop failure
+    # context (e.g. the per-Task test's captured failing output on a
+    # testing→implementing re-entry, spec §6). The scope guard below overwrites
+    # it with its own message on a retry, since a scope violation is the more
+    # urgent thing to correct on the immediate next attempt.
     task = task_state.task
-    warning: str | None = None
 
     for attempt in range(2):  # attempt 0 plus at most one scope-guard retry
         pre_oid = _head_oid(worktree)

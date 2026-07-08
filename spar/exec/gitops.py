@@ -74,6 +74,23 @@ def merge_no_ff(repo: Path, branch: str, message: str) -> None:
     _run_ok(repo, "merge", "--no-ff", "-m", message, branch)
 
 
+def merge_in_progress(repo: Path) -> bool:
+    """Return ``True`` iff a merge is currently in progress (``MERGE_HEAD`` set)."""
+    result = _run(repo, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+    return result.returncode == 0
+
+
+def merge_abort(repo: Path) -> None:
+    """Abort an in-progress merge so the working tree is left clean.
+
+    Idempotent: a no-op (no error) when no merge is in progress, so it is safe
+    to call on any final-merge-gate abort path regardless of whether the merge
+    actually reached a conflicted state.
+    """
+    if merge_in_progress(repo):
+        _run_ok(repo, "merge", "--abort")
+
+
 def is_ancestor(repo: Path, maybe_ancestor: str, ref: str) -> bool:
     result = _run(repo, "merge-base", "--is-ancestor", maybe_ancestor, ref)
     if result.returncode == 0:
