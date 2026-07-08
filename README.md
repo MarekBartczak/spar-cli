@@ -17,8 +17,8 @@ uv tool install -e .
 Requires `claude` and `codex` CLIs installed and authenticated:
 
 ```bash
-# Install Claude Code (https://docs.anthropic.com/claude-code/install-claude-code)
-# and Codex (https://docs.anthropic.com/codex/install)
+# Install Claude Code (https://docs.anthropic.com/en/docs/claude-code)
+# and Codex (https://github.com/openai/codex)
 # Then verify they work:
 claude -p "Hello"
 codex exec "Hello"
@@ -66,7 +66,7 @@ spar --continue
 | 2 | Usage error (missing prompt, invalid flags, configuration error) |
 | 3 | State/lock error (another debate running, corrupted `.spar/session.json`) |
 | 4 | Protocol abort (guard rejected out-of-contract changes, verdict parsing failed, adapter error) |
-| 5 | User abort (Ctrl+C during debate, user rejected result at gate) |
+| 5 | User abort (user chose abort at a gate) |
 
 ## How it works
 
