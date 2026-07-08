@@ -3,7 +3,7 @@
 A :class:`Guard` protects the shared artifact and the rest of the repo from
 a misbehaving side. Before each turn the orchestrator calls
 :meth:`Guard.pre_turn` to snapshot the artifact's size and a full file
-inventory of the repo (plus, in a git repo, ``git status --porcelain``).
+inventory of the repo (plus, in a git repo, ``git status --porcelain=v1 -z``).
 After the turn the orchestrator calls the guard (``guard(ctx)``) which runs
 three checks in order — artifact sanity, "not gutted" (no drastic shrink),
 and "no foreign changes" (nothing outside the artifact was touched) — and
@@ -31,15 +31,19 @@ __all__ = ["Guard", "GuardContext", "GuardViolation"]
 _ALWAYS_SKIP_DIR_NAMES = {".git", "__pycache__"}
 
 
-def _walk_inventory(repo_dir: Path, spar_dir: Path) -> dict[str, tuple[int, int]]:
+def _walk_inventory(
+    repo_dir: Path, spar_dir: Path
+) -> tuple[dict[str, tuple[int, int]], set[str]]:
     """Map ``relative posix path -> (mtime_ns, size)`` for every file under
-    ``repo_dir``, skipping ``.git``, ``__pycache__`` (by name, anywhere in the
-    tree) and ``spar_dir`` (by resolved path, wherever it lives).
+    ``repo_dir``, plus the set of relative posix paths of every directory
+    seen, skipping ``.git``, ``__pycache__`` (by name, anywhere in the tree)
+    and ``spar_dir`` (by resolved path, wherever it lives).
     """
     repo_dir = repo_dir.resolve()
     skip_abs = {spar_dir.resolve()}
 
     inventory: dict[str, tuple[int, int]] = {}
+    dirs_seen: set[str] = set()
     for root, dirs, files in os.walk(repo_dir):
         root_path = Path(root)
         kept = []
@@ -50,6 +54,9 @@ def _walk_inventory(repo_dir: Path, spar_dir: Path) -> dict[str, tuple[int, int]
                 continue
             kept.append(d)
         dirs[:] = kept
+        for d in kept:
+            rel_dir = (root_path / d).relative_to(repo_dir).as_posix()
+            dirs_seen.add(rel_dir)
 
         for fname in files:
             fpath = root_path / fname
@@ -59,40 +66,60 @@ def _walk_inventory(repo_dir: Path, spar_dir: Path) -> dict[str, tuple[int, int]
                 continue
             rel = fpath.relative_to(repo_dir).as_posix()
             inventory[rel] = (st.st_mtime_ns, st.st_size)
-    return inventory
+    return inventory, dirs_seen
 
 
-def _git_status_porcelain(repo_dir: Path) -> str:
+def _git_status_porcelain_z(repo_dir: Path) -> bytes:
+    """Raw NUL-separated output of ``git status --porcelain=v1 -z``.
+
+    The ``-z`` form disables C-quoting entirely, so paths with non-ASCII
+    characters, quotes, backslashes, etc. come back byte-for-byte instead of
+    escaped (as they would under the default ``core.quotepath`` with plain
+    ``--porcelain``). Records are NUL-terminated; rename/copy records are two
+    consecutive NUL-terminated fields (``XY new\\0old\\0``).
+    """
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain=v1", "-z"],
             cwd=repo_dir,
             capture_output=True,
-            text=True,
+            text=False,
             check=False,
         )
     except OSError:
-        return ""
+        return b""
     if result.returncode != 0:
-        return ""
+        return b""
     return result.stdout
 
 
-def _dirty_paths_from_porcelain(porcelain: str) -> set[str]:
-    """Every path mentioned by ``git status --porcelain`` — staged, modified,
-    or untracked. Absence from this set means "clean" (tracked, unmodified).
+def _dirty_paths_from_porcelain(raw: bytes) -> set[str]:
+    """Every path mentioned by ``git status --porcelain=v1 -z`` output —
+    staged, modified, or untracked. Absence from this set means "clean"
+    (tracked, unmodified).
+
+    ``raw`` is NUL-separated records: each record is ``XY <path>``, except
+    rename/copy records (``XY`` starting with ``R``/``C``) which are followed
+    by a *second* NUL-terminated field holding the old path — both fields
+    must be consumed or the parse desyncs on the next record.
     """
     dirty: set[str] = set()
-    for line in porcelain.splitlines():
-        if not line or len(line) < 4:
+    fields = raw.split(b"\0")
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if not record:
             continue
-        path_part = line[3:]
-        if " -> " in path_part:  # rename: "old -> new"
-            _, path_part = path_part.split(" -> ", 1)
-        path_part = path_part.strip()
-        if path_part.startswith('"') and path_part.endswith('"'):
-            path_part = path_part[1:-1]
+        status = record[:2]
+        path_part = record[3:].decode("utf-8", errors="surrogateescape")
         dirty.add(path_part)
+        if status[0:1] in (b"R", b"C"):
+            # rename/copy: next NUL-terminated field is the old path.
+            if i < len(fields):
+                old_path = fields[i].decode("utf-8", errors="surrogateescape")
+                dirty.add(old_path)
+                i += 1
     return dirty
 
 
@@ -101,6 +128,7 @@ class _Snapshot:
     artifact_size: int
     inventory: dict[str, tuple[int, int]]
     dirty_paths: set[str] = field(default_factory=set)
+    dirs: set[str] = field(default_factory=set)
 
 
 class Guard:
@@ -129,12 +157,12 @@ class Guard:
         artifact_size = (
             self.artifact_path.stat().st_size if self.artifact_path.exists() else 0
         )
-        inventory = _walk_inventory(self.repo_dir, self.spar_dir)
+        inventory, dirs = _walk_inventory(self.repo_dir, self.spar_dir)
         dirty_paths: set[str] = set()
         if self._is_git:
-            dirty_paths = _dirty_paths_from_porcelain(_git_status_porcelain(self.repo_dir))
+            dirty_paths = _dirty_paths_from_porcelain(_git_status_porcelain_z(self.repo_dir))
         self._snapshot = _Snapshot(
-            artifact_size=artifact_size, inventory=inventory, dirty_paths=dirty_paths
+            artifact_size=artifact_size, inventory=inventory, dirty_paths=dirty_paths, dirs=dirs
         )
 
     # -- post-turn ---------------------------------------------------------
@@ -178,7 +206,7 @@ class Guard:
         if self._snapshot is None:
             return
 
-        current_inventory = _walk_inventory(self.repo_dir, self.spar_dir)
+        current_inventory, _current_dirs = _walk_inventory(self.repo_dir, self.spar_dir)
         artifact_rel = self._artifact_rel()
         pre_inv = self._snapshot.inventory
 
@@ -259,8 +287,14 @@ class Guard:
 
     def _remove_empty_parents(self, path: Path) -> None:
         repo_dir = self.repo_dir.resolve()
+        pre_turn_dirs = self._snapshot.dirs if self._snapshot is not None else set()
         parent = path.resolve().parent
         while parent != repo_dir and repo_dir in parent.parents:
+            rel = parent.relative_to(repo_dir).as_posix()
+            if rel in pre_turn_dirs:
+                # existed before the turn (e.g. a committed empty directory);
+                # never delete directories we didn't create ourselves.
+                break
             try:
                 parent.rmdir()
             except OSError:

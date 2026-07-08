@@ -202,6 +202,28 @@ def test_foreign_new_file_in_new_subdir_is_deleted_with_empty_parent(tmp_path):
     assert not subdir.exists()  # now-empty parent dir also removed
 
 
+def test_foreign_new_file_in_preexisting_empty_dir_survives_rollback(tmp_path):
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    placeholder_dir = repo_dir / "output_placeholder"
+    placeholder_dir.mkdir()
+    keep_file = placeholder_dir / ".gitkeep"
+    keep_file.write_text("", encoding="utf-8")
+    _commit_all(repo_dir)
+    keep_file.unlink()  # dir is empty on disk by the time the turn starts
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    foreign = placeholder_dir / "sneaky.txt"
+    foreign.write_text("evil", encoding="utf-8")
+
+    with pytest.raises(GuardViolation, match="foreign changes"):
+        guard(_ctx(artifact))
+
+    assert not foreign.exists()  # foreign file rolled back
+    assert placeholder_dir.exists()  # pre-existing dir must NOT be deleted
+
+
 # ---------------------------------------------------------------------------
 # Foreign modified file, clean at pre-turn -> git checkout rollback
 # ---------------------------------------------------------------------------
@@ -249,6 +271,59 @@ def test_foreign_modified_dirty_before_turn_not_touched(tmp_path):
     assert "other.py" in str(exc_info.value)
     # not touched: still has the mid-turn content, not rolled back to anything
     assert other.read_text(encoding="utf-8") == "further modified during the turn"
+
+
+# ---------------------------------------------------------------------------
+# Foreign modified file, dirty before turn, non-ASCII / quote-needing name
+# -> porcelain -z parsing must recognize it as dirty and NOT roll it back
+# (a plain `--porcelain` parse without unquoting would C-quote "café.py" as
+# "caf\303\251.py" under core.quotepath and miss the match, letting
+# `git checkout --` destroy the user's pre-turn edit).
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_modified_dirty_before_turn_unicode_name_not_touched(tmp_path):
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    cafe = repo_dir / "café.py"
+    cafe.write_text("original content", encoding="utf-8")
+    _commit_all(repo_dir)
+
+    # dirty it BEFORE the turn starts
+    cafe.write_text("already dirty before the turn", encoding="utf-8")
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    cafe.write_text("further modified during the turn", encoding="utf-8")
+
+    with pytest.raises(GuardViolation, match="manual cleanup required") as exc_info:
+        guard(_ctx(artifact))
+
+    assert "café.py" in str(exc_info.value)
+    # not touched: still has the mid-turn content, never rolled back to HEAD
+    assert cafe.read_text(encoding="utf-8") == "further modified during the turn"
+
+
+def test_foreign_modified_dirty_before_turn_quoted_space_name_not_touched(tmp_path):
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    weird = repo_dir / 'has "quotes" and space.py'
+    weird.write_text("original content", encoding="utf-8")
+    _commit_all(repo_dir)
+
+    # dirty it BEFORE the turn starts
+    weird.write_text("already dirty before the turn", encoding="utf-8")
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    weird.write_text("further modified during the turn", encoding="utf-8")
+
+    with pytest.raises(GuardViolation, match="manual cleanup required") as exc_info:
+        guard(_ctx(artifact))
+
+    assert 'has "quotes" and space.py' in str(exc_info.value)
+    # not touched: still has the mid-turn content, never rolled back to HEAD
+    assert weird.read_text(encoding="utf-8") == "further modified during the turn"
 
 
 # ---------------------------------------------------------------------------
