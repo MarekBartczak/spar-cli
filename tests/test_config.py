@@ -676,6 +676,50 @@ class TestSideModelsAndDefault:
         with pytest.raises(ConfigError):
             load_config(tmp_path / "p", global_path=gp)
 
+    def test_default_model_with_no_models_key_raises_error(self, tmp_path):
+        """default_model set with no models key anywhere must raise ConfigError."""
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\ndefault_model="sonnet"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_default_model_with_empty_models_list_raises_error(self, tmp_path):
+        """default_model set with models=[] must raise ConfigError."""
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nmodels=[]\ndefault_model="sonnet"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_default_model_from_project_valid_against_global_models(self, tmp_path):
+        """models from global + a valid default_model from project loads OK."""
+        global_config = tmp_path / "global_config.toml"
+        global_config.write_text('[sides.claude]\nmodels=["opus","sonnet"]\n')
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text('[sides.claude]\ndefault_model="sonnet"\n')
+
+        config = load_config(project_dir, global_path=global_config)
+
+        assert config.sides["claude"].models == ("opus", "sonnet")
+        assert config.sides["claude"].default_model == "sonnet"
+
+    def test_default_model_from_project_invalid_against_global_models(self, tmp_path):
+        """models from global + an invalid default_model from project raises ConfigError."""
+        global_config = tmp_path / "global_config.toml"
+        global_config.write_text('[sides.claude]\nmodels=["opus","sonnet"]\n')
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text('[sides.claude]\ndefault_model="haiku"\n')
+
+        with pytest.raises(ConfigError):
+            load_config(project_dir, global_path=global_config)
+
 
 class TestExecutionConfig:
     """Test execution configuration."""

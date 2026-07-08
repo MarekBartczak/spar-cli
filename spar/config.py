@@ -238,9 +238,23 @@ def _dict_to_config(config_dict: dict) -> Config:
         if not command or (isinstance(command, str) and not command.strip()):
             raise ConfigError(f"Side '{side_name}': command cannot be empty")
 
-        sides[side_name] = SideConfig(
+        merged_side = SideConfig(
             adapter=adapter, command=command, model=model, models=models, default_model=default_model
         )
+
+        # Authoritative check on the FINAL MERGED config: if default_model is
+        # set, models must be non-empty and must contain default_model. This
+        # catches the case where models and default_model come from different
+        # config files (e.g. models from global, default_model from project),
+        # and the case where models is empty/absent entirely.
+        if merged_side.default_model:
+            if not merged_side.models or merged_side.default_model not in merged_side.models:
+                raise ConfigError(
+                    f"Side '{side_name}': default_model '{merged_side.default_model}' "
+                    "must be a member of models"
+                )
+
+        sides[side_name] = merged_side
 
     # Process debate config
     debate_dict = config_dict.get("debate", {})
