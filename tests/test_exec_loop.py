@@ -425,7 +425,7 @@ def test_final_test_fail_generates_fix_task(repo, tmp_path):
     steps = {
         "A": [
             Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # impl t1
-            Step(vblock("CONTINUE")),  # impl fix task t2 (no edits)
+            Step(vblock("CONTINUE"), edits={"work.py": "v2\n"}),  # impl fix task t2
         ],
         "B": [
             Step(vblock("DONE")),  # review t1
@@ -731,6 +731,62 @@ def test_recovery_empty_branch_equal_tip_restarts_not_merged(repo, tmp_path):
     ).stdout.split()
     assert "work.py" in git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
     assert not branch_exists(repo, "spar/t1-A")
+
+
+def test_empty_initial_implementation_retries_then_aborts(repo, tmp_path):
+    # Bug: with a too-weak model the implementer never writes files on the
+    # initial turn. That empty diff must NOT proceed to review/test (where the
+    # reviewer emits DONE on nothing and the per-Task test then fails, spinning
+    # forever). The initial turn is retried ONCE with a warning; still empty ->
+    # abort loudly (exit 4) with a clear message, never entering review.
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE")),  # initial turn: no edits
+            Step(vblock("CONTINUE")),  # retry-with-warning: still no edits
+        ],
+        "B": [Step(vblock("DONE"))],  # reviewer MUST never be reached
+    }
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 4, f"expected protocol abort (4); logs={logs}"
+    # clear abort message surfaced
+    assert any("implementer created no files" in m for m in logs), logs
+    # exactly the initial turn + one warned retry ran; the reviewer was never
+    # invoked (we aborted before review/test).
+    assert len(adapters["A"].calls) == 2
+    assert adapters.get("B") is None or adapters["B"].calls == []
+    # the second (retry) prompt carried the stern empty-implementation warning
+    assert "no files on disk" in adapters["A"].calls[1]["prompt"].lower()
+    # nothing was merged
+    state = store.load()
+    assert state.tasks["t1"].status != "merged"
+
+
+def test_nonempty_initial_implementation_proceeds(repo, tmp_path):
+    # Regression: an initial turn that writes a real file passes the empty-impl
+    # guard on the FIRST try (no retry) and proceeds through review/test/merge.
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "print(1)\n"})],  # impl t1
+        "B": [Step(vblock("DONE"))],  # review t1
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"expected clean completion; logs={logs}"
+    state = store.load()
+    assert state.tasks["t1"].status == "merged"
+    # exactly one implement turn (no empty-impl retry) and one review turn
+    assert len(adapters["A"].calls) == 1
+    assert len(adapters["B"].calls) == 1
 
 
 def test_ready_with_leftover_branch_recovers(repo, tmp_path):

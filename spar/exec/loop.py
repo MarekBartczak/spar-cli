@@ -357,6 +357,40 @@ class Executor:
                     warning=test_warning,
                 )
 
+                # Empty-implementation guard (§6/§8): if the initial turn created
+                # nothing on the task branch, review/test would run on an empty
+                # diff — the reviewer can emit DONE on nothing and the per-Task
+                # test then fails, spinning forever. Retry the turn ONCE with a
+                # stern warning; if it is STILL empty, abort this task loudly at
+                # the source rather than proceeding to review/test on nothing.
+                if self._task_branch_empty(branch, worktree, state.integration_branch):
+                    self.log(
+                        f"spar exec: [{task.id}] initial implement produced no files; "
+                        "retrying the turn once with a warning."
+                    )
+                    _implementer_turn(
+                        task_state=ts,
+                        impl_adapter=impl_adapter,
+                        worktree=worktree,
+                        plan_path=self.plan_path,
+                        exec_state=state,
+                        store=self.store,
+                        log=self.log,
+                        timeout_sec=_DEFAULT_TIMEOUT_SEC,
+                        warning=(
+                            "Your previous turn created NO files on disk. You MUST "
+                            "create/edit the file(s) in your scope now, on disk, with real "
+                            "content per the plan, using your file-editing tools. Do not "
+                            "merely describe the change."
+                        ),
+                    )
+                    if self._task_branch_empty(
+                        branch, worktree, state.integration_branch
+                    ):
+                        raise ReviewAbort(
+                            f"task {task.id}: implementer created no files"
+                        )
+
                 ts.status = "review"
                 self.store.save(state)
                 run_cross_review(
@@ -607,6 +641,18 @@ class Executor:
         return result.returncode == 0, output
 
     # -- small git / path helpers --------------------------------------
+
+    def _task_branch_empty(
+        self, branch: str, worktree: Path, integration_base: str
+    ) -> bool:
+        """True iff the task branch carries no change vs its integration base.
+
+        An empty implementation is one that committed nothing onto ``branch``
+        (no diff against ``integration_base``) AND left no uncommitted work in
+        the worktree — i.e. the implementer created no files at all.
+        """
+        committed = gitops.changed_files(self.repo, integration_base, branch)
+        return not committed and gitops.is_clean(worktree)
 
     def _task_branch(self, task: Task) -> str:
         return f"spar/{task.id}-{task.side}"

@@ -382,6 +382,72 @@ def test_nested_file_under_star_glob_is_out_of_scope(env):
 # ---------------------------------------------------------------------------
 
 
+def test_anti_spin_accept_without_edit_aborts(env):
+    # An implementer that marks a remark accepted but writes NO file across turns
+    # is not converging. The anti-spin guard retries each such turn once (stern
+    # warning) and, after consecutive no-change turns, raises ReviewAbort rather
+    # than spinning forever on an empty diff.
+    task = _task(files=("work.py",))
+    # 2 turns x (1 turn + 1 anti-spin retry) = 4 implementer calls, each accepts
+    # #1 while writing nothing.
+    impl_steps = [Step(vblock("CONTINUE", resolved=["#1 accepted"])) for _ in range(4)]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] implement it"])),  # raises #1
+        Step(vblock("CONTINUE", remarks=["[MUST] still nothing on disk"])),  # #2
+    ]
+
+    impl = FakeAdapter("impl", impl_steps, root=env["worktree"])
+    review = FakeAdapter("review", review_steps, root=None)
+    task_state = TaskState(task=task, status="review", branch=env["branch"])
+    exec_state = ExecState(
+        integration_branch=env["integration_base"], tasks={task.id: task_state}
+    )
+
+    with pytest.raises(ReviewAbort) as excinfo:
+        run_cross_review(
+            task_state=task_state,
+            impl_adapter=impl,
+            review_adapter=review,
+            repo=env["repo"],
+            worktree=env["worktree"],
+            integration_base=env["integration_base"],
+            plan_path=env["plan_path"],
+            timeout_sec=30,
+            store=env["store"],
+            exec_state=exec_state,
+            log=lambda *_: None,
+        )
+    assert "no changes" in str(excinfo.value)
+    # It aborted rather than spinning: two reviewer turns, two implementer turns
+    # (each retried once by the anti-spin guard).
+    assert len(review.calls) == 2
+    assert len(impl.calls) == 4
+    # nothing landed on the branch
+    assert _branch_files(env) == []
+
+
+def test_anti_spin_does_not_trip_legit_progress(env):
+    # Regression: a task that edits a real file each time it addresses a remark
+    # converges to reviewer DONE normally — the anti-spin guard never fires.
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v1\n"}),
+        Step(vblock("CONTINUE", resolved=["#2 accepted"]), edits={"work.py": "v2\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] first fix"])),  # #1
+        Step(vblock("CONTINUE", remarks=["[MUST] second fix"])),  # #2
+        Step(vblock("DONE")),  # both resolved -> terminate
+    ]
+    impl, review, task_state, exec_state, logs = _run(env, task, impl_steps, review_steps)
+
+    assert len(review.calls) == 3
+    assert len(impl.calls) == 2  # one call per turn, no anti-spin retry
+    assert len(task_state.resolved_remarks) == 2
+    assert task_state.pending_remarks == []
+    assert "work.py" in _branch_files(env)
+
+
 def test_impl_own_remarks_not_added_to_ledger(env):
     task = _task(files=("work.py",))
     impl_steps = [

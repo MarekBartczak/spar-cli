@@ -46,6 +46,12 @@ __all__ = ["ReviewAbort", "run_cross_review"]
 
 _REVIEWER_AUTHOR = "reviewer"
 
+# Anti-spin: if the implementer produces NO file change for this many CONSECUTIVE
+# turns while the review loop still has blocking work, it is not converging —
+# abort loudly rather than spin forever. A legitimately converging task (each
+# turn edits) resets the streak every turn and never trips this.
+_NO_CHANGE_ABORT_TURNS = 2
+
 _VERDICT_RETRY_PROMPT = """\
 Your previous reply did not contain a usable <verdict> block (it was missing or
 malformed). Reply with ONLY a single, syntactically valid <verdict> block and
@@ -184,6 +190,8 @@ def run_cross_review(
     worktree = Path(worktree)
     task = task_state.task
 
+    no_change_streak = 0  # consecutive implementer turns that changed no files
+
     while True:
         # -- reviewer turn ------------------------------------------------
         diff_text = gitops.diff(repo, integration_base, task_state.branch or integration_base)
@@ -236,7 +244,7 @@ def run_cross_review(
             )
 
         # -- implementer turn --------------------------------------------
-        _implementer_turn(
+        made_changes = _implementer_turn(
             task_state=task_state,
             impl_adapter=impl_adapter,
             worktree=worktree,
@@ -246,6 +254,20 @@ def run_cross_review(
             log=log,
             timeout_sec=timeout_sec,
         )
+
+        # Anti-spin guard: the loop only reaches an implementer turn while there
+        # is still blocking work (a non-terminating reviewer verdict). An
+        # implementer that changes NO files for several consecutive turns is not
+        # converging — abort loudly rather than loop forever writing nothing.
+        if made_changes:
+            no_change_streak = 0
+        else:
+            no_change_streak += 1
+            if no_change_streak >= _NO_CHANGE_ABORT_TURNS:
+                raise ReviewAbort(
+                    f"task {task.id}: implementer produced no changes across "
+                    f"{no_change_streak} turns"
+                )
 
 
 def _implementer_turn(
@@ -259,15 +281,27 @@ def _implementer_turn(
     log,
     timeout_sec: int,
     warning: str | None = None,
-) -> None:
-    # ``warning`` seeds the first attempt's prompt with out-of-loop failure
-    # context (e.g. the per-Task test's captured failing output on a
-    # testing→implementing re-entry, spec §6). The scope guard below overwrites
-    # it with its own message on a retry, since a scope violation is the more
-    # urgent thing to correct on the immediate next attempt.
+) -> bool:
+    """Run one implementer turn; return ``True`` iff it committed file changes.
+
+    ``warning`` seeds the first attempt's prompt with out-of-loop failure
+    context (e.g. the per-Task test's captured failing output on a
+    testing→implementing re-entry, spec §6). Two in-turn guards may overwrite it
+    with their own message and retry:
+
+    - **scope guard** — a change outside the task's file scope is rolled back and
+      retried once; a second violation raises :class:`ReviewAbort`.
+    - **anti-spin guard** — a verdict that marks ≥1 remark ``accepted`` while
+      changing NO files on disk is a protocol contradiction (accepted a fix,
+      didn't apply it). It is retried once with a stern warning; the accepted
+      remarks are held OPEN across that retry so the re-prompt still lists them.
+    """
     task = task_state.task
 
-    for attempt in range(2):  # attempt 0 plus at most one scope-guard retry
+    scope_retried = False
+    nochange_retried = False
+
+    while True:  # bounded: each guard retries at most once (its flag latches)
         pre_oid = _head_oid(worktree)
         prompt = build_impl_prompt(
             task, plan_path, list(task_state.pending_remarks), warning=warning
@@ -304,7 +338,8 @@ def _implementer_turn(
         violations = _scope_violations(changes, task.files)
         if violations:
             _rollback(worktree, pre_oid)
-            if attempt == 0:
+            if not scope_retried:
+                scope_retried = True
                 log(
                     f"[t={task.id}] scope violation: {sorted(violations)} outside "
                     f"{list(task.files)}; rolled back, retrying the turn."
@@ -320,7 +355,26 @@ def _implementer_turn(
                 f"outside {list(task.files)}"
             )
 
-        # scope OK: apply only the implementer's resolutions.
+        # Anti-spin: accepting a remark while writing nothing is a contradiction.
+        # Retry once with a stern warning, holding the accepted remarks OPEN (do
+        # NOT apply resolutions yet) so the re-prompt still lists them to fix.
+        accepted = [r for r in verdict.resolutions if r.accepted]
+        if accepted and not changes and not nochange_retried:
+            nochange_retried = True
+            log(
+                f"[t={task.id}] implementer marked {len(accepted)} remark(s) accepted "
+                "but changed no files; retrying the turn with a warning."
+            )
+            warning = (
+                "You marked remark(s) as accepted but changed NO files on disk. A remark "
+                "you accept REQUIRES a real code change to the file(s) this turn — apply "
+                "the changes on disk now with your file-editing tools, or reject the "
+                "remark with a reason instead."
+            )
+            continue
+
+        # scope OK (and no unaddressed accept-without-edit contradiction to
+        # retry): apply only the implementer's resolutions.
         _apply_resolutions(task_state, verdict, log)
 
         # Commit whatever the implementer changed onto the task branch so the
@@ -331,10 +385,11 @@ def _implementer_turn(
             _git(worktree, "add", "-A")
             _git(worktree, "commit", "-m", f"{task.id}: {short}")
             log(f"[t={task.id}] committed implementer changes.")
-        else:
-            log(f"[t={task.id}] implementer made no change this turn.")
+            store.save(exec_state)
+            return True
+        log(f"[t={task.id}] implementer made no change this turn.")
         store.save(exec_state)
-        return
+        return False
 
 
 def _apply_resolutions(task_state: TaskState, verdict: Verdict, log) -> None:

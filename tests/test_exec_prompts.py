@@ -47,3 +47,30 @@ def test_impl_prompt_warning_included_when_provided():
 def test_impl_prompt_warning_absent_when_not_provided():
     p = build_impl_prompt(T, Path(".spar/artifact.md"), [])
     assert "Warning:" not in p
+
+
+def test_impl_prompt_first_turn_forces_real_file_writes_on_disk():
+    # No open remarks -> the initial code-creating turn. It must force real edits
+    # on disk with the model's tools, not a prose description, and still forbid
+    # emitting DONE.
+    p = build_impl_prompt(T, Path(".spar/artifact.md"), [])
+    low = p.lower()
+    assert "on disk" in low
+    assert "file-editing tools" in low
+    assert "do not merely describe" in low
+    assert "DONE" in p and "do not emit done" in low
+
+
+def test_impl_prompt_review_response_requires_edit_for_accepted():
+    # Open remarks -> a review-response turn. Accepting a remark must require a
+    # real code change on disk, not a prose acknowledgment; DONE still forbidden.
+    p = build_impl_prompt(
+        T, Path(".spar/artifact.md"), [StateRemark(3, Severity.MUST, "codex", "fix X")]
+    )
+    low = p.lower()
+    assert "accepted" in low and "on disk" in low
+    assert "real code change" in low
+    assert "reject" in low
+    # the code change is primary but the verdict still records it
+    assert "resolved:" in p
+    assert "DONE" in p and "do not emit done" in low

@@ -43,10 +43,20 @@ def build_impl_prompt(
         for r in open_remarks:
             remarks_lines.append(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
         remarks_section = "\n" + "\n".join(remarks_lines)
-        instruction = "Your task is to implement the changes according to the plan and address the remarks below."
+        instruction = (
+            "Your task is to implement the changes according to the plan and address the "
+            "remarks below. For each remark you accept, you MUST make the corresponding real "
+            "code change to the file(s) this turn — a remark marked `accepted` requires an "
+            "actual edit on disk, not a prose acknowledgment. Use your file-editing tools. "
+            "Reject (with a reason) any remark you will not act on."
+        )
     else:
         remarks_section = ""
-        instruction = "Your task is to implement the task according to the plan."
+        instruction = (
+            "Your task is to implement the task according to the plan. Create/edit the "
+            "file(s) in your scope now, on disk, with real content per the plan. Use your "
+            "file-editing tools. Do not merely describe the change."
+        )
 
     warning_section = ""
     if warning:
@@ -121,10 +131,16 @@ resolved:
 </verdict>
 
 Protocol for implementation:
+- Make the change by creating/editing files ON DISK with your file-editing tools — real
+  content per the plan, not a description of it. The verdict only RECORDS what you did on
+  disk; the actual edit is what counts.
 - Edit ONLY the files listed in the file scope above.
-- Address each open remark by resolving it in the verdict block (either accepted or rejected).
+- A remark you mark `accepted` REQUIRES a matching real edit on disk this turn. Never mark a
+  remark accepted without making the corresponding code change; if you will not make the
+  edit, mark it `#<id> rejected: <reason>` instead.
+- In `resolved:` you MUST address EVERY open remark id listed above, each as either
+  `#<id> accepted` (with the edit made) or `#<id> rejected: <why>`.
 - Your verdict status must be CONTINUE — do not emit DONE (only the reviewer emits DONE).
-- In `resolved:` you MUST address EVERY open remark id listed above, each as either `#<id> accepted` or `#<id> rejected: <why>`.
 - Do not raise new remarks and do not judge your own work — only the reviewer raises remarks and decides DONE/CONTINUE.
 """
 
