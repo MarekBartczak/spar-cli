@@ -111,7 +111,13 @@ class Executor:
         *,
         repo: Path,
         spar_dir: Path,
-        make_adapter: Callable[[str, Path], Adapter],
+        # ``(side, worktree, model) -> Adapter``: builds the Adapter for one
+        # turn. ``model`` is the negotiated per-Task model to run (the
+        # implementer's ``task.model`` or the reviewer's ``task.review_model``)
+        # so the Assignment negotiated for the Task actually drives which
+        # model executes the turn, rather than whatever default the factory
+        # would otherwise pick.
+        make_adapter: Callable[[str, Path, str], Adapter],
         sides: dict[str, SideConfig],
         order: list[str],
         plan_path: Path,
@@ -315,8 +321,8 @@ class Executor:
             while True:
                 ts.status = "implementing"
                 self.store.save(state)
-                impl_adapter = self.make_adapter(task.side, worktree)
-                review_adapter = self.make_adapter(reviewer, self.repo)
+                impl_adapter = self.make_adapter(task.side, worktree, task.model)
+                review_adapter = self.make_adapter(reviewer, self.repo, task.review_model)
 
                 # Initial code-creating implement turn BEFORE the first reviewer
                 # turn (the reviewer must have a non-empty diff to read).

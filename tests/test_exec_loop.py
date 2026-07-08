@@ -65,6 +65,7 @@ class FakeAdapter:
         self.steps = list(steps)
         self.root = None  # set on each make_adapter call
         self.calls = []
+        self.models = []  # model passed on each make_adapter call for this side
 
     def run_turn(self, prompt, session_id, timeout_sec):
         self.calls.append({"prompt": prompt, "session_id": session_id})
@@ -75,15 +76,21 @@ class FakeAdapter:
 
 def make_factory(steps_by_side):
     """Return (make_adapter, adapters) where make_adapter memoizes one adapter
-    per side and updates its ``root`` (cwd/worktree) on each call."""
+    per side and updates its ``root`` (cwd/worktree) on each call.
+
+    ``model`` (the third factory arg, per Task.model/review_model) is recorded
+    on the adapter's ``models`` list every time the factory is invoked, so
+    tests can assert the negotiated per-Task model was actually threaded
+    through to the adapter construction call for each turn."""
     adapters: dict[str, FakeAdapter] = {}
 
-    def make_adapter(side, worktree):
+    def make_adapter(side, worktree, model):
         a = adapters.get(side)
         if a is None:
             a = FakeAdapter(side, steps_by_side.get(side, []))
             adapters[side] = a
         a.root = Path(worktree)
+        a.models.append(model)
         return a
 
     return make_adapter, adapters
@@ -220,6 +227,17 @@ def test_happy_path_two_tasks(repo, tmp_path):
     assert "work1.py" in master_files
     assert "work2.py" in master_files
     assert gate.calls  # gate was consulted
+
+    # Per-Task model assignment is honored end-to-end: the implement turn for
+    # t1 (side A) must run on t1.model ("ma"), and the review turn for t1
+    # (performed by side B as reviewer) must run on t1.review_model ("mb").
+    # Side A's adapter is built once for t1's implement turn (model="ma") and
+    # once for t2's review turn (reviewer for t2's side B, model=t2.review_model
+    # == "ma"); side B's adapter is built once for t1's review turn
+    # (model=t1.review_model == "mb") and once for t2's implement turn
+    # (model=t2.model == "mb").
+    assert adapters["A"].models == ["ma", "ma"]
+    assert adapters["B"].models == ["mb", "mb"]
 
 
 # ---------------------------------------------------------------------------
