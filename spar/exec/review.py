@@ -30,9 +30,9 @@ an unusable verdict is retried once (verdict-only prompt) before aborting.
 
 from __future__ import annotations
 
-import fnmatch
+import re
 import subprocess
-from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 from spar.adapters.base import Adapter, SessionLost
@@ -90,8 +90,16 @@ def _head_oid(worktree: Path) -> str:
 
 
 def _worktree_changes(worktree: Path) -> list[str]:
-    """Return the paths changed in the worktree (staged, unstaged, untracked)."""
-    out = _git(worktree, "-c", "core.quotePath=false", "status", "--porcelain").stdout
+    """Return the paths changed in the worktree (staged, unstaged, untracked).
+
+    ``--untracked-files=all`` is required so that an untracked file nested in a
+    new directory is reported by its full path (``src/sub/deep.py``) rather than
+    collapsed to the directory (``src/sub/``); the scope guard matches globs
+    against full paths, so collapsing would defeat segment-aware matching.
+    """
+    out = _git(
+        worktree, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"
+    ).stdout
     paths: list[str] = []
     for line in out.split("\n"):
         if not line.strip():
@@ -105,8 +113,42 @@ def _worktree_changes(worktree: Path) -> list[str]:
     return paths
 
 
+@lru_cache(maxsize=None)
+def _glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Translate a path glob to an anchored, ``/``-aware regex.
+
+    A single ``*`` / ``?`` must NOT cross a path separator, so they map to
+    ``[^/]*`` / ``[^/]``. A ``**`` (globstar) *may* cross ``/`` and maps to
+    ``.*``. Everything else is matched literally. Matching is full-string
+    against POSIX-style paths.
+    """
+    out: list[str] = []
+    i, n = 0, len(glob)
+    while i < n:
+        c = glob[i]
+        if c == "*":
+            if i + 1 < n and glob[i + 1] == "*":  # globstar: crosses '/'
+                out.append(".*")
+                i += 2
+            else:  # single star: does not cross '/'
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def _matches_scope(path: str, files: tuple[str, ...]) -> bool:
+    posix = path.replace("\\", "/")
+    return any(_glob_to_regex(g).match(posix) is not None for g in files)
+
+
 def _scope_violations(paths: list[str], files: tuple[str, ...]) -> list[str]:
-    return [p for p in paths if not any(fnmatch.fnmatch(p, g) for g in files)]
+    return [p for p in paths if not _matches_scope(p, files)]
 
 
 def _rollback(worktree: Path, oid: str) -> None:
@@ -237,6 +279,22 @@ def _implementer_turn(
             timeout_sec=timeout_sec,
         )
 
+        # Parse the verdict FIRST. ``_parse_verdict_with_retry`` may run the
+        # implementer adapter a second time (a verdict-only retry), and that
+        # retry can also touch the worktree. The scope guard must therefore run
+        # on the FINAL worktree state — after any retry — so no path that
+        # reaches the commit below can escape it.
+        verdict = _parse_verdict_with_retry(
+            role="impl",
+            adapter=impl_adapter,
+            result=result,
+            task_state=task_state,
+            exec_state=exec_state,
+            store=store,
+            log=log,
+            timeout_sec=timeout_sec,
+        )
+
         changes = _worktree_changes(worktree)
         violations = _scope_violations(changes, task.files)
         if violations:
@@ -257,17 +315,7 @@ def _implementer_turn(
                 f"outside {list(task.files)}"
             )
 
-        # scope OK: parse verdict, apply only the implementer's resolutions.
-        verdict = _parse_verdict_with_retry(
-            role="impl",
-            adapter=impl_adapter,
-            result=result,
-            task_state=task_state,
-            exec_state=exec_state,
-            store=store,
-            log=log,
-            timeout_sec=timeout_sec,
-        )
+        # scope OK: apply only the implementer's resolutions.
         _apply_resolutions(task_state, verdict, log)
 
         # Commit whatever the implementer changed onto the task branch so the

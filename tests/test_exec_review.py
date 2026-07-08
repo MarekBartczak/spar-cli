@@ -277,3 +277,135 @@ def test_no_premature_done_while_must_open(env):
     assert len(task_state.resolved_remarks) == 1
     assert task_state.pending_remarks == []
     assert "work.py" in _branch_files(env)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5: a verdict-only retry that makes an out-of-scope edit must NOT
+# slip past the scope guard. The FIRST implementer reply has a malformed
+# verdict AND edits an out-of-scope file; the verdict-only retry returns a
+# valid verdict but the out-of-scope change is still present in the worktree.
+# The turn must be rolled back (nothing lands on the branch); a second such
+# turn aborts.
+# ---------------------------------------------------------------------------
+
+
+def test_verdict_retry_out_of_scope_edit_rolls_back_and_aborts(env):
+    task = _task(files=("allowed.py",))
+    impl_steps = [
+        # turn 1, first reply: malformed verdict, IN-scope (no edit) -> passes the
+        # old first-reply scope check, then triggers a verdict-only retry.
+        Step("prose only, no verdict block", edits={}),
+        # turn 1, verdict-only retry: valid verdict AND an out-of-scope edit that
+        # the old code never scope-checked before committing.
+        Step(vblock("CONTINUE"), edits={"forbidden.py": "nope\n"}),
+        # turn 2, first reply: malformed verdict, no edit
+        Step("still no verdict here", edits={}),
+        # turn 2, verdict-only retry: valid verdict + out-of-scope edit again
+        Step(vblock("CONTINUE"), edits={"forbidden.py": "again\n"}),
+    ]
+    review_steps = [Step(vblock("CONTINUE", remarks=["[MUST] implement it"]))]
+
+    impl = FakeAdapter("impl", impl_steps, root=env["worktree"])
+    review = FakeAdapter("review", review_steps, root=None)
+    task_state = TaskState(task=task, status="review", branch=env["branch"])
+    exec_state = ExecState(
+        integration_branch=env["integration_base"], tasks={task.id: task_state}
+    )
+
+    with pytest.raises(ReviewAbort):
+        run_cross_review(
+            task_state=task_state,
+            impl_adapter=impl,
+            review_adapter=review,
+            repo=env["repo"],
+            worktree=env["worktree"],
+            integration_base=env["integration_base"],
+            plan_path=env["plan_path"],
+            timeout_sec=30,
+            store=env["store"],
+            exec_state=exec_state,
+            log=lambda *_: None,
+        )
+
+    # both turns ran their first reply + verdict-only retry (4 impl calls)
+    assert len(impl.calls) == 4
+    # the out-of-scope change never landed and the worktree is clean
+    assert not (env["worktree"] / "forbidden.py").exists()
+    assert _git(env["worktree"], "status", "--porcelain").stdout.strip() == ""
+    assert _branch_files(env) == []
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6: a single '*' glob must NOT cross a path separator, so a nested
+# file under an allowed directory is out of scope and rolled back.
+# ---------------------------------------------------------------------------
+
+
+def test_nested_file_under_star_glob_is_out_of_scope(env):
+    task = _task(files=("src/*.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE"), edits={"src/sub/deep.py": "x\n"}),
+        Step(vblock("CONTINUE"), edits={"src/sub/deep.py": "y\n"}),
+    ]
+    review_steps = [Step(vblock("CONTINUE", remarks=["[MUST] implement it"]))]
+
+    impl = FakeAdapter("impl", impl_steps, root=env["worktree"])
+    review = FakeAdapter("review", review_steps, root=None)
+    task_state = TaskState(task=task, status="review", branch=env["branch"])
+    exec_state = ExecState(
+        integration_branch=env["integration_base"], tasks={task.id: task_state}
+    )
+
+    with pytest.raises(ReviewAbort):
+        run_cross_review(
+            task_state=task_state,
+            impl_adapter=impl,
+            review_adapter=review,
+            repo=env["repo"],
+            worktree=env["worktree"],
+            integration_base=env["integration_base"],
+            plan_path=env["plan_path"],
+            timeout_sec=30,
+            store=env["store"],
+            exec_state=exec_state,
+            log=lambda *_: None,
+        )
+
+    # nested edit was treated as a scope violation and rolled back
+    assert not (env["worktree"] / "src" / "sub" / "deep.py").exists()
+    assert _branch_files(env) == []
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: the implementer's OWN remarks in its verdict never enter the
+# ledger — only the reviewer raises remarks.
+# ---------------------------------------------------------------------------
+
+
+def test_impl_own_remarks_not_added_to_ledger(env):
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(
+            vblock(
+                "CONTINUE",
+                resolved=["#1 accepted"],
+                remarks=["[MUST] impl's own remark", "[NICE] impl's own nice"],
+            ),
+            edits={"work.py": "x\n"},
+        ),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] reviewer remark"])),  # raises #1
+        Step(vblock("DONE")),  # #1 resolved -> terminate
+    ]
+    impl, review, task_state, exec_state, logs = _run(env, task, impl_steps, review_steps)
+
+    # only the reviewer's single remark was ever ledgered
+    assert task_state.next_remark_id == 2  # started at 1, +1 for the reviewer only
+    assert len(task_state.resolved_remarks) == 1
+    assert task_state.pending_remarks == []
+    # none of the implementer's own remark texts leaked into either ledger
+    all_texts = [r.text for r in task_state.pending_remarks] + [
+        rr.remark.text for rr in task_state.resolved_remarks
+    ]
+    assert not any("impl's own" in t for t in all_texts)
