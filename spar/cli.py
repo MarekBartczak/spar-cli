@@ -7,6 +7,9 @@ from pathlib import Path
 from spar.adapters.claude import ClaudeAdapter
 from spar.adapters.codex import CodexAdapter
 from spar.config import ConfigError, DebateConfig, load_config, set_global_command
+from spar.exec.loop import ConsoleExecGate, Executor
+from spar.exec.state import ExecStateStore
+from spar.exec.tasklist import TaskListError, parse_task_list
 from spar.guard import Guard
 from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
@@ -105,6 +108,114 @@ def _build_orchestrator(args, config) -> Orchestrator:
     )
 
 
+def _build_exec_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="spar exec",
+        description="Run the execution engine over a consensus Plan's task list",
+    )
+    parser.add_argument(
+        "--continue", dest="cont", action="store_true",
+        help="Resume an interrupted execution",
+    )
+    parser.add_argument(
+        "--merge-sessions", dest="merge_sessions", action="store_true",
+        help="Reserved for a future release; does not change session "
+             "lifetime yet (spec deferred)",
+    )
+    parser.add_argument(
+        "--auto-integration-merge", dest="auto_integration_merge",
+        action="store_true",
+        help="Skip the interactive final-merge confirmation gate",
+    )
+    parser.add_argument(
+        "--sides", default="claude,codex",
+        help="Comma-separated list of sides (default: claude,codex)",
+    )
+    parser.add_argument(
+        "--first", default="claude",
+        help="Which side goes first (default: claude)",
+    )
+    return parser
+
+
+def _build_executor(
+    args, config, tasks, order: list[str], plan_path: Path
+) -> Executor:
+    """Wire config + CLI args into a ready-to-run :class:`Executor`.
+
+    Kept deliberately thin (mirrors ``_build_orchestrator``): no business
+    logic beyond adapter-factory construction, so it is easy for tests to
+    monkeypatch wholesale.
+    """
+
+    def make_adapter(side: str, worktree: Path, model: str):
+        side_cfg = config.sides[side]
+        adapter_cls = _ADAPTERS[side_cfg.adapter]
+        return adapter_cls(
+            command=side_cfg.command,
+            model=model,
+            cwd=worktree,
+            events_dir=Path(".spar/transcript"),
+            side_name=side,
+        )
+
+    return Executor(
+        repo=Path.cwd(),
+        spar_dir=Path(".spar"),
+        make_adapter=make_adapter,
+        sides=config.sides,
+        order=order,
+        plan_path=plan_path,
+        tasks=tasks,
+        execution=config.execution,
+        gate=ConsoleExecGate(),
+        store=ExecStateStore(Path(".spar")),
+        auto_integration_merge=args.auto_integration_merge,
+    )
+
+
+def _run_exec(argv) -> int:
+    """Handler for the ``spar exec`` subcommand."""
+    parser = _build_exec_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        config = load_config(Path.cwd())
+    except ConfigError as exc:
+        sys.stderr.write(f"spar: configuration error: {exc}\n")
+        return 2
+
+    sides = [s.strip() for s in args.sides.split(",") if s.strip()]
+    order = [args.first] + [s for s in sides if s != args.first]
+
+    plan_path = Path(".spar/artifact.md")
+    if not plan_path.exists():
+        sys.stderr.write(
+            f"spar: no plan found at {plan_path}; run a debate to consensus "
+            "over a plan before running 'spar exec'.\n"
+        )
+        return 2
+    plan_text = plan_path.read_text(encoding="utf-8")
+
+    try:
+        tasks = parse_task_list(plan_text, sides=config.sides, order=order)
+    except TaskListError as exc:
+        sys.stderr.write(
+            "spar: run a debate to consensus over the plan and its tasks "
+            f"first: {exc}\n"
+        )
+        return 2
+
+    try:
+        executor = _build_executor(args, config, tasks, order, plan_path)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.cont:
+        return executor.run_continue()
+    return executor.run()
+
+
 def _run_list_commands() -> int:
     """Print the resolved CLI command for each configured side."""
     try:
@@ -123,6 +234,16 @@ def main(argv=None) -> int:
     Exit codes: 0 ok, 2 usage error, 3 lock/state, 4 protocol/guard abort,
     5 user abort.
     """
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Leading-token subcommand: ``spar exec ...`` routes to a dedicated
+    # handler/parser over the remaining tokens, entirely separate from the
+    # debate command below (which stays unchanged so `spar "<prompt>"`,
+    # `--continue`, `-m/-setCommand`, `--list-commands` keep working).
+    if argv and argv[0] == "exec":
+        return _run_exec(argv[1:])
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
