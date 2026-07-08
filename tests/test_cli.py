@@ -108,3 +108,64 @@ class TestBuildOrchestrator:
         config = load_config(Path.cwd())
         orch = cli._build_orchestrator(args, config)
         assert orch.debate.max_rounds == 11
+
+
+class TestSetCommandMode:
+    """`spar -m <side> -setCommand <binary>` persists a global command override."""
+
+    def test_set_command_writes_global_and_exits_zero(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+        rc = main(["-m", "codex", "-setCommand", "codex-priv"])
+        assert rc == 0
+
+        from spar.config import load_config
+
+        config = load_config(tmp_path / "project")
+        assert config.sides["codex"].command == "codex-priv"
+
+    def test_set_command_does_not_run_debate(self, tmp_path, monkeypatch, fake_orch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+        rc = main(["-m", "claude", "-setCommand", "claude-erli"])
+        assert rc == 0
+        # orchestrator never built → no debate ran
+        assert "orch" not in fake_orch
+
+    def test_long_form_flags(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+        rc = main(["--adapter", "claude", "--set-command", "claude-erli"])
+        assert rc == 0
+
+        from spar.config import load_config
+
+        config = load_config(tmp_path / "project")
+        assert config.sides["claude"].command == "claude-erli"
+
+    def test_set_command_requires_adapter(self):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["-setCommand", "codex-priv"])
+        assert exc_info.value.code == 2
+
+    def test_unknown_adapter_is_usage_error(self):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["-m", "gemini", "-setCommand", "gemini"])
+        assert exc_info.value.code == 2
+
+    def test_adapter_without_set_command_is_usage_error(self):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["-m", "claude", "some prompt"])
+        assert exc_info.value.code == 2
+
+    def test_list_commands_shows_resolved_commands(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        main(["-m", "claude", "-setCommand", "claude-erli"])
+
+        rc = main(["--list-commands"])
+        assert rc == 0
+
+        out = capsys.readouterr().out
+        assert "claude" in out
+        assert "claude-erli" in out
+        assert "codex" in out

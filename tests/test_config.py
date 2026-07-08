@@ -9,6 +9,7 @@ from spar.config import (
     Config,
     ConfigError,
     load_config,
+    set_global_command,
 )
 
 
@@ -317,6 +318,65 @@ command = "explicit-claude"
         config = load_config(project_dir, global_path=explicit_config)
 
         assert config.sides["claude"].command == "explicit-claude"
+
+
+class TestSetGlobalCommand:
+    """Test persisting a per-side command override to the global config."""
+
+    def test_writes_new_global_config_file(self, tmp_path):
+        gp = tmp_path / "cfg" / "config.toml"
+        set_global_command("codex", "codex-priv", global_path=gp)
+
+        assert gp.exists()
+        config = load_config(tmp_path / "project", global_path=gp)
+        assert config.sides["codex"].command == "codex-priv"
+        assert config.sides["codex"].adapter == "codex"
+
+    def test_leaves_other_default_side_untouched(self, tmp_path):
+        gp = tmp_path / "config.toml"
+        set_global_command("codex", "codex-priv", global_path=gp)
+
+        config = load_config(tmp_path / "project", global_path=gp)
+        assert config.sides["claude"].command == "claude"
+
+    def test_multiple_sides_accumulate(self, tmp_path):
+        gp = tmp_path / "config.toml"
+        set_global_command("claude", "claude-erli", global_path=gp)
+        set_global_command("codex", "codex-priv", global_path=gp)
+
+        config = load_config(tmp_path / "project", global_path=gp)
+        assert config.sides["claude"].command == "claude-erli"
+        assert config.sides["codex"].command == "codex-priv"
+
+    def test_overwrites_existing_command(self, tmp_path):
+        gp = tmp_path / "config.toml"
+        set_global_command("claude", "claude-erli", global_path=gp)
+        set_global_command("claude", "claude-priv", global_path=gp)
+
+        config = load_config(tmp_path / "project", global_path=gp)
+        assert config.sides["claude"].command == "claude-priv"
+
+    def test_preserves_unrelated_debate_section(self, tmp_path):
+        gp = tmp_path / "config.toml"
+        gp.write_text("[debate]\nmax_rounds = 9\n")
+        set_global_command("claude", "claude-erli", global_path=gp)
+
+        config = load_config(tmp_path / "project", global_path=gp)
+        assert config.debate.max_rounds == 9
+        assert config.sides["claude"].command == "claude-erli"
+
+    def test_rejects_unknown_adapter(self, tmp_path):
+        with pytest.raises(ConfigError):
+            set_global_command("gemini", "gemini", global_path=tmp_path / "c.toml")
+
+    def test_rejects_empty_command(self, tmp_path):
+        with pytest.raises(ConfigError):
+            set_global_command("claude", "   ", global_path=tmp_path / "c.toml")
+
+    def test_returns_written_path(self, tmp_path):
+        gp = tmp_path / "config.toml"
+        result = set_global_command("codex", "codex-priv", global_path=gp)
+        assert result == gp
 
 
 class TestValidationAdapterValues:

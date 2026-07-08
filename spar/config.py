@@ -247,3 +247,74 @@ def load_config(project_dir: Path, global_path: Optional[Path] = None) -> Config
 
     # Convert merged dict to Config object
     return _dict_to_config(merged)
+
+
+def _escape_toml_str(value: object) -> str:
+    """Escape a value for a TOML basic (double-quoted) string."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _dump_config_toml(raw: dict) -> str:
+    """Serialize a config dict (our restricted schema) back to TOML text.
+
+    Handles only the structure spar itself produces: ``[sides.<name>]`` tables
+    with string scalars and a ``[debate]`` table with string/int scalars. This
+    is a deliberate, minimal writer — stdlib has no TOML serializer and the
+    schema is small and fully controlled.
+    """
+    lines: list[str] = []
+    for name, cfg in raw.get("sides", {}).items():
+        lines.append(f"[sides.{name}]")
+        for key in ("adapter", "command", "model"):
+            val = cfg.get(key)
+            if val is None or val == "":
+                continue
+            lines.append(f'{key} = "{_escape_toml_str(val)}"')
+        lines.append("")
+
+    debate = raw.get("debate", {})
+    if debate:
+        lines.append("[debate]")
+        for key, val in debate.items():
+            if isinstance(val, bool):
+                lines.append(f"{key} = {'true' if val else 'false'}")
+            elif isinstance(val, (int, float)):
+                lines.append(f"{key} = {val}")
+            else:
+                lines.append(f'{key} = "{_escape_toml_str(val)}"')
+        lines.append("")
+
+    text = "\n".join(lines).strip("\n")
+    return text + "\n" if text else ""
+
+
+def set_global_command(
+    adapter: str, command: str, global_path: Optional[Path] = None
+) -> Path:
+    """Persist ``command`` as the CLI binary for side ``adapter`` in the global config.
+
+    Reads the existing global config (if any), sets ``[sides.<adapter>].command``
+    (and its ``adapter`` field), then writes the file back atomically. Other
+    sides and the ``[debate]`` section are preserved. Returns the path written.
+
+    Raises ``ConfigError`` for an unknown adapter or an empty command.
+    """
+    _validate_adapter(adapter)
+    if not command or not command.strip():
+        raise ConfigError(f"command for side '{adapter}' cannot be empty")
+    command = command.strip()
+
+    if global_path is None:
+        global_path = _get_global_config_path()
+
+    raw = _load_toml_file(global_path)
+    sides = raw.setdefault("sides", {})
+    side = sides.setdefault(adapter, {})
+    side["adapter"] = adapter
+    side["command"] = command
+
+    global_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = global_path.with_name(global_path.name + ".tmp")
+    tmp.write_text(_dump_config_toml(raw), encoding="utf-8")
+    os.replace(tmp, global_path)
+    return global_path

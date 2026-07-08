@@ -58,6 +58,32 @@ spar --continue
 - `--artifact` (default: `.spar/artifact.md`): path to the artifact file
 - `--continue`: resume an interrupted debate (requires a `.spar/session.json`)
 
+### Custom CLI commands (aliases)
+
+By default a side runs the `claude` / `codex` binary on your `PATH`. If your
+shell uses a different command to launch an agent (e.g. `claude-erli`,
+`claude-priv`), persist it globally once:
+
+```bash
+# remember, in ~/.config/spar/config.toml, the binary to run per side
+spar -m claude -setCommand claude-erli
+spar -m codex  -setCommand codex-priv
+
+# inspect what each side currently resolves to
+spar --list-commands
+#   claude: claude-erli (adapter: claude)
+#   codex: codex-priv (adapter: codex)
+```
+
+- `-m` / `--adapter` `{claude,codex}`: which side to configure.
+- `-setCommand` / `--set-command` `COMMAND`: the CLI binary that side should run;
+  written to the global config so every later debate uses it. The adapter (how
+  the CLI's output is parsed) stays fixed by `-m`; only the executable changes.
+- `--list-commands`: print the resolved command per side and exit.
+
+A project-local `.spar/config.toml` still overrides the global value, and
+`--sides` selects which configured sides debate.
+
 ### Exit codes
 
 | Code | Meaning |

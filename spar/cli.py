@@ -6,7 +6,7 @@ from pathlib import Path
 
 from spar.adapters.claude import ClaudeAdapter
 from spar.adapters.codex import CodexAdapter
-from spar.config import ConfigError, DebateConfig, load_config
+from spar.config import ConfigError, DebateConfig, load_config, set_global_command
 from spar.guard import Guard
 from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
@@ -41,6 +41,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifact", default=".spar/artifact.md",
         help="Artifact file path (default: .spar/artifact.md)",
+    )
+    parser.add_argument(
+        "-m", "--adapter", choices=sorted(_ADAPTERS),
+        help="Side whose CLI command to configure (used with -setCommand)",
+    )
+    parser.add_argument(
+        "-setCommand", "--set-command", dest="set_command", metavar="COMMAND",
+        help="Globally persist the CLI binary to run for the side given by -m "
+             "(e.g. -m claude -setCommand claude-erli)",
+    )
+    parser.add_argument(
+        "--list-commands", dest="list_commands", action="store_true",
+        help="List the resolved CLI command for each configured side and exit",
     )
     return parser
 
@@ -92,6 +105,18 @@ def _build_orchestrator(args, config) -> Orchestrator:
     )
 
 
+def _run_list_commands() -> int:
+    """Print the resolved CLI command for each configured side."""
+    try:
+        config = load_config(Path.cwd())
+    except ConfigError as exc:
+        sys.stderr.write(f"spar: configuration error: {exc}\n")
+        return 2
+    for name, side in config.sides.items():
+        print(f"{name}: {side.command} (adapter: {side.adapter})")
+    return 0
+
+
 def main(argv=None) -> int:
     """Main entry point for spar-cli.
 
@@ -100,6 +125,24 @@ def main(argv=None) -> int:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Management modes: configure/inspect side commands, then exit without a debate.
+    if args.list_commands:
+        return _run_list_commands()
+    if args.set_command is not None:
+        if args.adapter is None:
+            parser.error("-setCommand requires -m/--adapter to name the side")
+        try:
+            path = set_global_command(args.adapter, args.set_command)
+        except ConfigError as exc:
+            parser.error(str(exc))
+        print(
+            f"spar: side '{args.adapter}' command set to "
+            f"'{args.set_command.strip()}' in {path}"
+        )
+        return 0
+    if args.adapter is not None:
+        parser.error("-m/--adapter is only valid together with -setCommand")
 
     if args.prompt is not None and args.cont:
         parser.error("prompt and --continue are mutually exclusive")
