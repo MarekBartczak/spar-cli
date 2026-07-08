@@ -246,6 +246,15 @@ class TestResolvedEntries:
         verdict = parse_verdict(text)
         assert verdict.resolutions == (Resolution(remark_id=3, accepted=True),)
 
+    def test_accepted_with_trailing_note_is_tolerated(self):
+        # Models naturally explain an acceptance; the note is ignored.
+        text = (
+            "<verdict>\nstatus: CONTINUE\nresolved:\n"
+            "- #2 accepted: switched to per-target target_compile_options\n</verdict>"
+        )
+        verdict = parse_verdict(text)
+        assert verdict.resolutions == (Resolution(remark_id=2, accepted=True),)
+
     def test_rejected_with_justification(self):
         text = (
             "<verdict>\nstatus: CONTINUE\nresolved:\n"

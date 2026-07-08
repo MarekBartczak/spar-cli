@@ -75,7 +75,10 @@ _STATUS_RE = re.compile(r"^status:\s*(.*)$")
 # often spell "this section is empty"; accept it as an empty section header.
 _RESOLVED_HEADER_RE = re.compile(r"^resolved:\s*(\[\s*\])?\s*$")
 _REMARKS_HEADER_RE = re.compile(r"^remarks:\s*(\[\s*\])?\s*$")
-_RESOLVED_ACCEPTED_RE = re.compile(r"^#(\d+)\s+accepted\s*$")
+# Tolerate an optional trailing note after ``accepted`` (models naturally
+# explain why they accepted, e.g. ``#2 accepted: switched to per-target flags``).
+# The note is ignored — acceptance carries no justification in the ledger.
+_RESOLVED_ACCEPTED_RE = re.compile(r"^#(\d+)\s+accepted\b.*$")
 _RESOLVED_REJECTED_RE = re.compile(r"^#(\d+)\s+rejected:\s*(.*)$")
 _REMARK_RE = re.compile(r"^\[(MUST|NICE|USER)\]\s*(.*)$")
 
