@@ -40,6 +40,13 @@ Scripted multi-turn mode (for end-to-end debate tests)
   - if ``<dir>/N.foreign`` exists, its content is written to a new file next
     to the artifact (simulates the agent touching a file outside the
     contract, for guard tests).
+  - if ``<dir>/N.files.json`` exists, it is parsed as a JSON object mapping
+    relative path -> file content, and every entry is written under the
+    process's current working directory (creating parent directories as
+    needed). This is how the execution-engine e2e tests simulate an
+    implementer Task writing its scoped files onto the task branch: the
+    impl adapter runs with ``cwd`` set to the task's worktree, so a relative
+    path here lands exactly where the real scope guard expects it.
 """
 
 import fcntl
@@ -108,6 +115,14 @@ def _run_scripted(script_dir: Path, argv: list[str]) -> tuple[str | None, str | 
         if artifact_path:
             foreign_path = Path(artifact_path).parent / f"foreign-codex-{n}.txt"
             foreign_path.write_text(foreign_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+    files_file = script_dir / f"{n}.files.json"
+    if files_file.exists():
+        mapping = json.loads(files_file.read_text(encoding="utf-8"))
+        for rel_path, content in mapping.items():
+            target = Path.cwd() / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
 
     stdout_override = None
     jsonl_file = script_dir / f"{n}.jsonl"
