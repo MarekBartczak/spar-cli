@@ -96,7 +96,8 @@ target branch (`--auto-integration-merge` skips the gate). This final merge is
 the only outward, user-gated action of Execution.
 
 ## Task branch
-A short-lived branch per Task (`spar/t<N>-<side>`), created from the current
+A short-lived branch per Task (`spar/<id>-<side>`, e.g. `spar/t1-claude`),
+created from the current
 Integration branch (so it already contains the Tasks it depends on). The Task is
 implemented, cross-reviewed, and tested on this branch, then merged into the
 Integration branch and deleted.
