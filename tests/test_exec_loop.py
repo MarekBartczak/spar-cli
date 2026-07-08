@@ -504,6 +504,80 @@ def test_recovery_merged_before_cleanup_save(repo, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_recovery_empty_branch_equal_tip_restarts_not_merged(repo, tmp_path):
+    # CRITICAL regression: a task interrupted (Ctrl+C) during its FIRST
+    # implementer turn is left status="implementing" with the task branch
+    # already created but pointing at the SAME commit as integration (zero
+    # commits — no work done yet). ``git merge-base --is-ancestor`` reports a
+    # commit as its own ancestor, so a naive is_ancestor check would wrongly
+    # mark the task "merged", skip it, and report a false success with the
+    # task's work never done. --continue must RESTART the task and run it to
+    # real completion, ending merged with actual commits in integration.
+    base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "branch", "spar/integration", "master")
+    # Task branch created off integration with ZERO commits → equal tip.
+    git(repo, "branch", "spar/t1-A", "spar/integration")
+    assert (
+        git(repo, "rev-parse", "spar/t1-A").stdout.strip()
+        == git(repo, "rev-parse", "spar/integration").stdout.strip()
+    )
+    integration_oid_before = git(repo, "rev-parse", "spar/integration").stdout.strip()
+
+    spar_dir = tmp_path / ".spar"
+    store = ExecStateStore(spar_dir)
+    task = make_task("t1", "A", ["work.py"], test="true")
+    state = ExecState(
+        phase="execution",
+        target_branch="master",
+        target_base_oid=base_oid,
+        integration_branch="spar/integration",
+        tasks={"t1": TaskState(task=task, status="implementing", branch="spar/t1-A")},
+    )
+    store.save(state)
+
+    # Scripted adapters that DO the work on restart (an implementer turn that
+    # writes+commits work, then a passing review).
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "restarted work\n"})],  # impl t1
+        "B": [Step(vblock("DONE"))],  # review t1
+    }
+    make_adapter, adapters = make_factory(steps)
+    gate = FakeGate([GateDecision("accept")])
+    logs = []
+    ex = Executor(
+        repo=repo,
+        spar_dir=spar_dir,
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=tmp_path / "plan.md",
+        tasks=(task,),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate,
+        store=store,
+        log=logs.append,
+    )
+    rc = ex.run_continue()
+    assert rc == 0, f"expected clean completion; logs={logs}"
+    reloaded = store.load()
+    # Task ran to REAL completion, not a false skip.
+    assert reloaded.tasks["t1"].status == "merged"
+    assert reloaded.phase == "done"
+    # The task was genuinely restarted → an adapter was constructed and called.
+    assert "A" in adapters and adapters["A"].calls, "task must have been restarted"
+    # Integration actually advanced (real merge commit), not left at the empty tip.
+    assert (
+        git(repo, "rev-parse", "spar/integration").stdout.strip()
+        != integration_oid_before
+    )
+    # The task's work is present in integration AND in the merged target.
+    assert "work.py" in git(
+        repo, "ls-tree", "-r", "--name-only", "spar/integration"
+    ).stdout.split()
+    assert "work.py" in git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
+    assert not branch_exists(repo, "spar/t1-A")
+
+
 def test_ready_with_leftover_branch_recovers(repo, tmp_path):
     base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
     git(repo, "branch", "spar/integration", "master")

@@ -226,8 +226,20 @@ class Executor:
                     self.log(f"spar exec: recovery — deleted lingering branch {branch}.")
                 continue
             if ts.status in ("implementing", "review", "testing"):
-                if self._branch_exists(branch) and gitops.is_ancestor(
-                    self.repo, branch, integration
+                # A merged task branch is a STRICT ancestor of integration: it
+                # must be genuinely BEHIND the integration tip (integration
+                # contains the task's no-ff merge commit the branch lacks).
+                # ``git merge-base --is-ancestor`` also returns true when the
+                # two commits are IDENTICAL — a freshly created task branch
+                # points at the integration tip with zero commits — so an equal
+                # tip must NOT be read as merged (it is an interrupted first
+                # implementer turn whose work was never done). Require tip
+                # inequality to distinguish the two.
+                if (
+                    self._branch_exists(branch)
+                    and gitops.is_ancestor(self.repo, branch, integration)
+                    and gitops.rev_parse(self.repo, branch)
+                    != gitops.rev_parse(self.repo, integration)
                 ):
                     # crash after merge, before state save: the merge happened.
                     self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
