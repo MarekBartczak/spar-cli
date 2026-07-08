@@ -1,7 +1,7 @@
 # spar v2 — Execution mode (design)
 
 Date: 2026-07-08
-Status: Draft (pre-challenge)
+Status: Reviewed — challenge AGREE after 5 rounds (reviewer: codex gpt-5.5)
 
 Builds on v1 (debate engine): adapters (claude/codex), verdict protocol
 (AGREE / CONTINUE / DONE), guard, `.spar/` state. Terminology: see `CONTEXT.md`.
@@ -393,3 +393,9 @@ accepted and fixed in §7:
 Round-4 fixes are localized to §7's fix-Task and are **unverified** by the
 reviewer. Standing dispute: **#6** (loop caps) rejected, aligned with the user's
 explicit decision — the user may overturn. A +1 verification round is offered.
+
+### Round 5 — Verdict: AGREE (verification)
+
+Reviewer verified #11–#14 correctly and consistently applied in §7 with no new
+contradiction against §4.1/§5/§6. Challenge loop closed: AGREE. Only standing
+item is the deliberately-rejected #6 (loop caps), open to user override.
