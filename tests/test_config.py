@@ -6,6 +6,7 @@ from pathlib import Path
 from spar.config import (
     SideConfig,
     DebateConfig,
+    ExecutionConfig,
     Config,
     ConfigError,
     load_config,
@@ -59,14 +60,16 @@ class TestDataclasses:
             "codex": SideConfig(adapter="codex", command="codex"),
         }
         debate = DebateConfig()
-        config = Config(sides=sides, debate=debate)
+        execution = ExecutionConfig()
+        config = Config(sides=sides, debate=debate, execution=execution)
         assert config.sides == sides
         assert config.debate == debate
+        assert config.execution == execution
 
     def test_config_frozen(self):
         """Test that Config is frozen."""
         sides = {"claude": SideConfig(adapter="claude", command="claude")}
-        config = Config(sides=sides, debate=DebateConfig())
+        config = Config(sides=sides, debate=DebateConfig(), execution=ExecutionConfig())
         with pytest.raises(Exception):  # FrozenInstanceError
             config.sides = {}
 
@@ -653,3 +656,40 @@ class TestConfigErrorException:
         error = ConfigError("test message")
         assert isinstance(error, Exception)
         assert str(error) == "test message"
+
+
+class TestSideModelsAndDefault:
+    """Test per-side model catalog fields."""
+
+    def test_side_models_and_default_parsed(self, tmp_path):
+        """Test that models and default_model are parsed from config."""
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nmodels=["opus","sonnet"]\ndefault_model="sonnet"\n')
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].models == ("opus", "sonnet")
+        assert cfg.sides["claude"].default_model == "sonnet"
+
+    def test_default_model_must_be_in_catalog(self, tmp_path):
+        """Test that default_model must be in the models catalog."""
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nmodels=["opus"]\ndefault_model="haiku"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+
+class TestExecutionConfig:
+    """Test execution configuration."""
+
+    def test_execution_section_parsed(self, tmp_path):
+        """Test that execution section is parsed from config."""
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\ntest_command="pytest -q"\nmax_review_rounds=3\n')
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.execution.test_command == "pytest -q"
+        assert cfg.execution.max_review_rounds == 3
+
+    def test_execution_defaults_when_absent(self, tmp_path):
+        """Test that execution section uses defaults when absent."""
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.execution.test_command == ""
+        assert cfg.execution.max_review_rounds == 0
