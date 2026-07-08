@@ -46,6 +46,10 @@ def test_new_session_argv_contract(tmp_path, monkeypatch):
         "-p",
         "--output-format",
         "json",
+        "--allowedTools",
+        "Read,Edit,Write",
+        "--permission-mode",
+        "acceptEdits",
         "hello there",
     ]
 
@@ -65,6 +69,10 @@ def test_resume_argv_contract(tmp_path, monkeypatch):
         "sess-42",
         "--output-format",
         "json",
+        "--allowedTools",
+        "Read,Edit,Write",
+        "--permission-mode",
+        "acceptEdits",
         "continue please",
     ]
 
@@ -82,6 +90,10 @@ def test_model_flag_included_when_set_new_session(tmp_path, monkeypatch):
         "-p",
         "--output-format",
         "json",
+        "--allowedTools",
+        "Read,Edit,Write",
+        "--permission-mode",
+        "acceptEdits",
         "--model",
         "opus-9",
         "hi",
@@ -103,6 +115,10 @@ def test_model_flag_included_when_set_resume(tmp_path, monkeypatch):
         "sess-1",
         "--output-format",
         "json",
+        "--allowedTools",
+        "Read,Edit,Write",
+        "--permission-mode",
+        "acceptEdits",
         "--model",
         "opus-9",
         "hi again",

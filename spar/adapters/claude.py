@@ -32,6 +32,18 @@ class ClaudeAdapter:
 
     def _build_argv(self, prompt: str, session_id: str | None) -> list[str]:
         model_flags = ["--model", self.model] if self.model else []
+        # Headless (`-p`) claude cannot prompt for permission, so without these
+        # it silently refuses to touch the artifact. acceptEdits auto-approves
+        # file writes/edits. --allowedTools is variadic: it must be followed by
+        # another flag (--permission-mode), never by the positional prompt, or
+        # it swallows the prompt ("Input must be provided ... with --print").
+        # So: allowlist (one comma token) first, then permission-mode last.
+        perm_flags = [
+            "--allowedTools",
+            "Read,Edit,Write",
+            "--permission-mode",
+            "acceptEdits",
+        ]
         if session_id is not None:
             return [
                 self.command,
@@ -40,6 +52,7 @@ class ClaudeAdapter:
                 session_id,
                 "--output-format",
                 "json",
+                *perm_flags,
                 *model_flags,
                 prompt,
             ]
@@ -48,6 +61,7 @@ class ClaudeAdapter:
             "-p",
             "--output-format",
             "json",
+            *perm_flags,
             *model_flags,
             prompt,
         ]
