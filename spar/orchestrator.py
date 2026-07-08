@@ -207,7 +207,7 @@ PROTOCOL_BLOCK = """\
 End your reply with EXACTLY ONE verdict block, using this syntax verbatim:
 
 <verdict>
-status: AGREE
+status: CONTINUE
 resolved:
 - #7 accepted
 - #9 rejected: <one-line reason you disagree>
@@ -217,8 +217,17 @@ remarks:
 </verdict>
 
 Protocol:
-- status is AGREE or CONTINUE. Use AGREE only if you have NO MUST-level
-  concerns remaining (yours or anyone else's open MUST/USER remarks).
+- status is one of CONTINUE, AGREE, or DONE:
+  - CONTINUE — you still want changes (yours or others' open concerns).
+  - AGREE — you accept the artifact as it stands; you MAY still edit it this
+    turn and MAY add [NICE] suggestions.
+  - DONE — you are finished: you agree AND made NO edits to the artifact this
+    turn and have NO further concerns. This is the signal to end the debate.
+- The debate ends only when BOTH sides say DONE. If you edit the artifact on a
+  DONE turn it is downgraded to AGREE (editing means you are not done), so use
+  DONE only when you truly have nothing left to change.
+- Use AGREE or DONE only if you have NO MUST-level concerns remaining (yours or
+  anyone else's open MUST/USER remarks).
 - In `resolved:` you MUST address EVERY open remark id listed above, each as
   either `#<id> accepted` or `#<id> rejected: <why>`.
 - In `remarks:` raise your own new concerns, tagged `[MUST]` (blocking) or
@@ -308,18 +317,22 @@ def build_turn_prompt(
 # ---------------------------------------------------------------------------
 
 
-def is_consensus(state: DebateState, current_hash: str, order: list[str]) -> bool:
-    """True iff every side last said AGREE, both anchored on ``current_hash``,
-    and no MUST/USER remark is still pending.
+def is_consensus(state: DebateState, order: list[str]) -> bool:
+    """True iff every side's most recent verdict is ``DONE`` and no MUST/USER
+    remark is still pending.
+
+    ``DONE`` is an explicit terminal handshake: a side may only emit it on a
+    turn where it made no edits (the orchestrator downgrades an editing DONE
+    turn to AGREE). Because DONE turns never change the artifact, two most-
+    recent DONE verdicts — one per side — necessarily describe the same, final
+    content, so no separate same-hash check is needed.
 
     NICE remarks may remain pending at consensus (they become the gate's
     backlog); MUST and USER remarks are blocking.
     """
     for name in order:
         side = state.sides.get(name)
-        if side is None or side.last_verdict_status != "AGREE":
-            return False
-        if side.last_verdict_artifact_hash != current_hash:
+        if side is None or side.last_verdict_status != "DONE":
             return False
     if any(r.severity in (Severity.MUST, Severity.USER) for r in state.pending_remarks):
         return False
@@ -528,7 +541,7 @@ class Orchestrator:
     ) -> int:
         while True:
             try:
-                current_artifact_hash = hash_artifact(self.artifact_path)
+                hash_artifact(self.artifact_path)  # verify the artifact still exists
             except StateError:
                 self.log(
                     "spar: cannot check consensus — artifact file missing: "
@@ -536,7 +549,7 @@ class Orchestrator:
                 )
                 raise _Abort(4)
 
-            if is_consensus(state, current_artifact_hash, self.order):
+            if is_consensus(state, self.order):
                 code = self._handle_consensus(state)
                 if code is not None:
                     return code
@@ -657,6 +670,19 @@ class Orchestrator:
                     self.log(f"[{side}] second guard violation: {exc}; aborting.")
                     raise _Abort(4)
 
+            # DONE is a terminal, no-edit handshake. If the side changed the
+            # artifact this turn, its "done" is contradicted by the edit — the
+            # opponent has not seen the new content — so downgrade to AGREE.
+            edited = kind == "creation" or (
+                hash_before is not None and hash_after != hash_before
+            )
+            if verdict.status == "DONE" and edited:
+                self.log(
+                    f"[{side}] DONE but edited the artifact this turn; "
+                    "recording as AGREE (an edit means not done)."
+                )
+                verdict = replace(verdict, status="AGREE")
+
             self._apply_verdict(state, side, verdict, hash_after, is_round_end)
             self.log(
                 f"[{side}] turn complete: status={verdict.status}, "
@@ -726,12 +752,12 @@ class Orchestrator:
         return verdict, retry_result
 
     def _check_agree(self, state: DebateState, verdict: Verdict) -> None:
-        """Reject an AGREE that leaves a MUST/USER remark unresolved.
+        """Reject an AGREE/DONE that leaves a MUST/USER remark unresolved.
 
         Treated exactly like a malformed verdict: it triggers the same
         one-shot verdict retry.
         """
-        if verdict.status != "AGREE":
+        if verdict.status not in ("AGREE", "DONE"):
             return
         resolved_ids = {r.remark_id for r in verdict.resolutions}
         for r in state.pending_remarks:
@@ -739,7 +765,7 @@ class Orchestrator:
                 continue
             if r.severity in (Severity.MUST, Severity.USER):
                 raise VerdictError(
-                    f"AGREE is not allowed while remark #{r.remark_id} "
+                    f"{verdict.status} is not allowed while remark #{r.remark_id} "
                     f"[{r.severity.name}] is unresolved"
                 )
 

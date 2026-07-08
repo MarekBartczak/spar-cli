@@ -198,26 +198,31 @@ def _state_two_sides(a_status, a_hash, b_status, b_hash, pending=()):
     )
 
 
-def test_consensus_true_when_both_agree_same_hash():
+def test_consensus_true_when_both_done():
+    st = _state_two_sides("DONE", "h1", "DONE", "h1")
+    assert is_consensus(st, ["A", "B"]) is True
+
+
+def test_consensus_false_when_only_one_done():
+    st = _state_two_sides("DONE", "h1", "AGREE", "h1")
+    assert is_consensus(st, ["A", "B"]) is False
+
+
+def test_consensus_false_when_both_only_agree():
     st = _state_two_sides("AGREE", "h1", "AGREE", "h1")
-    assert is_consensus(st, "h1", ["A", "B"]) is True
+    assert is_consensus(st, ["A", "B"]) is False
 
 
-def test_consensus_false_on_different_hash():
-    st = _state_two_sides("AGREE", "h1", "AGREE", "h2")
-    assert is_consensus(st, "h2", ["A", "B"]) is False
-
-
-def test_consensus_false_with_pending_must_even_if_both_agree():
+def test_consensus_false_with_pending_must_even_if_both_done():
     pending = [StateRemark(1, Severity.MUST, "A", "blocking")]
-    st = _state_two_sides("AGREE", "h1", "AGREE", "h1", pending=pending)
-    assert is_consensus(st, "h1", ["A", "B"]) is False
+    st = _state_two_sides("DONE", "h1", "DONE", "h1", pending=pending)
+    assert is_consensus(st, ["A", "B"]) is False
 
 
 def test_consensus_true_with_only_pending_nice():
     pending = [StateRemark(1, Severity.NICE, "A", "optional")]
-    st = _state_two_sides("AGREE", "h1", "AGREE", "h1", pending=pending)
-    assert is_consensus(st, "h1", ["A", "B"]) is True
+    st = _state_two_sides("DONE", "h1", "DONE", "h1", pending=pending)
+    assert is_consensus(st, ["A", "B"]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +263,11 @@ def test_full_happy_debate_reaches_consensus(tmp_path):
 
     adapters["A"].steps = [
         Step(vblock("CONTINUE", remarks=["[MUST] handle errors"]), write="draft v0", artifact=artifact),
-        Step(vblock("AGREE"), artifact=artifact),  # confirm, no edit
+        Step(vblock("DONE"), artifact=artifact),  # done, no edit
     ]
     adapters["B"].steps = [
         Step(vblock("AGREE", resolved=["#1 accepted"]), write="draft v1 handled", artifact=artifact),
+        Step(vblock("DONE"), artifact=artifact),  # done, no edit -> consensus
     ]
 
     code = orch.run_new("Design something")
@@ -269,32 +275,39 @@ def test_full_happy_debate_reaches_consensus(tmp_path):
     assert len(gate.consensus_calls) == 1
 
     st = store.load()
-    assert st.sides["A"].last_verdict_status == "AGREE"
-    assert st.sides["B"].last_verdict_status == "AGREE"
+    assert st.sides["A"].last_verdict_status == "DONE"
+    assert st.sides["B"].last_verdict_status == "DONE"
     assert st.pending_remarks == []
     assert len(st.resolved_remarks) == 1
     assert st.resolved_remarks[0].resolution == "accepted"
 
 
-def test_agree_different_hash_requires_reconfirm(tmp_path):
+def test_done_that_edits_is_downgraded_to_agree(tmp_path):
+    """A DONE turn that changes the artifact is recorded as AGREE (an edit
+    means the side is not finished), so it does not by itself end the debate."""
     gate = FakeGate(consensus=[GateDecision("accept")])
     order = ["A", "B"]
     steps = {"A": [], "B": []}
     orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
 
     adapters["A"].steps = [
-        Step(vblock("AGREE"), write="v0", artifact=artifact),  # creator agrees at h0
-        Step(vblock("AGREE"), artifact=artifact),  # must re-confirm at h1
+        Step(vblock("DONE"), write="v0", artifact=artifact),  # creation edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE
     ]
     adapters["B"].steps = [
-        Step(vblock("AGREE"), write="v1", artifact=artifact),  # edits -> h1, agrees
+        Step(vblock("DONE"), write="v1", artifact=artifact),  # edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus
     ]
 
     code = orch.run_new("t")
     assert code == 0
-    # B's AGREE at a new hash did NOT trigger consensus; A had to move again.
+    # A's and B's editing DONE turns were downgraded, so consensus needed the
+    # later clean DONE turns from both sides.
     assert len(adapters["A"].calls) == 2
     assert len(gate.consensus_calls) == 1
+    st = store.load()
+    assert st.sides["A"].last_verdict_status == "DONE"
+    assert st.sides["B"].last_verdict_status == "DONE"
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +322,15 @@ def test_user_remarks_reset_statuses_and_continue(tmp_path):
     orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
 
     adapters["A"].steps = [
-        Step(vblock("AGREE"), write="v0", artifact=artifact),
-        Step(vblock("AGREE", resolved=["#1 accepted"]), write="v1 with Z", artifact=artifact),
+        Step(vblock("AGREE"), write="v0", artifact=artifact),  # creation edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (first consensus)
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (second consensus)
     ]
     adapters["B"].steps = [
-        Step(vblock("AGREE"), artifact=artifact),  # agree at h0, no edit
-        Step(vblock("AGREE"), artifact=artifact),  # agree at h1
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (first consensus)
+        # after the user remark #1 is injected, B resolves it while editing in Z
+        Step(vblock("AGREE", resolved=["#1 accepted"]), write="v1 with Z", artifact=artifact),
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE (second consensus)
     ]
 
     code = orch.run_new("t")
@@ -341,10 +357,10 @@ def test_verdict_error_retry_succeeds_and_uses_retry_prompt(tmp_path):
     adapters["A"].steps = [
         Step("no verdict at all", write="v0", artifact=artifact),  # invalid -> retry
         Step(vblock("CONTINUE"), artifact=artifact),  # valid retry, no edit
-        Step(vblock("AGREE"), artifact=artifact),  # later confirm
+        Step(vblock("DONE"), artifact=artifact),  # later terminal no-edit DONE
     ]
     adapters["B"].steps = [
-        Step(vblock("AGREE"), artifact=artifact),
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus
     ]
 
     code = orch.run_new("t")
@@ -391,11 +407,12 @@ def test_agree_with_pending_must_demands_retry(tmp_path):
 
     adapters["A"].steps = [
         Step(vblock("CONTINUE", remarks=["[MUST] critical gap"]), write="v0", artifact=artifact),
-        Step(vblock("AGREE"), artifact=artifact),  # confirm at end
+        Step(vblock("DONE"), artifact=artifact),  # terminal no-edit DONE
     ]
     adapters["B"].steps = [
         Step(vblock("AGREE"), artifact=artifact),  # AGREE but leaves #1 unresolved -> retry
         Step(vblock("AGREE", resolved=["#1 rejected: not actually needed here"]), artifact=artifact),
+        Step(vblock("DONE"), artifact=artifact),  # terminal no-edit DONE -> consensus
     ]
 
     code = orch.run_new("t")
@@ -420,11 +437,11 @@ def test_session_lost_retries_with_none_session(tmp_path):
 
     adapters["A"].steps = [
         Step(vblock("CONTINUE"), sid="A1", write="v0", artifact=artifact),
-        Step(vblock("AGREE"), raises=SessionLost("gone")),  # resume fails
-        Step(vblock("AGREE"), sid="A2", artifact=artifact),  # fresh retry
+        Step(vblock("DONE"), raises=SessionLost("gone")),  # resume fails
+        Step(vblock("DONE"), sid="A2", artifact=artifact),  # fresh retry, no edit -> DONE
     ]
     adapters["B"].steps = [
-        Step(vblock("AGREE"), sid="B1", write="v1", artifact=artifact),
+        Step(vblock("DONE"), sid="B1", artifact=artifact),  # no edit -> DONE
     ]
 
     code = orch.run_new("t")
@@ -632,8 +649,8 @@ def test_continue_repeat_turn_reruns_interrupted_side(tmp_path):
     )
     _seed_state(store, artifact, state)
 
-    adapters["B"].steps = [Step(vblock("AGREE"), artifact=artifact)]  # rerun B
-    adapters["A"].steps = [Step(vblock("AGREE"), artifact=artifact)]  # then A confirms
+    adapters["B"].steps = [Step(vblock("DONE"), artifact=artifact)]  # rerun B, no edit -> DONE
+    adapters["A"].steps = [Step(vblock("DONE"), artifact=artifact)]  # then A confirms DONE
 
     code = orch.run_continue()
     assert code == 0
@@ -665,8 +682,8 @@ def test_continue_artifact_changed_consults_recovery_gate(tmp_path):
     _seed_state(store, artifact, state)
 
     # keep -> adopt current file, advance past B to A
-    adapters["A"].steps = [Step(vblock("AGREE"), artifact=artifact)]
-    adapters["B"].steps = [Step(vblock("AGREE"), artifact=artifact)]
+    adapters["A"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE
+    adapters["B"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE
 
     code = orch.run_continue()
     assert code == 0
@@ -674,12 +691,12 @@ def test_continue_artifact_changed_consults_recovery_gate(tmp_path):
     assert gate.recovery_calls[0][1] == old_hash
 
 
-def test_continue_out_of_band_edit_blocks_stale_consensus(tmp_path):
-    # Both sides AGREEd and their recorded hashes (and state.artifact_hash)
-    # all match h1. But the artifact was then edited out-of-band (no turn in
-    # progress), so the file on disk is now h2. Consensus must be re-checked
-    # against the actual on-disk hash, not the stale recorded one -> both
-    # sides must speak again before consensus can fire.
+def test_continue_agree_is_not_terminal_requires_done_handshake(tmp_path):
+    # Both sides last said AGREE (accepting the artifact but not terminal), and
+    # the artifact was then edited out-of-band. Under the DONE-handshake
+    # protocol AGREE never triggers consensus: only a mutual clean DONE does.
+    # So resuming must NOT fire consensus off the stale AGREE state -- both
+    # sides have to actually take another turn and emit a terminal DONE first.
     gate = FakeGate(consensus=[GateDecision("accept")])
     order = ["A", "B"]
     steps = {"A": [], "B": []}
@@ -705,22 +722,22 @@ def test_continue_out_of_band_edit_blocks_stale_consensus(tmp_path):
     # state.artifact_hash and both sides' recorded hashes still say h1.
     artifact.write_text("v1-edited-outside-the-debate", encoding="utf-8")
 
-    adapters["A"].steps = [Step(vblock("AGREE"), artifact=artifact)]
-    adapters["B"].steps = [Step(vblock("AGREE"), artifact=artifact)]
+    adapters["A"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE
+    adapters["B"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE
 
     code = orch.run_continue()
     assert code == 0
-    # Consensus did NOT fire immediately off the stale recorded hash: both
-    # sides had to actually take a turn and re-confirm at the new hash.
+    # Consensus did NOT fire immediately off the stale AGREE state: both sides
+    # had to actually take a turn and upgrade their handshake to a clean DONE.
     assert len(adapters["A"].calls) == 1
     assert len(adapters["B"].calls) == 1
     assert len(gate.consensus_calls) == 1
 
 
-def test_continue_consensus_fires_when_disk_matches_recorded_hash(tmp_path):
-    # Same setup as above, but nobody touched the file out-of-band: the
-    # on-disk hash still matches the recorded consensus hash, so consensus
-    # must fire immediately without requiring another turn from either side.
+def test_continue_consensus_fires_immediately_when_both_recorded_done(tmp_path):
+    # Both sides already recorded a terminal DONE and the artifact is present
+    # on disk, so on resume consensus must fire immediately without requiring
+    # another turn from either side.
     gate = FakeGate(consensus=[GateDecision("accept")])
     order = ["A", "B"]
     steps = {"A": [], "B": []}
@@ -736,8 +753,8 @@ def test_continue_consensus_fires_when_disk_matches_recorded_hash(tmp_path):
         artifact_hash=h1,
         turn_in_progress=None,
         sides={
-            "A": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
-            "B": SideState(last_verdict_status="AGREE", last_verdict_artifact_hash=h1),
+            "A": SideState(last_verdict_status="DONE", last_verdict_artifact_hash=h1),
+            "B": SideState(last_verdict_status="DONE", last_verdict_artifact_hash=h1),
         },
     )
     _seed_state(store, artifact, state)

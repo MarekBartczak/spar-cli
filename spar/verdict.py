@@ -58,7 +58,7 @@ class Resolution:
 class Verdict:
     """Fully parsed verdict block."""
 
-    status: str  # "AGREE" | "CONTINUE"
+    status: str  # "AGREE" | "CONTINUE" | "DONE"
     resolutions: tuple[Resolution, ...]
     remarks: tuple[Remark, ...]
 
@@ -71,13 +71,15 @@ class Verdict:
 _VERDICT_BLOCK_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 
 _STATUS_RE = re.compile(r"^status:\s*(.*)$")
-_RESOLVED_HEADER_RE = re.compile(r"^resolved:\s*$")
-_REMARKS_HEADER_RE = re.compile(r"^remarks:\s*$")
+# A trailing empty-list marker (`resolved: []` / `remarks: []`) is how models
+# often spell "this section is empty"; accept it as an empty section header.
+_RESOLVED_HEADER_RE = re.compile(r"^resolved:\s*(\[\s*\])?\s*$")
+_REMARKS_HEADER_RE = re.compile(r"^remarks:\s*(\[\s*\])?\s*$")
 _RESOLVED_ACCEPTED_RE = re.compile(r"^#(\d+)\s+accepted\s*$")
 _RESOLVED_REJECTED_RE = re.compile(r"^#(\d+)\s+rejected:\s*(.*)$")
 _REMARK_RE = re.compile(r"^\[(MUST|NICE|USER)\]\s*(.*)$")
 
-_VALID_STATUSES = {"AGREE", "CONTINUE"}
+_VALID_STATUSES = {"AGREE", "CONTINUE", "DONE"}
 
 
 def _extract_block(reply_text: str) -> str:
@@ -134,7 +136,8 @@ def parse_verdict(reply_text: str) -> Verdict:
             value = status_match.group(1).strip()
             if value not in _VALID_STATUSES:
                 raise VerdictError(
-                    f"invalid status value: {value!r} (expected AGREE or CONTINUE)"
+                    f"invalid status value: {value!r} "
+                    "(expected AGREE, CONTINUE or DONE)"
                 )
             status = value
             section = None

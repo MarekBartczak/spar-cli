@@ -201,8 +201,12 @@ def test_happy_debate_reaches_consensus_through_real_subprocesses(tmp_path, monk
     write_codex_artifact(codex_dir, 1, "# Artifact v1\n\nfirst draft, now with error handling\n")
     write_codex_reply(codex_dir, 1, "cx-1", vblock("AGREE", resolved=["#1 accepted"]))
 
-    # Turn 3: claude re-confirms AGREE at the same (codex-edited) hash.
-    write_claude_reply(claude_dir, 2, "s-1", vblock("AGREE"))
+    # Turn 3: claude re-confirms at the codex-edited hash with a terminal,
+    # no-edit DONE.
+    write_claude_reply(claude_dir, 2, "s-1", vblock("DONE"))
+
+    # Turn 4: codex closes the handshake with its own terminal, no-edit DONE.
+    write_codex_reply(codex_dir, 2, "cx-1", vblock("DONE"))
 
     gate = ScriptedGate(consensus=[GateDecision("accept")])
     orch, store, logs = build_orch(repo_dir, gate, artifact_path)
@@ -214,21 +218,21 @@ def test_happy_debate_reaches_consensus_through_real_subprocesses(tmp_path, monk
     assert artifact_path.read_text() == "# Artifact v1\n\nfirst draft, now with error handling\n"
 
     state = store.load()
-    assert state.sides["claude"].last_verdict_status == "AGREE"
-    assert state.sides["codex"].last_verdict_status == "AGREE"
+    assert state.sides["claude"].last_verdict_status == "DONE"
+    assert state.sides["codex"].last_verdict_status == "DONE"
     assert state.pending_remarks == []
     assert len(state.resolved_remarks) == 1
     assert state.resolved_remarks[0].resolution == "accepted"
 
     # Transcript event files exist for every turn: claude called twice
-    # (.json), codex called once (.jsonl + its last-message .md).
+    # (.json), codex called twice (.jsonl + its last-message .md per call).
     events_dir = repo_dir / ".spar" / "transcript"
     claude_events = list(events_dir.glob("claude-*.json"))
     codex_events = list(events_dir.glob("codex-*.jsonl"))
     codex_last_msgs = list(events_dir.glob("codex-last-*.md"))
     assert len(claude_events) == 2
-    assert len(codex_events) == 1
-    assert len(codex_last_msgs) == 1
+    assert len(codex_events) == 2
+    assert len(codex_last_msgs) == 2
 
     assert store.exists()
 
@@ -250,7 +254,8 @@ def test_second_turn_resumes_the_session_returned_by_the_first(tmp_path, monkeyp
     write_claude_reply(claude_dir, 1, "s-1", vblock("CONTINUE"))
     write_codex_artifact(codex_dir, 1, "# v1\n")
     write_codex_reply(codex_dir, 1, "cx-1", vblock("AGREE"))
-    write_claude_reply(claude_dir, 2, "s-1", vblock("AGREE"))
+    write_claude_reply(claude_dir, 2, "s-1", vblock("DONE"))  # terminal, no edit
+    write_codex_reply(codex_dir, 2, "cx-1", vblock("DONE"))  # terminal, no edit
 
     gate = ScriptedGate(consensus=[GateDecision("accept")])
     orch, store, logs = build_orch(repo_dir, gate, artifact_path)
@@ -305,9 +310,12 @@ def test_garbage_verdict_retry_then_abort_then_continue_resumes(tmp_path, monkey
     codex_calls = read_prompts_log(codex_dir)
     assert len(codex_calls) == 2  # initial turn + one verdict retry
 
-    # Fix the script: codex's next (fresh) call gets a valid AGREE, with no
-    # further artifact edit, so it lands at the hash claude already AGREEd.
-    write_codex_reply(codex_dir, 3, "cx-1", vblock("AGREE"))
+    # Fix the script: codex's next (fresh) call gets a valid, no-edit DONE, so
+    # it lands at the hash claude already accepted. AGREE is not terminal under
+    # the DONE-handshake protocol, so claude must also take a no-edit DONE turn
+    # before consensus can fire.
+    write_codex_reply(codex_dir, 3, "cx-1", vblock("DONE"))
+    write_claude_reply(claude_dir, 2, "s-1", vblock("DONE"))
 
     gate.consensus.append(GateDecision("accept"))
     code2 = orch.run_continue()
@@ -315,8 +323,8 @@ def test_garbage_verdict_retry_then_abort_then_continue_resumes(tmp_path, monkey
     assert len(gate.consensus_calls) == 1
 
     final_state = store.load()
-    assert final_state.sides["claude"].last_verdict_status == "AGREE"
-    assert final_state.sides["codex"].last_verdict_status == "AGREE"
+    assert final_state.sides["claude"].last_verdict_status == "DONE"
+    assert final_state.sides["codex"].last_verdict_status == "DONE"
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +354,11 @@ def test_guard_rolls_back_foreign_file_and_retry_completes_debate(tmp_path, monk
     write_codex_artifact(codex_dir, 2, "# v1 (attempt 2, clean)\n")
     write_codex_reply(codex_dir, 2, "cx-1", vblock("AGREE"))
 
-    # Claude re-confirms AGREE at codex's (clean) hash.
-    write_claude_reply(claude_dir, 2, "s-1", vblock("AGREE"))
+    # Claude re-confirms at codex's (clean) hash with a terminal, no-edit DONE.
+    write_claude_reply(claude_dir, 2, "s-1", vblock("DONE"))
+
+    # Codex closes the handshake with its own terminal, no-edit DONE.
+    write_codex_reply(codex_dir, 3, "cx-1", vblock("DONE"))
 
     gate = ScriptedGate(consensus=[GateDecision("accept")])
     orch, store, logs = build_orch(repo_dir, gate, artifact_path)
@@ -362,7 +373,8 @@ def test_guard_rolls_back_foreign_file_and_retry_completes_debate(tmp_path, monk
     assert not foreign_path.exists()
 
     codex_calls = read_prompts_log(codex_dir)
-    assert len(codex_calls) == 2  # attempt 1 (violated) + attempt 2 (retry)
+    # attempt 1 (violated) + attempt 2 (retry) + terminal no-edit DONE turn
+    assert len(codex_calls) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +459,8 @@ turn_timeout_sec = 15
     write_claude_reply(claude_dir, 1, "cli-s1", vblock("CONTINUE"))
     write_codex_artifact(codex_dir, 1, "# CLI smoke artifact v2\n")
     write_codex_reply(codex_dir, 1, "cli-cx1", vblock("AGREE"))
-    write_claude_reply(claude_dir, 2, "cli-s1", vblock("AGREE"))
+    write_claude_reply(claude_dir, 2, "cli-s1", vblock("DONE"))  # terminal, no edit
+    write_codex_reply(codex_dir, 2, "cli-cx1", vblock("DONE"))  # terminal, no edit
 
     env = os.environ.copy()
     # bin_dir first (so "claude"/"codex" resolve to the fakes), then the

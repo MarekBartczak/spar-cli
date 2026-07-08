@@ -271,6 +271,19 @@ class TestResolvedEntries:
         with pytest.raises(VerdictError):
             parse_verdict(text)
 
+    def test_resolved_empty_list_marker_accepted(self):
+        # Models often spell an empty section as `resolved: []`.
+        text = "<verdict>\nstatus: DONE\nresolved: []\nremarks: []\n</verdict>"
+        verdict = parse_verdict(text)
+        assert verdict.status == "DONE"
+        assert verdict.resolutions == ()
+        assert verdict.remarks == ()
+
+    def test_remarks_empty_list_marker_accepted(self):
+        text = "<verdict>\nstatus: AGREE\nremarks: [ ]\n</verdict>"
+        verdict = parse_verdict(text)
+        assert verdict.remarks == ()
+
 
 class TestErrors:
     def test_no_block_raises(self):
