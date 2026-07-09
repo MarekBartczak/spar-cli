@@ -152,3 +152,13 @@ def test_impl_prompt_with_remarks_resolves_ids_and_still_forces_edit():
 def test_review_protocol_forbids_no_concerns_remark():
     p = build_review_prompt(T, "diff --git a/x ...", [])
     assert "OMIT the `remarks:` section entirely" in p
+
+
+def test_review_protocol_hedges_foreign_section_reference():
+    p = build_review_prompt(T, "diff --git a/x ...", [])
+    assert "foreign-files section (when present)" in p
+
+
+def test_impl_protocol_forbids_invented_remark_ids():
+    p = build_impl_prompt(T, Path("/abs/plan.md"), [])
+    assert "ONLY ids listed" in p

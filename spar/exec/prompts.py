@@ -178,6 +178,8 @@ Protocol for the verdict:
   `#<id> rejected: <why>`.
 - If there are NO open remarks, OMIT the `resolved:` section entirely — do not write any
   placeholder line (e.g. do NOT write "(no open remarks listed this turn)").
+- Resolve ONLY ids listed in the open remarks above — never invent or guess a
+  remark id; a resolution for an unlisted id is ignored.
 - Do NOT include a `remarks:` section — you do not raise remarks; only the reviewer does.
 """
 
@@ -198,9 +200,9 @@ Protocol for review:
   NOT add a remark whose text merely says you have no concerns.
 - Treat a reference to a MISSING file as a defect only if it matches none of
   the diff, the context lists above (if any), and a file already present in the repository.
-  This does NOT override the hard-reference rule of the foreign-files section
-  (a plan-ordering defect stays a [MUST] even though the file matches the
-  foreign list).
+  This does NOT override the hard-reference rule of the
+  foreign-files section (when present) — a plan-ordering defect stays a [MUST]
+  even though the file matches the foreign list.
 - Use `status: DONE` only if you have NO blocking `[MUST]` remarks remaining.
 - Use `status: CONTINUE` if you have open `[MUST]`/`[NICE]` remarks to raise.
 """
