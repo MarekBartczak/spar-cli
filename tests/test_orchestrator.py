@@ -12,6 +12,8 @@ import pytest
 
 from spar.adapters.base import SessionLost, TurnResult
 from spar.config import DebateConfig, SideConfig
+from spar.gates import GateChoice
+from spar.headless import HeadlessGate
 from spar.orchestrator import (
     ConsoleGate,
     GateDecision,
@@ -1059,3 +1061,180 @@ def test_console_gate_collect_remarks():
 def test_console_gate_recovery():
     gate = ConsoleGate(input_fn=lambda _: "repeat", print_fn=lambda *_: None)
     assert gate.recovery_gate(Path("art.md"), "sha256:x") == "repeat"
+
+
+# ---------------------------------------------------------------------------
+# HeadlessGate: headless debate gates (consensus/rounds pend, recovery repeats)
+# ---------------------------------------------------------------------------
+
+
+def test_headless_consensus_pends_exit_10(tmp_path):
+    gate = HeadlessGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
+
+    adapters["A"].steps = [
+        Step(vblock("DONE"), write="v0", artifact=artifact),  # creation edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE
+    ]
+    adapters["B"].steps = [
+        Step(vblock("DONE"), write="v1", artifact=artifact),  # edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus
+    ]
+
+    code = orch.run_new("t")
+    assert code == 10
+
+    st = store.load()
+    assert st.pending_gate is not None
+    assert st.pending_gate["name"] == "consensus"
+    assert st.pending_gate["options"] == ["accept", "remarks", "abort"]
+    assert st.pending_gate["context"]["artifact"] == str(artifact)
+
+
+def test_headless_resume_with_remarks_reinjects_and_repends(tmp_path):
+    gate = HeadlessGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
+
+    adapters["A"].steps = [
+        Step(vblock("DONE"), write="v0", artifact=artifact),  # creation edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE
+    ]
+    adapters["B"].steps = [
+        Step(vblock("DONE"), write="v1", artifact=artifact),  # edits -> AGREE
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus
+    ]
+    code = orch.run_new("t")
+    assert code == 10
+
+    # Resume with a "remarks" decision: the remark is injected as a USER
+    # severity, both sides' handshake resets, and the scripted sides re-AGREE
+    # to a fresh DONE/DONE consensus -- which pends again (rc 10).
+    adapters["A"].steps = [
+        Step(vblock("AGREE", resolved=["#1 accepted"]), artifact=artifact),  # resolves it
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE
+    ]
+    adapters["B"].steps = [
+        Step(vblock("DONE"), artifact=artifact),  # no edit -> DONE -> consensus again
+    ]
+
+    code2 = orch.run_continue(
+        gate_choice=GateChoice(action="remarks", remarks=("tighten the API",))
+    )
+    assert code2 == 10
+
+    st = store.load()
+    assert st.pending_gate is not None
+    assert st.pending_gate["name"] == "consensus"
+    # the remark was injected as a USER-severity remark and later resolved
+    injected = st.resolved_remarks[-1]
+    assert injected.remark.severity == Severity.USER
+    assert injected.remark.author == "user"
+    assert injected.remark.text == "tighten the API"
+    assert injected.resolution == "accepted"
+
+
+def test_headless_rounds_exhausted_pends_then_extend_resumes(tmp_path):
+    gate = HeadlessGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(
+        tmp_path, steps, order, gate, max_rounds=1
+    )
+
+    adapters["A"].steps = [Step(vblock("CONTINUE"), write="v0", artifact=artifact)]
+    adapters["B"].steps = [Step(vblock("CONTINUE"), write="v1", artifact=artifact)]
+
+    code = orch.run_new("t")
+    assert code == 10
+
+    st = store.load()
+    assert st.pending_gate is not None
+    assert st.pending_gate["name"] == "rounds_exhausted"
+    assert st.pending_gate["options"] == ["accept", "extend", "abort"]
+    assert st.pending_gate["context"]["artifact"] == str(artifact)
+
+    # Resume with "extend:1": one more round runs, then rounds-exhausted pends
+    # again (a fresh, un-preloaded gate call).
+    adapters["A"].steps = [Step(vblock("CONTINUE"), write="v2", artifact=artifact)]
+    adapters["B"].steps = [Step(vblock("CONTINUE"), write="v3", artifact=artifact)]
+
+    code2 = orch.run_continue(gate_choice=GateChoice(action="extend", extra_rounds=1))
+    assert code2 == 10
+    # exactly one more turn each -- the extended round actually ran
+    assert len(adapters["A"].calls) == 2
+    assert len(adapters["B"].calls) == 2
+
+    st2 = store.load()
+    assert st2.round == 2
+    assert st2.pending_gate["name"] == "rounds_exhausted"
+
+
+def test_headless_gate_mismatch_returns_2_state_untouched(tmp_path):
+    gate = HeadlessGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, logs = build_orch(
+        tmp_path, steps, order, gate, max_rounds=1
+    )
+
+    adapters["A"].steps = [Step(vblock("CONTINUE"), write="v0", artifact=artifact)]
+    adapters["B"].steps = [Step(vblock("CONTINUE"), write="v1", artifact=artifact)]
+
+    code = orch.run_new("t")
+    assert code == 10
+    before = store.load()
+    calls_before_a = len(adapters["A"].calls)
+    calls_before_b = len(adapters["B"].calls)
+
+    # "rounds_exhausted" only accepts accept/extend/abort -- "remarks" is a
+    # mismatch. Validated PURELY, before any side effect: rc 2, state intact.
+    code2 = orch.run_continue(
+        gate_choice=GateChoice(action="remarks", remarks=("nope",))
+    )
+    assert code2 == 2
+    after = store.load()
+    assert after.pending_gate == before.pending_gate
+    assert after.round == before.round
+    assert len(adapters["A"].calls) == calls_before_a
+    assert len(adapters["B"].calls) == calls_before_b
+    assert any("--gate rejected" in m for m in logs)
+
+
+def test_headless_recovery_never_pends_repeats_interrupted_turn(tmp_path):
+    gate = HeadlessGate()
+    order = ["A", "B"]
+    steps = {"A": [], "B": []}
+    orch, adapters, artifact, store, _ = build_orch(tmp_path, steps, order, gate)
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("v-new", encoding="utf-8")  # already changed on disk
+    old_hash = "sha256:" + "0" * 64
+
+    state = DebateState(
+        round=0,
+        last_actor="A",
+        artifact_hash=old_hash,
+        turn_in_progress=TurnInProgress(side="B", artifact_hash_before=old_hash),
+        sides={
+            "A": SideState(last_verdict_status="CONTINUE", last_verdict_artifact_hash=old_hash),
+            "B": SideState(),
+        },
+    )
+    _seed_state(store, artifact, state)
+
+    # "repeat" is the unconditional headless recovery choice: B's interrupted
+    # turn is re-run (no gate pend from recovery itself).
+    adapters["B"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE
+    adapters["A"].steps = [Step(vblock("DONE"), artifact=artifact)]  # no edit -> DONE -> consensus
+
+    code = orch.run_continue()
+    # The eventual rc 10 comes from the CONSENSUS gate reached afterwards, not
+    # from recovery -- recovery never raises GatePending / never pends.
+    assert code == 10
+    assert len(adapters["B"].calls) == 1  # the interrupted turn was repeated
+    st = store.load()
+    assert st.pending_gate["name"] == "consensus"

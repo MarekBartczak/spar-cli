@@ -22,6 +22,7 @@ from typing import Callable, Protocol
 from spar.adapters.base import Adapter, AdapterError, SessionLost, TurnResult
 from spar.config import DebateConfig, SideConfig
 from spar.exec.tasklist import TaskListError, parse_task_list
+from spar.gates import GateChoice, GateParseError, GatePending, validate_choice
 from spar.state import (
     DebateState,
     LockHeld,
@@ -83,6 +84,20 @@ class UserGate(Protocol):
     def recovery_gate(self, artifact_path: Path, expected_hash: str) -> str:
         """Return ``"keep"`` or ``"repeat"``."""
         ...
+
+
+def _decision_from_choice(choice: GateChoice) -> GateDecision:
+    """Convert a parsed ``--gate`` value into the ``GateDecision`` a
+    ``UserGate`` method returns."""
+    if choice.action == "accept":
+        return GateDecision(action="accept")
+    if choice.action == "abort":
+        return GateDecision(action="abort")
+    if choice.action == "extend":
+        return GateDecision(action="extend", extra_rounds=choice.extra_rounds)
+    if choice.action == "remarks":
+        return GateDecision(action="remarks", remarks=choice.remarks)
+    raise ValueError(f"unexpected --gate action: {choice.action!r}")  # pragma: no cover
 
 
 class ConsoleGate:
@@ -466,6 +481,10 @@ class Orchestrator:
         self.log = log
         self.side_configs = side_configs
         self.require_tasks = require_tasks
+        # The parsed ``--gate`` decision threaded into a resume (headless
+        # mode). Set just before ``_run_continue`` runs; ``None`` in
+        # interactive mode or a plain resume without ``--gate``.
+        self._gate_choice: GateChoice | None = None
 
     # -- public entry points -------------------------------------------
 
@@ -477,7 +496,15 @@ class Orchestrator:
             self.log(f"spar: another instance holds the lock ({exc}).")
             return 3
 
-    def run_continue(self) -> int:
+    def run_continue(self, gate_choice: GateChoice | None = None) -> int:
+        """Resume a debate from persisted state.
+
+        ``gate_choice`` (the parsed ``--gate`` value, headless mode) is
+        validated PURELY against the persisted ``pending_gate`` record
+        before any side effect: a mismatch returns 2 with state untouched
+        (see ``_run_continue``).
+        """
+        self._gate_choice = gate_choice
         try:
             with self.store.locked():
                 return self._run_continue()
@@ -504,6 +531,8 @@ class Orchestrator:
             )
         except _Abort as exc:
             return exc.code
+        except GatePending as exc:
+            return self._pend_gate(state, exc)
         except AdapterError as exc:
             self.log(f"spar: adapter failed, aborting: {exc}")
             return 4
@@ -516,6 +545,17 @@ class Orchestrator:
         except StateError as exc:
             self.log(f"spar: cannot load debate state: {exc}")
             return 3
+
+        gate_choice = self._gate_choice
+        # Validate the --gate decision PURELY against the persisted pending
+        # gate, BEFORE any side effect. A mismatch -- or a --gate with no
+        # gate pending -- returns 2 with state untouched.
+        if gate_choice is not None:
+            try:
+                validate_choice(gate_choice, state.pending_gate)
+            except GateParseError as exc:
+                self.log(f"spar: --gate rejected: {exc}")
+                return 2
 
         mismatch = self._check_sides_match(state)
         if mismatch is not None:
@@ -540,15 +580,53 @@ class Orchestrator:
         if next_idx is None:
             return 3
 
+        # Stash the decision for consumption by the gate object itself. The
+        # gate is NOT cleared here -- consensus/rounds conditions re-derive
+        # from state, so the gate is re-hit, consumes the preload via its own
+        # ``on_consume`` callback, and clears ``pending_gate`` at that moment.
+        if gate_choice is not None and hasattr(self.gate, "preloaded"):
+            name = (state.pending_gate or {}).get("name")
+            decision = _decision_from_choice(gate_choice)
+            self.gate.preloaded = (name, decision)
+            self.gate.on_consume = self._make_gate_on_consume(state)
+
         try:
             return self._debate_loop(
                 state, task_prompt, next_idx=next_idx, budget=self.debate.max_rounds
             )
         except _Abort as exc:
             return exc.code
+        except GatePending as exc:
+            return self._pend_gate(state, exc)
         except AdapterError as exc:
             self.log(f"spar: adapter failed, aborting: {exc}")
             return 4
+
+    def _pend_gate(self, state: DebateState, exc: GatePending) -> int:
+        """Persist a headless gate-pending signal and exit 10.
+
+        ``pending_gate`` is cleared only at consumption (via the gate's
+        ``on_consume`` callback), never here.
+        """
+        state.pending_gate = exc.to_state()
+        self.store.save(state)
+        self.log(
+            f"spar: gate '{exc.name}' pending (options: "
+            f"{', '.join(exc.options)}); resume with 'spar --continue "
+            "--gate <choice>'. (exit 10)"
+        )
+        return 10
+
+    def _make_gate_on_consume(self, state: DebateState):
+        """Callback the headless gate runs the moment it consumes a preloaded
+        decision: clear the pending gate and persist (clearing at consumption,
+        never at preload)."""
+
+        def _on_consume() -> None:
+            state.pending_gate = None
+            self.store.save(state)
+
+        return _on_consume
 
     def _recover(self, state: DebateState, status: str) -> int | None:
         """Resolve a recovery ``status`` into the index of the next actor.
