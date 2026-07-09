@@ -99,9 +99,14 @@ the verdict protocol but with a single editing Side, unlike the symmetric Debate
 
 **Foreign files**: the file scopes of other, not-yet-merged Tasks. From the
 reviewer's seat these files may be legitimately absent (they arrive with later
-merges), so their absence is never a defect — the reviewer judges only whether
-the reviewed Task's references to them match the planned names/paths. A
-reference to a file that is neither in the diff nor foreign IS a defect.
+merges): their absence alone is never a defect, and the reviewed Task is never
+required to create them — the reviewer checks that references to them match
+the planned names/paths. Two things DO remain defects: a hard reference
+(import/include/link/build-source) to a foreign file that breaks the Task's
+own build/test on its branch (a plan-ordering violation of the
+cross-reference rule), and a missing-file reference matching none of the
+reviewed diff, the foreign files, the files already merged from earlier
+Tasks, or a file already present in the repository.
 
 ## Integration branch
 The single accumulator branch (`spar/integration`), created from the user's

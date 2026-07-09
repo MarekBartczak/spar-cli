@@ -4,7 +4,7 @@
 
 **Goal:** Make per-Task isolation work for interdependent tasks: the planner learns two planning invariants (A1), and the reviewer learns which absent files are legitimately "foreign" (A2), so scaffold/build-config tasks stop drawing unsatisfiable MUSTs and unpassable per-Task tests.
 
-**Architecture:** Two prompt-level changes, one data-plumbing change. A1 extends the `--tasks` planning contract in `spar/orchestrator.py` (cross-reference rule, per-Task test satisfiability, optional `test=` field surfaced in the grammar). A2 threads a *foreign files* list — file scopes of other, not-yet-merged Tasks — from `Executor._run_task` through `run_cross_review` into `build_review_prompt`, plus a review-protocol rule with a sharp edge (foreign absence ≠ defect; reference outside diff∪foreign = defect). No parser enforcement, no engine semantics changes.
+**Architecture:** Two prompt-level changes, one data-plumbing change. A1 extends the `--tasks` planning contract in `spar/orchestrator.py` (cross-reference rule, per-Task test satisfiability, optional `test=` field surfaced in the grammar). A2 threads TWO lists from `Executor._run_task` through `run_cross_review` into `build_review_prompt`: *foreign files* (file scopes of other, not-yet-merged Tasks — may be legitimately absent) and *merged files* (actual paths already merged into the Integration branch — present on the task branch though not in the diff). The review-protocol rule's sharp edge accounts for both plus pre-existing repository files: a reference is a defect only if it matches none of {diff, foreign list, merged list, a file already present in the repository}. No parser enforcement, no engine semantics changes.
 
 **Tech Stack:** Python 3.11+, pytest. No new dependencies.
 
@@ -55,6 +55,10 @@ def test_tasks_contract_includes_planning_invariants():
     assert "comes LAST" in text
     # per-task test satisfiability: runnable on the task's own branch
     assert "only its deps" in text
+    # the escape hatch is closed: omitted test= means the GLOBAL command
+    # gates the merge and must itself be satisfiable on the branch
+    assert "GLOBAL test command gates the task" in text
+    assert "you MUST give a narrower test=" in text
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -82,8 +86,10 @@ becomes
 and after the existing rule `"- files is a comma list of globs naming the task's file scope."` insert:
 
 ```python
-        "- test (optional) is a shell command gating THIS task's merge; "
-        "without it the global test command runs instead.",
+        "- test (optional) is a shell command gating THIS task's merge. "
+        "OMITTING it means the GLOBAL test command gates the task instead — "
+        "omit it ONLY when the global command can pass on the task's own "
+        "branch; otherwise you MUST give a narrower test=.",
         "",
         "Isolation invariants (each task is implemented, reviewed and tested "
         "on its own branch containing ONLY its merged deps):",
@@ -92,11 +98,12 @@ and after the existing rule `"- files is a comma list of globs naming the task's
         "build-config/scaffold task that wires the project together "
         "(build files, manifests, top-level config) therefore comes LAST, "
         "depending on every task whose files it references.",
-        "- Per-task test satisfiability: each task's test= must be runnable "
-        "on the task's own branch, i.e. judged against only its deps, not "
-        "the finished project. Give partial states a compile/lint-level "
-        "check; reserve the full build/suite for the final task and the "
-        "final Test phase.",
+        "- Per-task test satisfiability: whatever command gates a task's "
+        "merge (its test=, or the global test command when test= is "
+        "omitted) must be runnable on the task's own branch, i.e. judged "
+        "against only its deps, not the finished project. Give partial "
+        "states a compile/lint-level check; reserve the full build/suite "
+        "for the final task and the final Test phase.",
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -118,45 +125,55 @@ git commit -m "feat(orchestrator): teach --tasks contract the isolation invarian
 **Files:**
 - Modify: `spar/exec/prompts.py` (`build_review_prompt`, `_REVIEW_PROTOCOL_BLOCK`)
 - Modify: `spar/exec/review.py` (`run_cross_review` — new parameter, pass-through at line ~218)
-- Modify: `spar/exec/loop.py` (`Executor._run_task` — compute the list, pass to `run_cross_review`)
-- Test: `tests/test_exec_prompts.py`, `tests/test_exec_review.py`, `tests/test_exec_loop.py`
+- Modify: `spar/exec/gitops.py` (new `present_files` helper — like `changed_files` but excluding deletions)
+- Modify: `spar/exec/loop.py` (`Executor._run_task` — compute the lists, pass to `run_cross_review`)
+- Test: `tests/test_exec_prompts.py`, `tests/test_exec_review.py`, `tests/test_exec_gitops.py`, `tests/test_exec_loop.py`
 
 **Interfaces:**
 - Consumes: `TaskState.status` / `Task.files` from `spar/exec/state.py`; `run_cross_review(**kwargs)` from Task-1-independent existing code.
 - Produces:
-  - `build_review_prompt(task, diff_text, open_remarks, foreign_files=())` where `foreign_files: tuple[tuple[str, tuple[str, ...]], ...]` — `(task_id, file_globs)` pairs, ordered by task id.
-  - `run_cross_review(..., foreign_files=())` — same type, defaulting to empty (existing callers unaffected).
+  - `gitops.present_files(repo, base, ref) -> tuple[str, ...]` — like `changed_files` but with `--diff-filter=d`, so paths DELETED between `base` and `ref` are excluded (the merged-files list must contain only files actually present on the branch).
+  - `build_review_prompt(task, diff_text, open_remarks, foreign_files=(), merged_files=())` where `foreign_files: tuple[tuple[str, tuple[str, ...]], ...]` — `(task_id, file_globs)` pairs ordered by task id — and `merged_files: tuple[str, ...]` — actual paths already merged into the Integration branch AND still present there (from `gitops.present_files(repo, target_base_oid, integration_branch)`), NOT globs.
+  - `run_cross_review(..., foreign_files=(), merged_files=())` — same types, defaulting to empty (existing callers unaffected).
 
 - [ ] **Step 1: Write the failing prompt tests**
 
 Add to `tests/test_exec_prompts.py`:
 
 ```python
-def test_review_prompt_lists_foreign_files():
+def test_review_prompt_lists_foreign_and_merged_files():
     p = build_review_prompt(
         T,
         "diff --git a/CMakeLists.txt ...",
         [],
         foreign_files=(("t3", ("src/main.cpp",)), ("t4", ("tests/*.cpp",))),
+        merged_files=("src/factorial.hpp", "src/factorial.cpp"),
     )
-    # the list section names each foreign scope with its owning task
+    # the foreign section names each scope with its owning task
     assert "Files owned by other, not-yet-merged tasks" in p
     assert "t3: src/main.cpp" in p
     assert "t4: tests/*.cpp" in p
-    # the judging rule has a sharp edge in both directions
-    assert "their absence is NOT a defect" in p
-    assert "neither in the diff nor in that list IS a defect" in p
+    assert "their absence is NOT a defect by itself" in p
+    # ...but a hard reference breaking THIS task's isolation is flagged
+    assert "HARD-reference" in p
+    assert "plan-ordering defect" in p
+    # the merged section lists real paths present on the branch
+    assert "Files already merged from earlier tasks" in p
+    assert "src/factorial.hpp" in p
+    # the defect rule accounts for diff, both lists, AND pre-existing files
+    assert "already present in the repository" in p
 
 
-def test_review_prompt_omits_foreign_section_when_empty():
+def test_review_prompt_omits_context_sections_when_empty():
     p = build_review_prompt(T, "diff --git a/x ...", [])
     assert "not-yet-merged tasks" not in p
+    assert "already merged from earlier tasks" not in p
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python3 -m pytest tests/test_exec_prompts.py -v -k foreign`
-Expected: first test FAILS with `TypeError: build_review_prompt() got an unexpected keyword argument 'foreign_files'`; second PASSES trivially (guard that the section is conditional — keep it).
+Run: `python3 -m pytest tests/test_exec_prompts.py -v -k "foreign or context_sections"`
+Expected: first test FAILS with `TypeError: build_review_prompt() got an unexpected keyword argument 'foreign_files'`; second PASSES trivially (guard that the sections are conditional — keep it).
 
 - [ ] **Step 3: Implement the prompt change**
 
@@ -168,30 +185,46 @@ def build_review_prompt(
     diff_text: str,
     open_remarks: list[StateRemark],
     foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    merged_files: tuple[str, ...] = (),
 ) -> str:
 ```
 
 and before `protocol = _REVIEW_PROTOCOL_BLOCK` add:
 
 ```python
-    foreign_section = ""
+    context_section = ""
+    context_lines: list[str] = []
     if foreign_files:
-        lines = [
-            "Files owned by other, not-yet-merged tasks (they will be created "
-            "by later merges and may be ABSENT on this branch — their absence "
-            "is NOT a defect; check only that this task's references to them "
-            "match these planned names/paths):"
-        ]
-        for task_id, globs in foreign_files:
-            lines.append(f"  {task_id}: {', '.join(globs)}")
-        lines.append(
-            "A reference to a file that is neither in the diff nor in that "
-            "list IS a defect worth a [MUST] remark."
+        context_lines.append(
+            "Files owned by other, not-yet-merged tasks (they arrive with "
+            "later merges and may be ABSENT on this branch): do NOT require "
+            "this task to create them — their absence is NOT a defect by "
+            "itself; check that references to them match these planned "
+            "names/paths. HOWEVER, if this task's own files HARD-reference a "
+            "foreign file (import/include/link/build-source) so that this "
+            "task cannot build or pass its test on THIS branch, raise a "
+            "[MUST] naming the missing dependency — that is a plan-ordering "
+            "defect (the task should have depended on the owner)."
         )
-        foreign_section = "\n" + "\n".join(lines) + "\n"
+        for task_id, globs in foreign_files:
+            context_lines.append(f"  {task_id}: {', '.join(globs)}")
+    if merged_files:
+        context_lines.append(
+            "Files already merged from earlier tasks (present on this branch "
+            "even though they do not appear in the diff above):"
+        )
+        for path in merged_files:
+            context_lines.append(f"  {path}")
+    if context_lines:
+        context_lines.append(
+            "Raise a [MUST] about a referenced file ONLY if it matches none "
+            "of: the diff, the lists above, or a file already present in the "
+            "repository."
+        )
+        context_section = "\n" + "\n".join(context_lines) + "\n"
 ```
 
-and include `{foreign_section}` in the returned f-string between the diff and `{remarks_section}`:
+and include `{context_section}` in the returned f-string between the diff and `{remarks_section}`:
 
 ```python
     return f"""\
@@ -201,13 +234,13 @@ Description: {task.description}
 Review the following diff (read-only — you must NOT edit code):
 
 {diff_text}
-{foreign_section}{remarks_section}
+{context_section}{remarks_section}
 
 {protocol}\
 """
 ```
 
-(Note the newline handling: `foreign_section` is empty or starts/ends with `\n`, so the empty case renders identically to today's output except for one blank line after the diff — the existing `test_exec_prompts.py` assertions are substring-based and survive this.)
+(Note the newline handling: `context_section` is empty or starts/ends with `\n`, so the empty case renders identically to today's output except for one blank line after the diff — the existing `test_exec_prompts.py` assertions are substring-based and survive this.)
 
 - [ ] **Step 4: Run prompt tests to verify they pass**
 
@@ -219,46 +252,102 @@ Expected: PASS (all).
 Add to `tests/test_exec_review.py`:
 
 ```python
-def test_foreign_files_reach_the_review_prompt(env):
+def test_foreign_and_merged_files_reach_the_review_prompt(env):
     task = _task(files=("work.py",))
     impl_steps = []
     review_steps = [Step(vblock("DONE"))]
     impl, review, task_state, exec_state, logs = _run(
         env, task, impl_steps, review_steps,
         foreign_files=(("t9", ("src/*.cpp",)),),
+        merged_files=("lib/util.py",),
     )
     assert "t9: src/*.cpp" in review.calls[0]["prompt"]
-    # the implementer never sees the reviewer-facing list (no impl turn here,
-    # but the signature must not leak it into build_impl_prompt)
+    assert "lib/util.py" in review.calls[0]["prompt"]
 ```
 
 - [ ] **Step 6: Run it to verify it fails**
 
-Run: `python3 -m pytest tests/test_exec_review.py::test_foreign_files_reach_the_review_prompt -v`
+Run: `python3 -m pytest tests/test_exec_review.py::test_foreign_and_merged_files_reach_the_review_prompt -v`
 Expected: FAIL with `TypeError: run_cross_review() got an unexpected keyword argument 'foreign_files'`.
 
-- [ ] **Step 7: Thread the parameter through `run_cross_review`**
+- [ ] **Step 7: Thread the parameters through `run_cross_review`**
 
-In `spar/exec/review.py` add the keyword-only parameter (after `rounds_gate`):
+In `spar/exec/review.py` add the keyword-only parameters (after `rounds_gate`):
 
 ```python
     max_rounds: int = 0,
     rounds_gate=None,
     foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    merged_files: tuple[str, ...] = (),
 ```
 
-and pass it at the reviewer-turn prompt build (line ~218):
+and pass them at the reviewer-turn prompt build (line ~218):
 
 ```python
         prompt = build_review_prompt(
             task, diff_text, list(task_state.pending_remarks),
             foreign_files=foreign_files,
+            merged_files=merged_files,
         )
 ```
 
 - [ ] **Step 8: Run it to verify it passes**
 
 Run: `python3 -m pytest tests/test_exec_review.py -q`
+Expected: PASS (all).
+
+- [ ] **Step 8a: Write the failing gitops test (deletion regression)**
+
+`tests/test_exec_gitops.py` imports functions DIRECTLY from `spar.exec.gitops` (no module binding) and has a module-level `_run(repo, *args)` git helper — extend the import list with `present_files` and `rev_parse`, then add:
+
+```python
+def test_present_files_excludes_deletions(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _run(repo, "init", "-q", "-b", "master")
+    _run(repo, "config", "user.email", "t@t")
+    _run(repo, "config", "user.name", "t")
+    (repo / "kept.txt").write_text("x\n", encoding="utf-8")
+    (repo / "doomed.txt").write_text("y\n", encoding="utf-8")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-qm", "base")
+    base = rev_parse(repo, "HEAD")
+
+    (repo / "new.txt").write_text("z\n", encoding="utf-8")
+    (repo / "doomed.txt").unlink()
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-qm", "change")
+
+    # changed_files reports the deletion; present_files must not
+    assert "doomed.txt" in changed_files(repo, base, "HEAD")
+    assert present_files(repo, base, "HEAD") == ("new.txt",)
+```
+
+- [ ] **Step 8b: Run it, then implement `present_files`**
+
+Run: `python3 -m pytest tests/test_exec_gitops.py::test_present_files_excludes_deletions -v`
+Expected: FAIL with `AttributeError: ... no attribute 'present_files'`.
+
+Add to `spar/exec/gitops.py` (below `changed_files`):
+
+```python
+def present_files(repo: Path, base: str, ref: str) -> tuple[str, ...]:
+    """Files changed between ``base`` and ``ref`` that still EXIST at ``ref``.
+
+    Like :func:`changed_files` but with ``--diff-filter=d``: a path deleted
+    between the two refs is excluded, so callers can treat the result as
+    "files present on ``ref``" (the review-context merged-files list must
+    never vouch for a file a prior task deleted).
+    """
+    result = _run_ok(
+        repo, "-c", "core.quotePath=false", "diff", "--name-only",
+        "--diff-filter=d", f"{base}..{ref}",
+    )
+    lines = result.stdout.strip("\n").split("\n")
+    return tuple(line for line in lines if line)
+```
+
+Run: `python3 -m pytest tests/test_exec_gitops.py -q`
 Expected: PASS (all).
 
 - [ ] **Step 9: Write the failing Executor test**
@@ -290,10 +379,14 @@ def test_reviewer_prompt_lists_unmerged_tasks_files_only(repo, tmp_path):
     )
     rc = ex.run()
     assert rc == 0
-    # B's first call reviewed t1: t2 was pending -> listed as foreign
+    # B's first call reviewed t1: t2 was pending -> listed as foreign;
+    # nothing merged yet -> no merged-files section
     assert "t2: work2.py" in adapters["B"].calls[0]["prompt"]
-    # A's second call reviewed t2: t1 already merged -> NOT listed
+    assert "already merged from earlier tasks" not in adapters["B"].calls[0]["prompt"]
+    # A's second call reviewed t2: t1 already merged -> NOT foreign, but its
+    # actual file appears in the merged-files section
     assert "t1: work1.py" not in adapters["A"].calls[1]["prompt"]
+    assert "work1.py" in adapters["A"].calls[1]["prompt"]
 ```
 
 - [ ] **Step 10: Run it to verify it fails**
@@ -301,25 +394,32 @@ def test_reviewer_prompt_lists_unmerged_tasks_files_only(repo, tmp_path):
 Run: `python3 -m pytest tests/test_exec_loop.py::test_reviewer_prompt_lists_unmerged_tasks_files_only -v`
 Expected: FAIL on the first prompt assertion (no foreign section yet).
 
-- [ ] **Step 11: Compute the list in `Executor._run_task`**
+- [ ] **Step 11: Compute both lists in `Executor._run_task`**
 
 In `spar/exec/loop.py`, inside `_run_task` (before the `while True:` loop, after `reviewer = ...`), add:
 
 ```python
-        # Foreign files (A2): file scopes of other, not-yet-merged tasks.
-        # From the reviewer's seat these may be legitimately absent on the
-        # task branch; the review prompt lists them so their absence is not
-        # mistaken for a defect. Merged tasks' files are on the branch
-        # already, so they are not foreign. Sequential execution: statuses
-        # cannot change while this task runs, so compute once.
+        # Review context (A2). Foreign files: file scopes (globs) of other,
+        # not-yet-merged tasks — legitimately absent on the task branch.
+        # Merged files: ACTUAL paths already merged into integration — present
+        # on the branch though invisible in the reviewer's diff. Together they
+        # stop the reviewer from mistaking either for a missing-file defect.
+        # Sequential execution: statuses cannot change while this task runs,
+        # so compute once.
         foreign_files = tuple(
             (other.task.id, other.task.files)
             for other in sorted(state.tasks.values(), key=lambda t: t.task.id)
             if other.task.id != task.id and other.status != "merged"
         )
+        merged_files = gitops.present_files(
+            self.repo, state.target_base_oid, state.integration_branch
+        )
 ```
 
-and pass it to `run_cross_review`:
+(`present_files`, not `changed_files`: a file DELETED by an earlier task must
+not be vouched for as present — deletion regression, review round 2.)
+
+and pass them to `run_cross_review`:
 
 ```python
                 run_cross_review(
@@ -327,6 +427,7 @@ and pass it to `run_cross_review`:
                     max_rounds=self.execution.max_review_rounds,
                     rounds_gate=self._review_rounds_gate(state),
                     foreign_files=foreign_files,
+                    merged_files=merged_files,
                 )
 ```
 
@@ -338,9 +439,10 @@ Expected: PASS (0 failures; ~310 passed, 2 skipped).
 - [ ] **Step 13: Commit**
 
 ```bash
-git add spar/exec/prompts.py spar/exec/review.py spar/exec/loop.py \
-        tests/test_exec_prompts.py tests/test_exec_review.py tests/test_exec_loop.py
-git commit -m "feat(exec): reviewer learns foreign files of unmerged tasks (blocker A2)"
+git add spar/exec/prompts.py spar/exec/review.py spar/exec/gitops.py spar/exec/loop.py \
+        tests/test_exec_prompts.py tests/test_exec_review.py tests/test_exec_gitops.py \
+        tests/test_exec_loop.py
+git commit -m "feat(exec): review context — foreign + merged file lists (blocker A2)"
 ```
 
 ---
@@ -384,6 +486,44 @@ Update `docs/HANDOFF.md` (blocker A status) and the auto-memory `exec-review-ope
 
 ## Self-Review Notes
 
-- Spec coverage: A1 → Task 1; A2 (list content, unmerged-only, sharp-edged rule) → Task 2; validation-by-regeneration → Task 3. Grill decisions all encoded.
+- Spec coverage: A1 → Task 1; A2 (foreign + merged lists, sharp-edged rule incl. pre-existing files) → Task 2; validation-by-regeneration → Task 3. Grill decisions all encoded.
 - Existing callers of `build_review_prompt` / `run_cross_review` keep working (new params default to empty).
-- Type consistency: `foreign_files: tuple[tuple[str, tuple[str, ...]], ...]` used identically in prompts.py, review.py, loop.py and all tests.
+- Type consistency: `foreign_files: tuple[tuple[str, tuple[str, ...]], ...]` and `merged_files: tuple[str, ...]` used identically in prompts.py, review.py, loop.py and all tests.
+
+## Review history
+
+- **Round 1** (codex gpt-5.5): Verdict CONTINUE. #1 [MUST] **accepted** — the
+  "reference outside diff∪foreign = defect" rule was unsound: files from
+  already-merged dependency tasks (and files pre-existing in the repo) are
+  neither in the diff nor foreign, so a valid last scaffold task would still
+  draw false MUSTs. Fix applied to the plan body: review prompt now carries a
+  second list (*merged files*, actual paths from
+  `gitops.changed_files(repo, target_base_oid, integration_branch)`) and the
+  defect rule requires a reference to match none of {diff, foreign list,
+  merged list, file already present in the repository}. CONTEXT.md glossary
+  updated accordingly.
+- **Round 2** (codex gpt-5.5): Verdict CONTINUE. Confirmed #1 addressed.
+  #2 [MUST] **accepted** — `changed_files` (`git diff --name-only`) also
+  reports DELETED paths, so a file removed by an earlier task would be
+  vouched for as "present". Fix applied: new `gitops.present_files`
+  (`--diff-filter=d`) used for the merged-files list, with a deletion
+  regression test (Task 2 Steps 8a/8b).
+- **Round 3** (codex gpt-5.5): Verdict CONTINUE. #3 [MUST] **accepted** —
+  the foreign-files rule as written could mask a plan-ordering violation
+  (a hard import/include/link of a not-yet-merged file, which A1 forbids).
+  Fix applied: foreign-section wording narrowed — absence alone is not a
+  defect and the task is never required to create foreign files, but a
+  HARD-reference that breaks this task's own build/test on its branch draws
+  a [MUST] naming the missing dependency (plan-ordering defect). Prompt
+  tests extended; CONTEXT.md glossary updated. #4 [NICE] **accepted** —
+  gitops test snippet adapted to the file's direct-import + `_run` helper
+  conventions.
+- **Round 4** (codex gpt-5.5): Verdict CONTINUE. Confirmed #1–#4 addressed.
+  #5 [MUST] **accepted** — omitting `test=` silently falls back to the
+  GLOBAL test command (`Executor._task_test_cmd`), an escape hatch the
+  contract left open. Fix applied: contract wording now states the omission
+  semantics explicitly and requires a narrower `test=` whenever the global
+  command cannot pass on the task's branch; the satisfiability rule now
+  covers "whatever command gates the merge". Contract test extended.
+  Fix is from the final round — UNVERIFIED by the reviewer (offered +1
+  verification round at the user gate).
