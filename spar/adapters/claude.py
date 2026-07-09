@@ -42,12 +42,17 @@ class ClaudeAdapter:
         # So: allowlist (one comma token) first, then permission-mode last.
         # A readonly adapter (reviewer role) gets NO write tools and no
         # auto-approving permission mode: reviews must not touch the repo.
+        # The non-readonly (implementer) branch also gets Bash/Grep/Glob: it
+        # needs a shell to compile/lint its own work before the per-task
+        # test runs, matching the codex adapter's --sandbox workspace-write,
+        # which already grants a full shell. The scope guard and self-commit
+        # handling in the review loop police the results either way.
         if self.readonly:
             perm_flags = ["--allowedTools", "Read"]
         else:
             perm_flags = [
                 "--allowedTools",
-                "Read,Edit,Write",
+                "Read,Edit,Write,Bash,Grep,Glob",
                 "--permission-mode",
                 "acceptEdits",
             ]
