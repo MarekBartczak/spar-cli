@@ -50,7 +50,11 @@ class CodexAdapter:
             "--sandbox",
             # A readonly adapter (reviewer role) must not write to the repo.
             "read-only" if self.readonly else "workspace-write",
-            *(["--cd", str(self.cwd)] if self.cwd else []),
+            # --cd must be ABSOLUTE: run_cli already launches codex with its
+            # subprocess cwd set to this same directory, so codex would resolve
+            # a relative --cd against it a second time (.spar/worktrees/x/.spar/
+            # worktrees/x) and die with "No such file or directory".
+            *(["--cd", str(Path(self.cwd).resolve())] if self.cwd else []),
             *(["-m", self.model] if self.model else []),
             "--output-last-message",
             str(last_msg_path),

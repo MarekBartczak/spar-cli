@@ -306,3 +306,22 @@ def test_readonly_adapter_uses_readonly_sandbox(tmp_path, monkeypatch):
     argv = read_argv_lines(args_file)[0]
     idx = argv.index("--sandbox")
     assert argv[idx + 1] == "read-only"
+
+
+def test_relative_cwd_is_resolved_absolute_in_cd_flag(tmp_path, monkeypatch):
+    # codex resolves --cd relative to ITS OWN cwd, and run_cli already sets the
+    # subprocess cwd to the same directory — a relative --cd would be resolved
+    # TWICE (.spar/worktrees/codex/.spar/worktrees/codex). The flag must carry
+    # an absolute path.
+    args_file = tmp_path / "args.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_ARGS_FILE", str(args_file))
+    monkeypatch.chdir(tmp_path)
+    rel = Path(".spar") / "worktrees" / "codex"
+    (tmp_path / rel).mkdir(parents=True)
+
+    adapter = make_adapter(tmp_path, cwd=rel)
+    adapter.run_turn("hello", session_id=None, timeout_sec=5)
+
+    argv = read_argv_lines(args_file)[0]
+    idx = argv.index("--cd")
+    assert argv[idx + 1] == str((tmp_path / rel).resolve())
