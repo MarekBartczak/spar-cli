@@ -40,15 +40,13 @@ task-list validation + planner contract; set in spar_tests for claude),
 open NICE remarks surfaced at the final-merge gate, omit-empty-remarks
 protocol rule, numeric task-id ordering.
 
-Still open:
-- Final-merge-gate abort leaves the repo checked out on `spar/integration`.
-- Turn timeout hardcoded (`_DEFAULT_TIMEOUT_SEC = 900`), not in config.
-- Claude implementer has no Bash/Grep/Glob (cannot compile-check own work
-  before the per-task test).
-- Permanent missing-file rule mentions the foreign section even when absent
-  (benign prompt-coherence nit).
-- Implementer sometimes "resolves" phantom remark ids (t3: #7/#9) — ignored
-  correctly, harmless.
+Cleanup tranche 2 (2026-07-09, `889b565..ea4eaef`) closed the rest:
+`[execution] turn_timeout_sec`, target-checkout restore on abort/error exits
+(best-effort, guard-tested), claude implementer with Bash/Grep/Glob (parity
+with codex's shell; reviewer stays read-only), hedged foreign-section
+reference, no-invented-remark-ids rule in the implementer protocol.
+
+**Backlog: empty.** Next work comes from the roadmap below.
 
 ## Roadmap (unchanged)
 
