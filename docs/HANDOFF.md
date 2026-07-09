@@ -17,6 +17,11 @@
 - Guards proven live: empty-implementation abort, anti-spin (no-change), collision-leftover refusal, weak-model hallucination → loud abort, verdict `#N accepted: <note>` tolerated.
 - **Model fit:** claude **sonnet** implements files reliably; **haiku hallucinates "done" without writing** — do not assign haiku to implementation tasks.
 
+> **Status update (2026-07-09):** blocker **B is FIXED** (commit `8e71fd8`) along with four
+> more issues found in review: read-only reviewer adapters, absolute plan path in prompts,
+> agent self-commit handling (scope + anti-spin), and a `max_fix_tasks` cap on final-test
+> churn. Blocker **A remains** (design work: brainstorm → plan → challenge).
+
 ## The TWO blockers to fix (then the test passes)
 
 ### A. Per-task isolation breaks for interdependent build/scaffold tasks
