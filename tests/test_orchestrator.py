@@ -226,6 +226,27 @@ def test_build_turn_prompt_require_tasks_injects_tasks_contract():
     assert prompt.index("## Tasks") < prompt.index("<verdict>")
 
 
+def test_tasks_contract_includes_planning_invariants():
+    # The --tasks contract must teach the planner the two isolation
+    # invariants (cross-reference rule, per-task test satisfiability) and
+    # surface the optional per-task test= field in the grammar.
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract({"claude": ("m1",), "codex": ("m2",)})
+    # grammar line shows the optional test= field
+    assert "[ | test=<cmd>]" in text
+    # cross-reference rule: referencing another task's files => deps on it
+    assert "references files owned by another task" in text
+    # scaffold/build-config guidance: such a task comes last
+    assert "comes LAST" in text
+    # per-task test satisfiability: runnable on the task's own branch
+    assert "only its deps" in text
+    # the escape hatch is closed: omitted test= means the GLOBAL command
+    # gates the merge and must itself be satisfiable on the branch
+    assert "GLOBAL test command gates the task" in text
+    assert "you MUST give a narrower test=" in text
+
+
 def test_build_turn_prompt_default_omits_tasks_contract():
     prompt = build_turn_prompt(
         side_name="claude",

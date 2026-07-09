@@ -261,7 +261,8 @@ def _format_tasks_contract(catalogs: dict[str, tuple[str, ...]] | None) -> str:
         "",
         "## Tasks",
         "- [t<n>] <desc> | side=<side> | model=<impl-model> | "
-        "review=<review-model> | deps=<id,id|-> | files=<glob,glob>",
+        "review=<review-model> | deps=<id,id|-> | files=<glob,glob>"
+        "[ | test=<cmd>]",
         "",
         "Rules:",
         "- side is one of the configured sides: "
@@ -273,6 +274,24 @@ def _format_tasks_contract(catalogs: dict[str, tuple[str, ...]] | None) -> str:
         "- deps is a comma list of earlier task ids this task depends on, or "
         "`-` for none.",
         "- files is a comma list of globs naming the task's file scope.",
+        "- test (optional) is a shell command gating THIS task's merge. "
+        "OMITTING it means the GLOBAL test command gates the task instead — "
+        "omit it ONLY when the global command can pass on the task's own "
+        "branch; otherwise you MUST give a narrower test=.",
+        "",
+        "Isolation invariants (each task is implemented, reviewed and tested "
+        "on its own branch containing ONLY its merged deps):",
+        "- Cross-reference rule: if a task's file content references files "
+        "owned by another task, it MUST list that task in deps. A "
+        "build-config/scaffold task that wires the project together "
+        "(build files, manifests, top-level config) therefore comes LAST, "
+        "depending on every task whose files it references.",
+        "- Per-task test satisfiability: whatever command gates a task's "
+        "merge (its test=, or the global test command when test= is "
+        "omitted) must be runnable on the task's own branch, i.e. judged "
+        "against only its deps, not the finished project. Give partial "
+        "states a compile/lint-level check; reserve the full build/suite "
+        "for the final task and the final Test phase.",
         "",
         "Model catalogs (assign only models a side actually has):",
     ]
