@@ -22,6 +22,7 @@ class ClaudeAdapter:
         cwd: Path | None = None,
         events_dir: Path | None = None,
         side_name: str = "claude",
+        readonly: bool = False,
     ) -> None:
         self.command = command
         self.model = model
@@ -29,6 +30,7 @@ class ClaudeAdapter:
         self.events_dir = events_dir if events_dir is not None else Path(".spar/transcript")
         self.side_name = side_name
         self.name = side_name
+        self.readonly = readonly
 
     def _build_argv(self, prompt: str, session_id: str | None) -> list[str]:
         model_flags = ["--model", self.model] if self.model else []
@@ -38,12 +40,17 @@ class ClaudeAdapter:
         # another flag (--permission-mode), never by the positional prompt, or
         # it swallows the prompt ("Input must be provided ... with --print").
         # So: allowlist (one comma token) first, then permission-mode last.
-        perm_flags = [
-            "--allowedTools",
-            "Read,Edit,Write",
-            "--permission-mode",
-            "acceptEdits",
-        ]
+        # A readonly adapter (reviewer role) gets NO write tools and no
+        # auto-approving permission mode: reviews must not touch the repo.
+        if self.readonly:
+            perm_flags = ["--allowedTools", "Read"]
+        else:
+            perm_flags = [
+                "--allowedTools",
+                "Read,Edit,Write",
+                "--permission-mode",
+                "acceptEdits",
+            ]
         if session_id is not None:
             return [
                 self.command,

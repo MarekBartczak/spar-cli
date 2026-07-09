@@ -737,3 +737,16 @@ class TestExecutionConfig:
         cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
         assert cfg.execution.test_command == ""
         assert cfg.execution.max_review_rounds == 0
+        assert cfg.execution.max_fix_tasks == 0
+
+    def test_max_fix_tasks_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nmax_fix_tasks=2\n')
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.execution.max_fix_tasks == 2
+
+    def test_max_fix_tasks_negative_rejected(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nmax_fix_tasks=-1\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)

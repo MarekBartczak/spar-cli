@@ -155,7 +155,7 @@ def _build_executor(
     monkeypatch wholesale.
     """
 
-    def make_adapter(side: str, worktree: Path, model: str):
+    def make_adapter(side: str, worktree: Path, model: str, readonly: bool = False):
         side_cfg = config.sides[side]
         adapter_cls = _ADAPTERS[side_cfg.adapter]
         return adapter_cls(
@@ -164,6 +164,7 @@ def _build_executor(
             cwd=worktree,
             events_dir=Path(".spar/transcript"),
             side_name=side,
+            readonly=readonly,
         )
 
     return Executor(

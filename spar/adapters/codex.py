@@ -24,6 +24,7 @@ class CodexAdapter:
         cwd: Path | None = None,
         events_dir: Path | None = None,
         side_name: str = "codex",
+        readonly: bool = False,
     ) -> None:
         self.command = command
         self.model = model
@@ -31,6 +32,7 @@ class CodexAdapter:
         self.events_dir = events_dir if events_dir is not None else Path(".spar/transcript")
         self.side_name = side_name
         self.name = side_name
+        self.readonly = readonly
 
     def _events_path(self, timestamp: str) -> Path:
         pid = os.getpid()
@@ -46,7 +48,8 @@ class CodexAdapter:
         globals_ = [
             "--json",
             "--sandbox",
-            "workspace-write",
+            # A readonly adapter (reviewer role) must not write to the repo.
+            "read-only" if self.readonly else "workspace-write",
             *(["--cd", str(self.cwd)] if self.cwd else []),
             *(["-m", self.model] if self.model else []),
             "--output-last-message",

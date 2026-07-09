@@ -67,6 +67,7 @@ class FakeAdapter:
         self.root = None  # set on each make_adapter call
         self.calls = []
         self.models = []  # model passed on each make_adapter call for this side
+        self.readonly_flags = []  # readonly flag on each make_adapter call
 
     def run_turn(self, prompt, session_id, timeout_sec):
         self.calls.append({"prompt": prompt, "session_id": session_id})
@@ -85,26 +86,33 @@ def make_factory(steps_by_side):
     through to the adapter construction call for each turn."""
     adapters: dict[str, FakeAdapter] = {}
 
-    def make_adapter(side, worktree, model):
+    def make_adapter(side, worktree, model, readonly=False):
         a = adapters.get(side)
         if a is None:
             a = FakeAdapter(side, steps_by_side.get(side, []))
             adapters[side] = a
         a.root = Path(worktree)
         a.models.append(model)
+        a.readonly_flags.append(readonly)
         return a
 
     return make_adapter, adapters
 
 
 class FakeGate:
-    def __init__(self, decisions):
+    def __init__(self, decisions, review_decisions=()):
         self.decisions = list(decisions)
         self.calls = []
+        self.review_decisions = list(review_decisions)
+        self.review_calls = []
 
     def final_merge_gate(self, summary):
         self.calls.append(summary)
         return self.decisions.pop(0)
+
+    def review_rounds_exhausted_gate(self, task_id, rounds, pending):
+        self.review_calls.append((task_id, rounds, list(pending)))
+        return self.review_decisions.pop(0)
 
 
 def git(cwd, *args):
@@ -836,3 +844,222 @@ def test_ready_with_leftover_branch_recovers(repo, tmp_path):
     assert reloaded.phase == "done"
     assert not branch_exists(repo, "spar/t1-A")
     assert "work.py" in git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
+
+
+# ---------------------------------------------------------------------------
+# plan_path is resolved to an absolute path: the implementer runs with its
+# worktree as cwd, so a relative plan path (".spar/artifact.md") would point
+# nowhere from there. The prompt must carry the absolute path.
+# ---------------------------------------------------------------------------
+
+
+def test_plan_path_resolved_to_absolute_in_prompts(repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    plan_rel = Path(".spar") / "artifact.md"
+    (tmp_path / ".spar").mkdir()
+    (tmp_path / ".spar" / "artifact.md").write_text("plan\n", encoding="utf-8")
+
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    spar_dir = tmp_path / ".spar"
+    make_adapter, adapters = make_factory(steps)
+    store = ExecStateStore(spar_dir)
+    ex = Executor(
+        repo=repo,
+        spar_dir=spar_dir,
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=plan_rel,  # RELATIVE on purpose
+        tasks=tuple(tasks),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate,
+        store=store,
+        log=lambda *_: None,
+    )
+    rc = ex.run()
+    assert rc == 0
+    impl_prompt = adapters["A"].calls[0]["prompt"]
+    assert str(tmp_path / ".spar" / "artifact.md") in impl_prompt
+
+
+# ---------------------------------------------------------------------------
+# The reviewer adapter is built read-only; the implementer is not.
+# ---------------------------------------------------------------------------
+
+
+def test_reviewer_adapter_is_readonly(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    # side A implemented t1 -> built without readonly; side B reviewed -> readonly
+    assert adapters["A"].readonly_flags == [False]
+    assert adapters["B"].readonly_flags == [True]
+
+
+# ---------------------------------------------------------------------------
+# Review-round cap wiring: max_review_rounds from ExecutionConfig reaches the
+# cross-review loop; an abort decision at the gate exits 5.
+# ---------------------------------------------------------------------------
+
+
+def test_review_rounds_gate_abort_exits_5(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+        ],
+        "B": [
+            Step(vblock("CONTINUE", remarks=["[MUST] never happy"])),  # review r1
+        ],
+    }
+    gate = FakeGate([], review_decisions=[GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true", max_review_rounds=1),
+    )
+    rc = ex.run()
+    assert rc == 5
+    assert gate.review_calls and gate.review_calls[0][0] == "t1"
+    # the still-open blocking remark was surfaced to the gate
+    assert any(r.text == "never happy" for r in gate.review_calls[0][2])
+
+
+def test_review_rounds_gate_accept_proceeds_to_test_and_merge(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+        ],
+        "B": [
+            Step(vblock("CONTINUE", remarks=["[MUST] never happy"])),  # review r1
+        ],
+    }
+    gate = FakeGate(
+        [GateDecision("accept")], review_decisions=[GateDecision("accept")]
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true", max_review_rounds=1),
+    )
+    rc = ex.run()
+    assert rc == 0
+    state = store.load()
+    assert state.phase == "done"
+    assert state.tasks["t1"].status == "merged"
+
+
+# ---------------------------------------------------------------------------
+# Fix-task cap: a final test that keeps failing opens at most max_fix_tasks
+# integration-fix tasks, then aborts loudly instead of churning forever.
+# ---------------------------------------------------------------------------
+
+
+def test_fix_task_cap_aborts_after_budget(repo, tmp_path):
+    # The fix task inherits execution.test_command as its per-task test, so a
+    # bare ``false`` would loop the fix task's own implement/test cycle instead
+    # of reaching the final test again. Use a call counter: invocation 1 (final
+    # test after t1) FAILS -> opens fix t2; invocation 2 (per-task test of t2)
+    # PASSES -> t2 merges; invocation 3 (final test again) FAILS -> cap trips.
+    cnt = tmp_path / "cnt"
+    test_cmd = (
+        f'n=$(($(cat {cnt} 2>/dev/null || echo 0)+1)); echo $n > {cnt}; [ $n -eq 2 ]'
+    )
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    # the failing output names no files -> no failing files -> the fix task
+    # lands on order[0] == side A; side B reviews it.
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # impl t1
+            Step(vblock("CONTINUE"), edits={"work.py": "fix\n"}),  # impl fix t2
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review t1
+            Step(vblock("DONE")),  # review fix t2
+        ],
+    }
+    # only ONE fix task budgeted
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command=test_cmd, max_fix_tasks=1),
+    )
+    rc = ex.run()
+    assert rc == 4
+    state = store.load()
+    # exactly one fix task was opened (t2), then the cap tripped
+    assert set(state.tasks) == {"t1", "t2"}
+    assert any("fix" in ln and "cap" in ln.lower() or "budget" in ln.lower() for ln in logs)
+
+
+def test_fix_task_cap_zero_is_unlimited(repo, tmp_path):
+    # max_fix_tasks=0 keeps today's behavior: failing final test opens a fix
+    # task; a then-passing final test merges. (One fix round here.)
+    sentinel = tmp_path / "final_sent"
+    final = f"test -f {sentinel} || (touch {sentinel}; exit 1)"
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # impl t1
+            Step(vblock("CONTINUE"), edits={"work.py": "fix\n"}),  # impl fix t2
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review t1
+            Step(vblock("DONE")),  # review fix t2
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command=final, max_fix_tasks=0),
+    )
+    rc = ex.run()
+    assert rc == 0
+    state = store.load()
+    assert state.phase == "done"
+
+
+# ---------------------------------------------------------------------------
+# ConsoleExecGate.review_rounds_exhausted_gate: input handling.
+# ---------------------------------------------------------------------------
+
+
+def test_console_review_rounds_gate_accept_extend_abort():
+    from spar.exec.loop import ConsoleExecGate
+
+    def drive(answers):
+        answers = list(answers)
+        printed = []
+        gate = ConsoleExecGate(
+            input_fn=lambda _: answers.pop(0), print_fn=printed.append
+        )
+        return gate.review_rounds_exhausted_gate("t1", 3, []), printed
+
+    decision, _ = drive(["a"])
+    assert decision.action == "accept"
+
+    decision, _ = drive(["x"])
+    assert decision.action == "abort"
+
+    # extend: rejects junk / non-positive counts, then accepts a valid one
+    decision, printed = drive(["e", "abc", "e", "0", "e", "2"])
+    assert decision.action == "extend"
+    assert decision.extra_rounds == 2
+
+    # unknown answer re-prompts
+    decision, printed = drive(["?", "a"])
+    assert decision.action == "accept"
+    assert any("'a', 'e' or 'x'" in p for p in printed)

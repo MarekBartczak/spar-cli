@@ -63,9 +63,14 @@ _DEFAULT_TIMEOUT_SEC = 900
 
 
 class ExecGate(Protocol):
-    """The single user decision point of Execution (the final merge, §9)."""
+    """The user decision points of Execution: the final merge (§9) and a
+    review that exhausted its round budget without converging."""
 
     def final_merge_gate(self, summary: str) -> GateDecision: ...
+
+    def review_rounds_exhausted_gate(
+        self, task_id: str, rounds: int, pending: list
+    ) -> GateDecision: ...
 
 
 class ConsoleExecGate:
@@ -89,6 +94,37 @@ class ConsoleExecGate:
                 return GateDecision(action="abort")
             self._print("Please answer with 'a' or 'x'.")
 
+    def review_rounds_exhausted_gate(
+        self, task_id: str, rounds: int, pending: list
+    ) -> GateDecision:
+        self._print(
+            f"\nTask {task_id}: review-round budget exhausted after {rounds} "
+            "round(s) without reviewer DONE."
+        )
+        if pending:
+            self._print("Still-open remarks:")
+            for r in pending:
+                self._print(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
+        while True:
+            choice = self._input(
+                "[a]ccept task as-is / [e]xtend / [x] abort? "
+            ).strip().lower()
+            if choice in ("a", "accept"):
+                return GateDecision(action="accept")
+            if choice in ("x", "abort"):
+                return GateDecision(action="abort")
+            if choice in ("e", "extend"):
+                raw = self._input("How many more rounds? ").strip()
+                try:
+                    extra = int(raw)
+                except ValueError:
+                    extra = 0
+                if extra > 0:
+                    return GateDecision(action="extend", extra_rounds=extra)
+                self._print("Please enter a positive number.")
+                continue
+            self._print("Please answer with 'a', 'e' or 'x'.")
+
 
 # ---------------------------------------------------------------------------
 # Executor
@@ -111,13 +147,14 @@ class Executor:
         *,
         repo: Path,
         spar_dir: Path,
-        # ``(side, worktree, model) -> Adapter``: builds the Adapter for one
-        # turn. ``model`` is the negotiated per-Task model to run (the
-        # implementer's ``task.model`` or the reviewer's ``task.review_model``)
-        # so the Assignment negotiated for the Task actually drives which
-        # model executes the turn, rather than whatever default the factory
-        # would otherwise pick.
-        make_adapter: Callable[[str, Path, str], Adapter],
+        # ``(side, worktree, model, readonly=False) -> Adapter``: builds the
+        # Adapter for one turn. ``model`` is the negotiated per-Task model to
+        # run (the implementer's ``task.model`` or the reviewer's
+        # ``task.review_model``) so the Assignment negotiated for the Task
+        # actually drives which model executes the turn, rather than whatever
+        # default the factory would otherwise pick. ``readonly=True`` is passed
+        # for the reviewer role: the built adapter must not be able to write.
+        make_adapter: Callable[..., Adapter],
         sides: dict[str, SideConfig],
         order: list[str],
         plan_path: Path,
@@ -138,7 +175,10 @@ class Executor:
         self.make_adapter = make_adapter
         self.sides = sides
         self.order = list(order)
-        self.plan_path = Path(plan_path)
+        # Resolve to an absolute path: implementer prompts embed this path, and
+        # the implementer's cwd is its task WORKTREE (not the repo), where a
+        # relative ".spar/artifact.md" points nowhere.
+        self.plan_path = Path(plan_path).resolve()
         self.tasks = tuple(tasks)
         self.execution = execution
         self.gate = gate
@@ -341,7 +381,11 @@ class Executor:
                 ts.status = "implementing"
                 self.store.save(state)
                 impl_adapter = self.make_adapter(task.side, worktree, task.model)
-                review_adapter = self.make_adapter(reviewer, self.repo, task.review_model)
+                # The reviewer only reads the diff embedded in its prompt; it
+                # must never be able to write to the main repo checkout.
+                review_adapter = self.make_adapter(
+                    reviewer, self.repo, task.review_model, readonly=True
+                )
 
                 # Initial code-creating implement turn BEFORE the first reviewer
                 # turn (the reviewer must have a non-empty diff to read).
@@ -405,6 +449,8 @@ class Executor:
                     store=self.store,
                     exec_state=state,
                     log=self.log,
+                    max_rounds=self.execution.max_review_rounds,
+                    rounds_gate=self._review_rounds_gate(state),
                 )
 
                 ts.status = "testing"
@@ -440,6 +486,27 @@ class Executor:
         self._reset_task_artifacts(branch, worktree)
         self.log(f"spar exec: [{task.id}] merged into integration.")
 
+    def _review_rounds_gate(self, state: ExecState):
+        """Adapter between ``run_cross_review``'s ``rounds_gate`` callback and
+        the user-facing :class:`ExecGate`. An ``abort`` decision raises the
+        user-abort exit (5) directly — the review loop only ever sees
+        accept/extend."""
+
+        def gate(task_state: TaskState, rounds: int) -> GateDecision:
+            decision = self.gate.review_rounds_exhausted_gate(
+                task_state.task.id, rounds, list(task_state.pending_remarks)
+            )
+            if decision.action == "abort":
+                self.store.save(state)
+                self.log(
+                    f"spar exec: aborted by user at the review-rounds gate "
+                    f"(task {task_state.task.id})."
+                )
+                raise _Abort(5)
+            return decision
+
+        return gate
+
     # -- final Test phase + integration-fix Task + final merge ---------
 
     def _test_and_merge(self, state: ExecState) -> int | None:
@@ -450,8 +517,20 @@ class Executor:
         gitops.checkout(self.repo, state.integration_branch)
         passed, output = self._run_test_capture(self.execution.test_command, self.repo)
         if not passed:
+            # Fix-task budget (churn guard): a final test that keeps failing
+            # would otherwise open fix tasks forever. 0 = unlimited.
+            cap = self.execution.max_fix_tasks
+            if cap > 0 and state.fix_tasks_opened >= cap:
+                self.store.save(state)
+                self.log(
+                    f"spar exec: final test still failing after {state.fix_tasks_opened} "
+                    f"integration-fix task(s) — fix-task budget ({cap}) exhausted; "
+                    "aborting. Fix manually and resume with 'spar exec --continue'."
+                )
+                return 4
             fix = self._generate_fix_task(state, output)
             state.tasks[fix.id] = TaskState(task=fix, status="pending")
+            state.fix_tasks_opened += 1
             state.phase = "execution"
             self.store.save(state)
             self.log(

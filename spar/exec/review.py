@@ -162,6 +162,15 @@ def _rollback(worktree: Path, oid: str) -> None:
     _git(worktree, "clean", "-fd")
 
 
+def _committed_paths(worktree: Path, base_oid: str, head_oid: str) -> list[str]:
+    """Paths changed by commits the agent made ITSELF during its turn."""
+    out = _git(
+        worktree, "-c", "core.quotePath=false", "diff", "--name-only",
+        f"{base_oid}..{head_oid}",
+    ).stdout
+    return [line for line in out.splitlines() if line]
+
+
 # ---------------------------------------------------------------------------
 # The loop
 # ---------------------------------------------------------------------------
@@ -180,17 +189,28 @@ def run_cross_review(
     store: ExecStateStore,
     exec_state: ExecState,
     log=print,
+    max_rounds: int = 0,
+    rounds_gate=None,
 ) -> None:
     """Drive the asymmetric cross-review loop until the reviewer emits DONE.
 
     Mutates ``task_state`` (ledger + session ids) and ``exec_state``
     (turn_in_progress), persisting through ``store`` after each turn.
+
+    ``max_rounds`` (0 = unlimited) bounds the number of non-terminating
+    reviewer verdicts: an implementer that keeps making REAL edits while the
+    reviewer never DONEs (e.g. an unsatisfiable MUST) would otherwise churn
+    forever — the anti-spin guard below only catches no-change turns. On
+    exhaustion, ``rounds_gate(task_state, rounds_used)`` decides: ``accept``
+    stops reviewing (the task proceeds as-is to its per-Task test), ``extend``
+    grants ``extra_rounds`` more; anything else — or no gate — aborts loudly.
     """
     repo = Path(repo)
     worktree = Path(worktree)
     task = task_state.task
 
     no_change_streak = 0  # consecutive implementer turns that changed no files
+    rounds_used = 0  # non-terminating reviewer verdicts so far
 
     while True:
         # -- reviewer turn ------------------------------------------------
@@ -242,6 +262,33 @@ def run_cross_review(
                 f"[t={task.id}] reviewer emitted DONE with {len(blocking_open)} open "
                 "blocking remark(s); continuing to an implementer turn."
             )
+
+        # -- review-round budget (churn guard) -----------------------------
+        rounds_used += 1
+        if max_rounds > 0 and rounds_used >= max_rounds:
+            if rounds_gate is None:
+                raise ReviewAbort(
+                    f"task {task.id}: review did not converge within "
+                    f"{max_rounds} round(s)"
+                )
+            decision = rounds_gate(task_state, rounds_used)
+            if decision.action == "accept":
+                log(
+                    f"[t={task.id}] review-round budget exhausted; user accepted "
+                    "the task as-is."
+                )
+                return
+            if decision.action == "extend" and decision.extra_rounds > 0:
+                max_rounds += decision.extra_rounds
+                log(
+                    f"[t={task.id}] review extended by {decision.extra_rounds} "
+                    "round(s)."
+                )
+            else:
+                raise ReviewAbort(
+                    f"task {task.id}: unexpected review-rounds gate action "
+                    f"{decision.action!r}"
+                )
 
         # -- implementer turn --------------------------------------------
         made_changes = _implementer_turn(
@@ -347,7 +394,16 @@ def _implementer_turn(
                 status="CONTINUE", resolutions=verdict.resolutions, remarks=verdict.remarks
             )
 
-        changes = _worktree_changes(worktree)
+        # An agent may run ``git commit`` itself inside the worktree: such a
+        # turn leaves the worktree clean but moves HEAD. Its committed paths
+        # must be scope-checked like uncommitted ones (rollback resets to
+        # ``pre_oid``, which undoes agent commits too), and the turn must count
+        # as real progress for the no-change guards below.
+        post_oid = _head_oid(worktree)
+        self_committed = (
+            _committed_paths(worktree, pre_oid, post_oid) if post_oid != pre_oid else []
+        )
+        changes = _worktree_changes(worktree) + self_committed
         violations = _scope_violations(changes, task.files)
         if violations:
             _rollback(worktree, pre_oid)
@@ -398,6 +454,10 @@ def _implementer_turn(
             _git(worktree, "add", "-A")
             _git(worktree, "commit", "-m", f"{task.id}: {short}")
             log(f"[t={task.id}] committed implementer changes.")
+            store.save(exec_state)
+            return True
+        if post_oid != pre_oid:
+            log(f"[t={task.id}] implementer committed its changes itself.")
             store.save(exec_state)
             return True
         log(f"[t={task.id}] implementer made no change this turn.")

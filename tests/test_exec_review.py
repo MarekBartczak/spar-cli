@@ -41,13 +41,16 @@ class Step:
 
     ``edits`` is a mapping of worktree-relative path -> content written before
     the reply is returned (used by the implementer). ``raises`` raises instead.
+    ``commit=True`` additionally commits the edits itself (an agent running its
+    own ``git commit`` inside the worktree).
     """
 
-    def __init__(self, reply, sid="sess", edits=None, raises=None):
+    def __init__(self, reply, sid="sess", edits=None, raises=None, commit=False):
         self.reply = reply
         self.sid = sid
         self.edits = edits or {}
         self.raises = raises
+        self.commit = commit
 
     def __call__(self, prompt, session_id, root):
         if self.raises is not None:
@@ -56,6 +59,9 @@ class Step:
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+        if self.commit:
+            _git(root, "add", "-A")
+            _git(root, "commit", "-qm", "agent self-commit")
         return TurnResult(
             session_id=self.sid, reply_text=self.reply, events_path=Path("ev"), exit_code=0
         )
@@ -126,7 +132,7 @@ def _task(files=("work.py",)):
     )
 
 
-def _run(env, task, impl_steps, review_steps):
+def _run(env, task, impl_steps, review_steps, **extra):
     impl = FakeAdapter("impl", impl_steps, root=env["worktree"])
     review = FakeAdapter("review", review_steps, root=None)
     task_state = TaskState(task=task, status="review", branch=env["branch"])
@@ -148,6 +154,7 @@ def _run(env, task, impl_steps, review_steps):
         store=env["store"],
         exec_state=exec_state,
         log=logs.append,
+        **extra,
     )
     return impl, review, task_state, exec_state, logs
 
@@ -498,6 +505,146 @@ def test_implementer_bare_continue_verdict_with_no_open_remarks_parses(env):
     assert task_state.pending_remarks == []
     assert task_state.resolved_remarks == []
     assert "work.py" in _branch_files(env)
+
+
+# ---------------------------------------------------------------------------
+# Review-round cap: a non-converging review (reviewer keeps raising MUSTs while
+# the implementer makes real edits every turn) must not churn forever — after
+# ``max_rounds`` reviewer CONTINUE verdicts the ``rounds_gate`` decides:
+# accept-as-is (stop reviewing), extend (more rounds), or — without a gate —
+# the loop aborts loudly.
+# ---------------------------------------------------------------------------
+
+
+class FakeRoundsGate:
+    def __init__(self, decisions):
+        self.decisions = list(decisions)
+        self.calls = []
+
+    def __call__(self, task_state, rounds):
+        self.calls.append((task_state.task.id, rounds))
+        return self.decisions.pop(0)
+
+
+def test_review_round_cap_gate_accept_stops_loop(env):
+    from spar.orchestrator import GateDecision
+
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v1\n"}),
+    ]
+    # Reviewer would CONTINUE forever; only 1 round is budgeted.
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] never satisfied"])),
+        Step(vblock("CONTINUE", remarks=["[MUST] still never satisfied"])),
+    ]
+    gate = FakeRoundsGate([GateDecision(action="accept")])
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps, max_rounds=1, rounds_gate=gate
+    )
+    # gate consulted after the 1st non-terminating reviewer verdict; accept
+    # ends the loop with NO implementer turn for that round
+    assert gate.calls == [("t1", 1)]
+    assert len(review.calls) == 1
+    assert len(impl.calls) == 0
+
+
+def test_review_round_cap_gate_extend_allows_more_rounds(env):
+    from spar.orchestrator import GateDecision
+
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v1\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] fix it"])),  # round 1 -> gate
+        Step(vblock("DONE")),  # round 2 (granted by extend)
+    ]
+    gate = FakeRoundsGate([GateDecision(action="extend", extra_rounds=1)])
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps, max_rounds=1, rounds_gate=gate
+    )
+    assert gate.calls == [("t1", 1)]
+    assert len(review.calls) == 2
+    assert len(impl.calls) == 1
+    assert "work.py" in _branch_files(env)
+
+
+def test_review_round_cap_without_gate_aborts(env):
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v1\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] never satisfied"])),
+    ]
+    with pytest.raises(ReviewAbort) as excinfo:
+        _run(env, task, impl_steps, review_steps, max_rounds=1)
+    assert "round" in str(excinfo.value)
+
+
+def test_review_round_cap_zero_means_unlimited(env):
+    # max_rounds=0 (the default) keeps today's behavior: no cap.
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v1\n"}),
+        Step(vblock("CONTINUE", resolved=["#2 accepted"]), edits={"work.py": "v2\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] first"])),
+        Step(vblock("CONTINUE", remarks=["[MUST] second"])),
+        Step(vblock("DONE")),
+    ]
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps, max_rounds=0
+    )
+    assert len(review.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Agent self-commit: an implementer that runs ``git commit`` itself inside the
+# worktree must still (a) count as having made changes (no false anti-spin
+# abort) and (b) have its committed paths scope-checked and rolled back on a
+# violation.
+# ---------------------------------------------------------------------------
+
+
+def test_self_committed_in_scope_change_counts_as_progress(env):
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(
+            vblock("CONTINUE", resolved=["#1 accepted"]),
+            edits={"work.py": "print('hi')\n"},
+            commit=True,  # the agent commits its own work
+        ),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] implement it"])),
+        Step(vblock("DONE")),
+    ]
+    impl, review, task_state, exec_state, logs = _run(env, task, impl_steps, review_steps)
+
+    # exactly ONE implementer call: no accept-without-edit retry, no anti-spin
+    assert len(impl.calls) == 1
+    assert len(review.calls) == 2
+    assert task_state.resolved_remarks[0].resolution == "accepted"
+    assert "work.py" in _branch_files(env)
+
+
+def test_self_committed_out_of_scope_change_rolled_back_and_aborts(env):
+    task = _task(files=("allowed.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE"), edits={"forbidden.py": "nope\n"}, commit=True),
+        Step(vblock("CONTINUE"), edits={"forbidden.py": "again\n"}, commit=True),
+    ]
+    review_steps = [Step(vblock("CONTINUE", remarks=["[MUST] implement it"]))]
+
+    with pytest.raises(ReviewAbort):
+        _run(env, task, impl_steps, review_steps)
+
+    # the self-committed out-of-scope change must NOT survive on the branch
+    assert _branch_files(env) == []
+    assert not (env["worktree"] / "forbidden.py").exists()
 
 
 def test_impl_own_remarks_not_added_to_ledger(env):

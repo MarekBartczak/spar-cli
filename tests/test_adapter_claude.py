@@ -230,3 +230,24 @@ def test_timeout_raises_adapter_error_and_writes_events_file(tmp_path, monkeypat
     # events file exists (possibly empty) even though the call raised
     events_files = list((tmp_path / "events").glob("*.json"))
     assert len(events_files) == 1
+
+
+def test_readonly_adapter_drops_edit_tools(tmp_path, monkeypatch):
+    # A reviewer-side adapter must not be able to write: only Read is allowed
+    # and no permission mode that auto-approves edits is passed.
+    args_file = tmp_path / "args.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_FILE", str(args_file))
+
+    adapter = make_adapter(tmp_path, readonly=True)
+    adapter.run_turn("review this", session_id=None, timeout_sec=5)
+
+    argv = read_argv_lines(args_file)[0]
+    assert argv == [
+        FAKE_CLAUDE,
+        "-p",
+        "--output-format",
+        "json",
+        "--allowedTools",
+        "Read",
+        "review this",
+    ]

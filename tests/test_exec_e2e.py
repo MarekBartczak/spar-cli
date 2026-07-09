@@ -215,7 +215,7 @@ Design prose goes here.
 
     # -- 5. Build the real Executor, wiring make_adapter to real adapters
     # pointed at the fakes (mirrors cli._build_executor). -------------------
-    def make_adapter(side: str, worktree: Path, model: str):
+    def make_adapter(side: str, worktree: Path, model: str, readonly: bool = False):
         side_cfg = config.sides[side]
         adapter_cls = _ADAPTER_CLASSES[side_cfg.adapter]
         return adapter_cls(

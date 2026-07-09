@@ -106,3 +106,29 @@ def test_all_merged():
     assert not st.all_merged()
     st.tasks["t1"].status = "merged"
     assert st.all_merged()
+
+
+def test_fix_tasks_opened_roundtrip(tmp_path):
+    st = ExecState(
+        target_branch="master",
+        target_base_oid="abc",
+        tasks={"t1": TaskState(_t("t1"))},
+        fix_tasks_opened=2,
+    )
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    assert store.load().fix_tasks_opened == 2
+
+
+def test_fix_tasks_opened_missing_key_defaults_to_zero(tmp_path):
+    # A pre-upgrade exec.json without the key must still load (default 0).
+    import json
+
+    st = ExecState(target_branch="master", target_base_oid="abc",
+                   tasks={"t1": TaskState(_t("t1"))})
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    data = json.loads(store.exec_path.read_text())
+    data.pop("fix_tasks_opened", None)
+    store.exec_path.write_text(json.dumps(data))
+    assert store.load().fix_tasks_opened == 0

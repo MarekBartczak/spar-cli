@@ -293,3 +293,16 @@ def test_timeout_raises_adapter_error_and_writes_events_file(tmp_path, monkeypat
 
     events_files = list((tmp_path / "events").glob("*.jsonl"))
     assert len(events_files) == 1
+
+
+def test_readonly_adapter_uses_readonly_sandbox(tmp_path, monkeypatch):
+    # A reviewer-side adapter must not be able to write to the repo.
+    args_file = tmp_path / "args.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_ARGS_FILE", str(args_file))
+
+    adapter = make_adapter(tmp_path, readonly=True)
+    adapter.run_turn("review this", session_id=None, timeout_sec=5)
+
+    argv = read_argv_lines(args_file)[0]
+    idx = argv.index("--sandbox")
+    assert argv[idx + 1] == "read-only"
