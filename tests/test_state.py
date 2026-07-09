@@ -113,6 +113,36 @@ class TestRoundTrip:
 
         assert loaded == state
 
+    def test_pending_gate_round_trip(self, tmp_path):
+        spar_dir = tmp_path / "spar"
+        spar_dir.mkdir()
+        state = _full_state()
+        state.pending_gate = {"name": "review-gate", "options": ["accept", "abort"], "context": {}}
+
+        store = StateStore(spar_dir)
+        store.save(state)
+        loaded = store.load()
+
+        assert loaded.pending_gate == {
+            "name": "review-gate",
+            "options": ["accept", "abort"],
+            "context": {},
+        }
+
+    def test_pending_gate_missing_key_defaults_to_none(self, tmp_path):
+        # A pre-upgrade session.json without the key must still load (default None).
+        spar_dir = tmp_path / "spar"
+        spar_dir.mkdir()
+        state = DebateState()
+
+        store = StateStore(spar_dir)
+        store.save(state)
+        data = json.loads(store.session_path.read_text())
+        data.pop("pending_gate", None)
+        store.session_path.write_text(json.dumps(data))
+
+        assert store.load().pending_gate is None
+
     def test_exists(self, tmp_path):
         spar_dir = tmp_path / "spar"
         spar_dir.mkdir()

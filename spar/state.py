@@ -89,6 +89,7 @@ class DebateState:
     pending_remarks: list[StateRemark] = field(default_factory=list)
     resolved_remarks: list[ResolvedRemark] = field(default_factory=list)
     next_remark_id: int = 1
+    pending_gate: dict | None = None
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +206,7 @@ def _state_to_dict(state: DebateState) -> dict:
         "pending_remarks": [_remark_to_dict(r) for r in state.pending_remarks],
         "resolved_remarks": [_resolved_to_dict(r) for r in state.resolved_remarks],
         "next_remark_id": state.next_remark_id,
+        "pending_gate": state.pending_gate,
     }
 
 
@@ -232,6 +234,9 @@ def _state_from_dict(data: Any) -> DebateState:
         pending_remarks=[_remark_from_dict(r) for r in pending_raw],
         resolved_remarks=[_resolved_from_dict(r) for r in resolved_raw],
         next_remark_id=data["next_remark_id"],
+        # Tolerant default (not in _STATE_KEYS): a pre-upgrade session.json
+        # without the key must still load.
+        pending_gate=data.get("pending_gate"),
     )
 
 

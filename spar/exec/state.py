@@ -68,6 +68,7 @@ class ExecState:
     tasks: dict[str, TaskState] = field(default_factory=dict)
     turn_in_progress: dict | None = None  # {"task_id","role","hash_before"}
     fix_tasks_opened: int = 0  # integration-fix tasks opened so far (§7 cap)
+    pending_gate: dict | None = None
 
     def mark_ready(self) -> None:
         """Promote every ``pending`` task whose deps are all ``merged`` to ``ready``."""
@@ -193,6 +194,7 @@ def _exec_state_to_dict(state: ExecState) -> dict:
         "tasks": {task_id: _task_state_to_dict(ts) for task_id, ts in state.tasks.items()},
         "turn_in_progress": state.turn_in_progress,
         "fix_tasks_opened": state.fix_tasks_opened,
+        "pending_gate": state.pending_gate,
     }
 
 
@@ -213,6 +215,9 @@ def _exec_state_from_dict(data: Any) -> ExecState:
         # Tolerant default (not in _EXEC_STATE_KEYS): a pre-upgrade exec.json
         # without the key must still load.
         fix_tasks_opened=data.get("fix_tasks_opened", 0),
+        # Tolerant default (not in _EXEC_STATE_KEYS): a pre-upgrade exec.json
+        # without the key must still load.
+        pending_gate=data.get("pending_gate"),
     )
 
 

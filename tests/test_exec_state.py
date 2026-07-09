@@ -132,3 +132,34 @@ def test_fix_tasks_opened_missing_key_defaults_to_zero(tmp_path):
     data.pop("fix_tasks_opened", None)
     store.exec_path.write_text(json.dumps(data))
     assert store.load().fix_tasks_opened == 0
+
+
+def test_pending_gate_roundtrip(tmp_path):
+    st = ExecState(
+        target_branch="master",
+        target_base_oid="abc",
+        tasks={"t1": TaskState(_t("t1"))},
+        pending_gate={"name": "review-gate", "options": ["accept", "abort"], "context": {}},
+    )
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    got = store.load()
+    assert got.pending_gate == {
+        "name": "review-gate",
+        "options": ["accept", "abort"],
+        "context": {},
+    }
+
+
+def test_pending_gate_missing_key_defaults_to_none(tmp_path):
+    # A pre-upgrade exec.json without the key must still load (default None).
+    import json
+
+    st = ExecState(target_branch="master", target_base_oid="abc",
+                   tasks={"t1": TaskState(_t("t1"))})
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    data = json.loads(store.exec_path.read_text())
+    data.pop("pending_gate", None)
+    store.exec_path.write_text(json.dumps(data))
+    assert store.load().pending_gate is None
