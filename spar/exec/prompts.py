@@ -194,6 +194,8 @@ remarks:
 Protocol for review:
 - Do not edit the code — this is read-only. You are reviewing only, not implementing.
 - In `remarks:` raise new concerns, tagged `[MUST]` (blocking) or `[NICE]` (optional).
+- If you have NO concerns to raise, OMIT the `remarks:` section entirely — do
+  NOT add a remark whose text merely says you have no concerns.
 - Treat a reference to a MISSING file as a defect only if it matches none of
   the diff, the context lists above (if any), and a file already present in the repository.
   This does NOT override the hard-reference rule of the foreign-files section

@@ -147,3 +147,8 @@ def test_impl_prompt_with_remarks_resolves_ids_and_still_forces_edit():
     assert "accepted" in low and "rejected" in low
     assert "do not include a `remarks:` section" in low or "you do not raise remarks" in low
     assert "do not emit done" in low
+
+
+def test_review_protocol_forbids_no_concerns_remark():
+    p = build_review_prompt(T, "diff --git a/x ...", [])
+    assert "OMIT the `remarks:` section entirely" in p

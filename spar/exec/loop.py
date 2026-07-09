@@ -461,9 +461,13 @@ class Executor:
                 # mistaking either for a missing-file defect. Sequential
                 # execution: statuses cannot change while this task runs, so
                 # compute once.
+                def _task_order(ts_: TaskState):
+                    m = re.match(r"t(\d+)$", ts_.task.id)
+                    return (0, int(m.group(1)), "") if m else (1, 0, ts_.task.id)
+
                 foreign_files = tuple(
                     (other.task.id, other.task.files)
-                    for other in sorted(state.tasks.values(), key=lambda t: t.task.id)
+                    for other in sorted(state.tasks.values(), key=_task_order)
                     if other.task.id != task.id and other.status != "merged"
                 )
                 # present_files, not changed_files: a file DELETED by an

@@ -1156,3 +1156,34 @@ def test_keyboard_interrupt_exits_130_with_resume_hint(repo, tmp_path):
     assert store.exists()
     with store.locked():
         pass
+
+
+def test_foreign_files_sorted_numerically_by_task_id(repo, tmp_path):
+    # Reviewing t1 while t2 and t10 are pending: the foreign list must order
+    # t2 before t10 (numeric), not lexicographically (t10 < t2).
+    tasks = [
+        make_task("t1", "A", ["w1.py"]),
+        make_task("t2", "B", ["w2.py"], deps=["t1"], model="mb", review="ma"),
+        make_task("t10", "B", ["w10.py"], deps=["t1", "t2"], model="mb", review="ma"),
+    ]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"w1.py": "x\n"}),  # impl t1
+            Step(vblock("DONE")),  # review t2
+            Step(vblock("DONE")),  # review t10
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review t1
+            Step(vblock("CONTINUE"), edits={"w2.py": "x\n"}),  # impl t2
+            Step(vblock("CONTINUE"), edits={"w10.py": "x\n"}),  # impl t10
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    prompt = adapters["B"].calls[0]["prompt"]  # review of t1
+    assert prompt.index("t2: w2.py") < prompt.index("t10: w10.py")
