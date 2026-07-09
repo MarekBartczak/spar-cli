@@ -168,6 +168,9 @@ def test_review_prompt_omits_context_sections_when_empty():
     p = build_review_prompt(T, "diff --git a/x ...", [])
     assert "not-yet-merged tasks" not in p
     assert "already merged from earlier tasks" not in p
+    # ...but the missing-file protocol rule is PERMANENT: a standalone first
+    # task must not draw MUSTs about files that pre-date the run
+    assert "already present in the repository" in p
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -216,12 +219,37 @@ and before `protocol = _REVIEW_PROTOCOL_BLOCK` add:
         for path in merged_files:
             context_lines.append(f"  {path}")
     if context_lines:
-        context_lines.append(
-            "Raise a [MUST] about a referenced file ONLY if it matches none "
-            "of: the diff, the lists above, or a file already present in the "
-            "repository."
-        )
         context_section = "\n" + "\n".join(context_lines) + "\n"
+```
+
+and extend `_REVIEW_PROTOCOL_BLOCK` with a PERMANENT missing-file rule (always
+present, independent of the conditional context sections — a standalone first
+task must also not draw MUSTs about files that pre-date the run; the
+hard-reference plan-ordering defect from the foreign section is explicitly
+exempt so the two rules cannot suppress each other):
+
+```python
+_REVIEW_PROTOCOL_BLOCK = """\
+End your reply with EXACTLY ONE verdict block, using this syntax verbatim:
+
+<verdict>
+status: CONTINUE
+remarks:
+- [MUST] <a blocking concern that must be fixed>
+- [NICE] <an optional, non-blocking suggestion>
+</verdict>
+
+Protocol for review:
+- Do not edit the code — this is read-only. You are reviewing only, not implementing.
+- In `remarks:` raise new concerns, tagged `[MUST]` (blocking) or `[NICE]` (optional).
+- Treat a reference to a MISSING file as a defect only if it matches none of:
+  the diff, the context lists above (if any), or a file already present in the
+  repository. This does NOT override the hard-reference rule of the
+  foreign-files section (a plan-ordering defect stays a [MUST] even though the
+  file matches the foreign list).
+- Use `status: DONE` only if you have NO blocking `[MUST]` remarks remaining.
+- Use `status: CONTINUE` if you have open `[MUST]`/`[NICE]` remarks to raise.
+"""
 ```
 
 and include `{context_section}` in the returned f-string between the diff and `{remarks_section}`:
@@ -326,7 +354,7 @@ def test_present_files_excludes_deletions(tmp_path):
 - [ ] **Step 8b: Run it, then implement `present_files`**
 
 Run: `python3 -m pytest tests/test_exec_gitops.py::test_present_files_excludes_deletions -v`
-Expected: FAIL with `AttributeError: ... no attribute 'present_files'`.
+Expected: collection ERROR — `ImportError: cannot import name 'present_files'` (the test file imports it directly at module level).
 
 Add to `spar/exec/gitops.py` (below `changed_files`):
 
@@ -525,5 +553,12 @@ Update `docs/HANDOFF.md` (blocker A status) and the auto-memory `exec-review-ope
   semantics explicitly and requires a narrower `test=` whenever the global
   command cannot pass on the task's branch; the satisfiability rule now
   covers "whatever command gates the merge". Contract test extended.
-  Fix is from the final round — UNVERIFIED by the reviewer (offered +1
-  verification round at the user gate).
+- **Round 5** (codex gpt-5.5, verification round): Verdict CONTINUE.
+  Confirmed #5 addressed. #6 [MUST] **accepted** — the generic missing-file
+  rule could suppress the #3 hard-reference rule (the file matches the
+  foreign list); the rule now explicitly exempts the plan-ordering defect.
+  #7 [MUST] **accepted** — the missing-file rule lived inside
+  `if context_lines`, vanishing for a standalone/first task; moved into
+  `_REVIEW_PROTOCOL_BLOCK` (permanent), context sections stay conditional;
+  empty-case prompt test extended. #8 [NICE] **accepted** — red-step
+  expectation corrected to a collection-time ImportError (direct imports).
