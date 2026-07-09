@@ -381,6 +381,21 @@ class TestSetGlobalCommand:
         result = set_global_command("codex", "codex-priv", global_path=gp)
         assert result == gp
 
+    def test_set_global_command_preserves_impl_models_and_execution(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nadapter="claude"\ncommand="claude"\n'
+            'models=["opus","sonnet"]\ndefault_model="sonnet"\n'
+            'impl_models=["sonnet"]\n'
+            '\n[execution]\ntest_command="pytest -q"\nmax_review_rounds=3\n'
+        )
+        set_global_command("claude", "claude-v2", global_path=gp)
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].command == "claude-v2"
+        assert cfg.sides["claude"].impl_models == ("sonnet",)
+        assert cfg.execution.test_command == "pytest -q"
+        assert cfg.execution.max_review_rounds == 3
+
 
 class TestValidationAdapterValues:
     """Test validation of adapter values."""
@@ -719,6 +734,33 @@ class TestSideModelsAndDefault:
 
         with pytest.raises(ConfigError):
             load_config(project_dir, global_path=global_config)
+
+    def test_impl_models_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nmodels=["opus","sonnet","haiku"]\n'
+            'default_model="sonnet"\nimpl_models=["opus","sonnet"]\n'
+        )
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].impl_models == ("opus", "sonnet")
+
+    def test_impl_models_default_empty(self, tmp_path):
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.sides["claude"].impl_models == ()
+
+    def test_impl_models_must_be_subset_of_models(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nmodels=["sonnet"]\nimpl_models=["opus"]\n'
+        )
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_impl_models_must_be_string_list(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nimpl_models="opus"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
 
 
 class TestExecutionConfig:

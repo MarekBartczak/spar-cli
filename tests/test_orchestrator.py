@@ -247,6 +247,22 @@ def test_tasks_contract_includes_planning_invariants():
     assert "you MUST give a narrower test=" in text
 
 
+def test_tasks_contract_shows_impl_model_restriction():
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract(
+        {"claude": ("opus", "sonnet", "haiku"), "codex": ("gpt-5.5",)},
+        impl_catalogs={"claude": ("opus", "sonnet"), "codex": ()},
+    )
+    # restricted side: implementation subset called out
+    assert "claude: opus, sonnet, haiku (implementation: ONLY opus, sonnet)" in text
+    # unrestricted side: plain catalog line, no restriction note
+    assert "- codex: gpt-5.5" in text
+    assert "codex: gpt-5.5 (implementation" not in text
+    # the rule is stated
+    assert "review= may use any model of the reviewing side" in text
+
+
 def test_build_turn_prompt_default_omits_tasks_contract():
     prompt = build_turn_prompt(
         side_name="claude",

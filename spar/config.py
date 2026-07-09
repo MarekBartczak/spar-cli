@@ -22,6 +22,9 @@ class SideConfig:
     model: str = ""
     models: tuple[str, ...] = ()
     default_model: str = ""
+    # Models allowed for IMPLEMENTATION (`model=`) assignments in a task list.
+    # Empty = no restriction (any of `models`). `review=` is never restricted.
+    impl_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,7 +145,7 @@ def _validate_execution_config(config: dict) -> None:
 
 def _validate_side_config(side_name: str, config: dict) -> None:
     """Validate a side configuration."""
-    allowed_keys = {"adapter", "command", "model", "models", "default_model"}
+    allowed_keys = {"adapter", "command", "model", "models", "default_model", "impl_models"}
     for key in config.keys():
         if key not in allowed_keys:
             raise ConfigError(f"Unknown key in side '{side_name}': {key}")
@@ -172,6 +175,18 @@ def _validate_side_config(side_name: str, config: dict) -> None:
             models = config["models"]
             if default_model not in models:
                 raise ConfigError(f"Side '{side_name}': default_model '{default_model}' must be in models")
+
+    if "impl_models" in config:
+        impl_models = config["impl_models"]
+        if not isinstance(impl_models, list):
+            raise ConfigError(
+                f"Side '{side_name}': impl_models must be a list, got {type(impl_models).__name__}"
+            )
+        for m in impl_models:
+            if not isinstance(m, str) or not m.strip():
+                raise ConfigError(
+                    f"Side '{side_name}': impl_models must be a list of non-empty strings"
+                )
 
 
 def _merge_dicts(base: dict, override: dict) -> dict:
@@ -230,6 +245,7 @@ def _dict_to_config(config_dict: dict) -> Config:
             model = side_config.get("model", base_side.model)
             models = tuple(side_config.get("models", base_side.models)) if "models" in side_config else base_side.models
             default_model = side_config.get("default_model", base_side.default_model)
+            impl_models = tuple(side_config.get("impl_models", base_side.impl_models)) if "impl_models" in side_config else base_side.impl_models
         else:
             # New side - must have adapter and command
             if "adapter" not in side_config:
@@ -241,13 +257,15 @@ def _dict_to_config(config_dict: dict) -> Config:
             model = side_config.get("model", "")
             models = tuple(side_config.get("models", ())) if "models" in side_config else ()
             default_model = side_config.get("default_model", "")
+            impl_models = tuple(side_config.get("impl_models", ())) if "impl_models" in side_config else ()
 
         # Final validation of command
         if not command or (isinstance(command, str) and not command.strip()):
             raise ConfigError(f"Side '{side_name}': command cannot be empty")
 
         merged_side = SideConfig(
-            adapter=adapter, command=command, model=model, models=models, default_model=default_model
+            adapter=adapter, command=command, model=model, models=models,
+            default_model=default_model, impl_models=impl_models,
         )
 
         # Authoritative check on the FINAL MERGED config: if default_model is
@@ -260,6 +278,13 @@ def _dict_to_config(config_dict: dict) -> Config:
                 raise ConfigError(
                     f"Side '{side_name}': default_model '{merged_side.default_model}' "
                     "must be a member of models"
+                )
+
+        if merged_side.impl_models:
+            missing = [m for m in merged_side.impl_models if m not in merged_side.models]
+            if missing:
+                raise ConfigError(
+                    f"Side '{side_name}': impl_models {missing} must be members of models"
                 )
 
         sides[side_name] = merged_side
@@ -334,7 +359,7 @@ def load_config(project_dir: Path, global_path: Optional[Path] = None) -> Config
     defaults = _get_default_config()
     defaults_dict = {
         "sides": {
-            name: {"adapter": side.adapter, "command": side.command, "model": side.model, "models": list(side.models), "default_model": side.default_model}
+            name: {"adapter": side.adapter, "command": side.command, "model": side.model, "models": list(side.models), "default_model": side.default_model, "impl_models": list(side.impl_models)}
             for name, side in defaults.sides.items()
         },
         "debate": {
@@ -384,6 +409,10 @@ def _dump_config_toml(raw: dict) -> str:
         if models:
             models_str = "[" + ", ".join(f'"{_escape_toml_str(m)}"' for m in models) + "]"
             lines.append(f"models = {models_str}")
+        impl_models = cfg.get("impl_models")
+        if impl_models:
+            impl_str = "[" + ", ".join(f'"{_escape_toml_str(m)}"' for m in impl_models) + "]"
+            lines.append(f"impl_models = {impl_str}")
         lines.append("")
 
     debate = raw.get("debate", {})

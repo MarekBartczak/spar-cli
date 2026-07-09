@@ -173,6 +173,13 @@ def _validate_task(rt: dict, *, sides: dict, order: list, id_set: set[str]) -> N
     if rt["model"] not in sides[side].models:
         raise TaskListError(f"model {rt['model']!r} not in catalog for side {side!r}, line: {line!r}")
 
+    impl_allowed = getattr(sides[side], "impl_models", ()) or ()
+    if impl_allowed and rt["model"] not in impl_allowed:
+        raise TaskListError(
+            f"model {rt['model']!r} not allowed for implementation on side {side!r} "
+            f"(impl_models={list(impl_allowed)}), line: {line!r}"
+        )
+
     if side not in order:
         raise TaskListError(f"side {side!r} not present in order {order!r}, line: {line!r}")
 

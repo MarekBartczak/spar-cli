@@ -66,3 +66,45 @@ def test_concurrent_file_overlap_is_warning_not_error(caplog):
          "- [t2] b | side=codex | model=gpt-5.5 | review=opus | deps=- | files=shared.py\n")
     tasks = parse_task_list(p, sides=SIDES, order=ORDER)  # no raise
     assert len(tasks) == 2
+
+
+def test_model_outside_impl_models_rejected():
+    from spar.config import SideConfig
+
+    sides = {
+        "claude": SideConfig(
+            adapter="claude", command="claude",
+            models=("opus", "sonnet", "haiku"), default_model="sonnet",
+            impl_models=("opus", "sonnet"),
+        ),
+        "codex": SideConfig(
+            adapter="codex", command="codex",
+            models=("gpt-5.5",), default_model="gpt-5.5",
+        ),
+    }
+    plan = """## Tasks
+- [t1] do it | side=claude | model=haiku | review=gpt-5.5 | deps=- | files=a.py
+"""
+    with pytest.raises(TaskListError) as excinfo:
+        parse_task_list(plan, sides=sides, order=["claude", "codex"])
+    assert "impl_models" in str(excinfo.value)
+
+
+def test_empty_impl_models_allows_any_catalog_model():
+    from spar.config import SideConfig
+
+    sides = {
+        "claude": SideConfig(
+            adapter="claude", command="claude",
+            models=("haiku",), default_model="haiku",
+        ),
+        "codex": SideConfig(
+            adapter="codex", command="codex",
+            models=("gpt-5.5",), default_model="gpt-5.5",
+        ),
+    }
+    plan = """## Tasks
+- [t1] do it | side=claude | model=haiku | review=gpt-5.5 | deps=- | files=a.py
+"""
+    tasks = parse_task_list(plan, sides=sides, order=["claude", "codex"])
+    assert tasks[0].model == "haiku"
