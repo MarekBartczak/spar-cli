@@ -46,7 +46,26 @@ Cleanup tranche 2 (2026-07-09, `889b565..ea4eaef`) closed the rest:
 with codex's shell; reviewer stays read-only), hedged foreign-section
 reference, no-invented-remark-ids rule in the implementer protocol.
 
-**Backlog: empty.** Next work comes from the roadmap below.
+**Second live test (2026-07-09, brownfield) PASSED**: extended the existing
+factorial app with `--table N` on top of the previous run's code (2 tasks,
+plan → exec → merge `621c6d8`, black-box 24/24, old behavior byte-preserved).
+Validated in battle: `impl_models` floor (no haiku in the plan), claude
+implementer compiling its own work via Bash, scope guard catching the stray
+build binary (`factorial`) from those compiles — rollback + retry, no churn.
+Also fixed live: restore-helper noise when no state exists yet (`007863f`).
+
+Small backlog from run 2:
+- A finished run leaves `spar/integration` behind; the leftover guard then
+  refuses the NEXT fresh run even though the branch is fully merged. Delete
+  it at phase=done, or teach the guard to auto-clean a fully-merged
+  integration branch.
+- Build artifacts produced by implementer compile-checks trip the scope
+  guard (costs one rollback+retry per task). Cheapest mitigation: gitignore
+  the artifact in the project repo (e.g. `factorial` in spar_tests) — the
+  scope guard already respects .gitignore. Engine change not obviously
+  needed.
+
+Next feature work comes from the roadmap below.
 
 ## Roadmap (unchanged)
 
