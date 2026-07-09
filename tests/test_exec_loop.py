@@ -1343,3 +1343,19 @@ def test_turn_timeout_from_execution_config(repo, tmp_path):
     assert rc == 0
     # every adapter turn ran with the configured timeout
     assert all(c["timeout"] == 123 for a in adapters.values() for c in a.calls)
+
+
+def test_restore_helper_silent_when_no_state_file(repo, tmp_path):
+    # A fresh run refused before any state exists (e.g. dirty target) must not
+    # log a scary "could not restore" line — missing exec.json is the normal
+    # case on every pre-state exit path.
+    (repo / "dirty.txt").write_text("x\n", encoding="utf-8")  # untracked -> not clean
+    tasks = [make_task("t1", "A", ["work.py"])]
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 3  # refused: target not clean
+    assert not any("could not restore" in ln for ln in logs)

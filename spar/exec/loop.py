@@ -248,6 +248,11 @@ class Executor:
         """
         try:
             state = self.store.load()
+        except StateError:
+            # No/unreadable state is the NORMAL case on every pre-state exit
+            # path (e.g. a refused fresh run): nothing to restore, stay silent.
+            return
+        try:
             if (
                 gitops.current_branch(self.repo) == state.integration_branch
                 and not gitops.merge_in_progress(self.repo)
