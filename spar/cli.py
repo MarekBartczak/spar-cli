@@ -1,18 +1,23 @@
 """Command-line interface for spar-cli."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from spar.adapters.claude import ClaudeAdapter
 from spar.adapters.codex import CodexAdapter
 from spar.config import ConfigError, DebateConfig, load_config, set_global_command
+from spar.exec.headless import HeadlessExecGate
 from spar.exec.loop import ConsoleExecGate, Executor
 from spar.exec.state import ExecStateStore
 from spar.exec.tasklist import TaskListError, parse_task_list
+from spar.gates import GateChoice, GateParseError, parse_gate_value
 from spar.guard import Guard
+from spar.headless import HeadlessGate
 from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
+from spar.status import build_status
 
 _ADAPTERS = {"claude": ClaudeAdapter, "codex": CodexAdapter}
 
@@ -49,6 +54,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tasks", dest="tasks", action="store_true",
         help="Require the agreed plan to end with a machine-parsable '## Tasks' "
              "section (opt-in bridge to 'spar exec'); off by default",
+    )
+    parser.add_argument(
+        "--task-file", dest="task_file", metavar="PATH",
+        help="Read the task prompt from PATH instead of the positional "
+             "argument (mutually exclusive with it)",
+    )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run without an interactive console gate: exit 10 with a "
+             "pending gate recorded in state instead of blocking on stdin",
+    )
+    parser.add_argument(
+        "--gate", default=None, metavar="VALUE",
+        help="Resolve a pending gate headlessly: accept, abort, extend:<n> "
+             "or remarks:<file>. Requires --continue and --headless.",
     )
     parser.add_argument(
         "-m", "--adapter", choices=sorted(_ADAPTERS),
@@ -102,13 +122,14 @@ def _build_orchestrator(args, config) -> Orchestrator:
     store = StateStore(Path(".spar"))
     artifact_path = Path(args.artifact)
     guard = Guard(repo_dir=cwd, artifact_path=artifact_path, spar_dir=Path(".spar"))
+    gate = HeadlessGate() if getattr(args, "headless", False) else ConsoleGate()
     return Orchestrator(
         sides=adapters,
         order=order,
         store=store,
         artifact_path=artifact_path,
         debate=debate,
-        gate=ConsoleGate(),
+        gate=gate,
         guard=guard,
         side_configs=config.sides,
         require_tasks=args.tasks,
@@ -142,6 +163,16 @@ def _build_exec_parser() -> argparse.ArgumentParser:
         "--first", default="claude",
         help="Which side goes first (default: claude)",
     )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run without an interactive console gate: exit 10 with a "
+             "pending gate recorded in state instead of blocking on stdin",
+    )
+    parser.add_argument(
+        "--gate", default=None, metavar="VALUE",
+        help="Resolve a pending gate headlessly: accept, abort, extend:<n> "
+             "or remarks:<file>. Requires --continue and --headless.",
+    )
     return parser
 
 
@@ -167,6 +198,7 @@ def _build_executor(
             readonly=readonly,
         )
 
+    gate = HeadlessExecGate() if getattr(args, "headless", False) else ConsoleExecGate()
     return Executor(
         repo=Path.cwd(),
         spar_dir=Path(".spar"),
@@ -176,7 +208,7 @@ def _build_executor(
         plan_path=plan_path,
         tasks=tasks,
         execution=config.execution,
-        gate=ConsoleExecGate(),
+        gate=gate,
         store=ExecStateStore(Path(".spar")),
         auto_integration_merge=args.auto_integration_merge,
     )
@@ -186,6 +218,17 @@ def _run_exec(argv) -> int:
     """Handler for the ``spar exec`` subcommand."""
     parser = _build_exec_parser()
     args = parser.parse_args(argv)
+
+    if args.gate is not None and not (args.cont and args.headless):
+        parser.error("--gate requires --continue and --headless")
+
+    gate_choice: GateChoice | None = None
+    if args.gate is not None:
+        try:
+            gate_choice = parse_gate_value(args.gate)
+        except GateParseError as exc:
+            sys.stderr.write(f"spar: {exc}\n")
+            return 2
 
     try:
         config = load_config(Path.cwd())
@@ -220,8 +263,28 @@ def _run_exec(argv) -> int:
         parser.error(str(exc))
 
     if args.cont:
-        return executor.run_continue()
+        return executor.run_continue(gate_choice=gate_choice)
     return executor.run()
+
+
+def _run_status(argv) -> int:
+    """Handler for the ``spar status`` subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="spar status",
+        description="Report the current debate/execution state as JSON",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Emit status as JSON (required in v1; plain output may come later)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.json:
+        parser.error("--json is required (plain-text status output not yet supported)")
+
+    status = build_status(Path(".spar"))
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _run_list_commands() -> int:
@@ -249,6 +312,8 @@ def main(argv=None) -> int:
     # handler/parser over the remaining tokens, entirely separate from the
     # debate command below (which stays unchanged so `spar "<prompt>"`,
     # `--continue`, `-m/-setCommand`, `--list-commands` keep working).
+    if argv and argv[0] == "status":
+        return _run_status(argv[1:])
     if argv and argv[0] == "exec":
         return _run_exec(argv[1:])
 
@@ -275,12 +340,33 @@ def main(argv=None) -> int:
 
     if args.prompt is not None and args.cont:
         parser.error("prompt and --continue are mutually exclusive")
-    if args.prompt is None and not args.cont:
+    if args.task_file is not None and args.prompt is not None:
+        parser.error("--task-file and prompt are mutually exclusive")
+    if args.task_file is not None and args.cont:
+        parser.error("--task-file and --continue are mutually exclusive")
+    if args.prompt is None and args.task_file is None and not args.cont:
         parser.error("either prompt or --continue is required")
+    if args.gate is not None and not (args.cont and args.headless):
+        parser.error("--gate requires --continue and --headless")
+
+    task_prompt = args.prompt
+    if args.task_file is not None:
+        try:
+            task_prompt = Path(args.task_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            parser.error(f"cannot read --task-file {args.task_file!r}: {exc}")
 
     sides = [s.strip() for s in args.sides.split(",")]
     if args.first not in sides:
         parser.error(f"--first must be one of: {', '.join(sides)}")
+
+    gate_choice: GateChoice | None = None
+    if args.gate is not None:
+        try:
+            gate_choice = parse_gate_value(args.gate)
+        except GateParseError as exc:
+            sys.stderr.write(f"spar: {exc}\n")
+            return 2
 
     try:
         config = load_config(Path.cwd())
@@ -294,8 +380,8 @@ def main(argv=None) -> int:
         parser.error(str(exc))
 
     if args.cont:
-        return orchestrator.run_continue()
-    return orchestrator.run_new(args.prompt)
+        return orchestrator.run_continue(gate_choice=gate_choice)
+    return orchestrator.run_new(task_prompt)
 
 
 if __name__ == "__main__":
