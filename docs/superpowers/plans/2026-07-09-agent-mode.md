@@ -4,7 +4,7 @@
 
 **Goal:** A host agent (Claude Code / Codex) can drive a full spar run non-interactively: every user gate becomes persist-state + exit 10, the decision returns via `--gate` on resume, state is readable via `spar status --json`, and requirements can arrive as a file.
 
-**Architecture (per ADR 0003 + grill session):** Exit-and-resume gates. A new `GatePending` control exception is raised by headless gate implementations (`HeadlessGate` for the debate, `HeadlessExecGate` for execution); the top-level runners catch it, persist a `pending_gate` record into the state file, and return exit code **10**. Resume commands (`spar --continue --headless --gate X`, `spar exec --continue --headless --gate X`) validate the decision against the persisted `pending_gate`, preload it into the headless gate (consumed exactly once), clear `pending_gate`, and re-drive the loop — which deterministically re-reaches the same gate and consumes the decision. Recovery gate in headless defaults to `repeat` (no pending). `spar status --json` derives everything from the state files. Interactive stdin gates are untouched (headless is opt-in via `--headless`).
+**Architecture (per ADR 0003 + grill session):** Exit-and-resume gates. A new `GatePending` control exception is raised by headless gate implementations (`HeadlessGate` for the debate, `HeadlessExecGate` for execution); the top-level runners catch it, persist a `pending_gate` record into the state file, and return exit code **10**. Resume commands (`spar --continue --headless --gate X`, `spar exec --continue --headless --gate X`) VALIDATE the decision against the persisted `pending_gate` FIRST (pure check, before any reconcile side effects; mismatch → exit 2, state untouched), preload it, and re-drive the loop — which deterministically re-reaches the same gate and consumes the decision. **`pending_gate` is cleared only AT CONSUMPTION, never at preload** (crash between resume start and consumption leaves the gate pending; the same `--gate` can simply be re-issued): whoever consumes the decision (the gate object via an `on_consume` callback, or the executor's review-resume path) clears the field and saves in the same step. Recovery gate in headless defaults to `repeat` (no pending). `spar status --json` derives everything from the state files. Interactive stdin gates are untouched (headless is opt-in via `--headless`).
 
 **Gate → decision matrix (grill session decisions):**
 
@@ -19,7 +19,10 @@
 **Resume re-reach semantics (the subtle part):**
 - *consensus / rounds_exhausted*: the debate loop re-derives the condition from persisted state (`is_consensus`, `round >= budget`) — the gate is re-hit naturally, no special reconcile.
 - *final_merge*: on resume all tasks are `merged`, the final Test re-runs (idempotent cost accepted in v1), then `_final_merge` hits the gate.
-- *review_rounds*: the task sits in status `review` with a live branch/worktree. `_reconcile` must NOT restart such a task: when `state.pending_gate` names gate `review_rounds` and `task_id == ts.task.id`, the task keeps its branch and status. `_run_task` gains a resume path that SKIPS the initial implementer turn (the branch already has content) and re-enters `run_cross_review`; `extend:<n>` re-enters with a FRESH budget of `n` rounds (same semantics as interactive extend: n more rounds from now), `accept` skips the review entirely and proceeds to the per-task test, `abort` exits 5.
+- *review_rounds*: the task sits in status `review` with a live branch/worktree. `_reconcile` must NOT restart such a task: when `state.pending_gate` names gate `review_rounds` and `context.task_id == ts.task.id`, the task keeps its branch and status (this works because `pending_gate` survives until consumption — see Architecture). The executor OWNS this gate's resume decision (`self._resume_decision`); a dedicated `_resume_review_task` path consumes it:
+  - `accept` — clear `pending_gate` + save, SKIP the review, proceed to the per-task test → merge (the interactive gate fires INSIDE `run_cross_review` and returning `accept` there ends the review the same way).
+  - `extend:<n>` — clear `pending_gate` + save, re-enter `run_cross_review` with a FRESH budget of `n` rounds AND `start_with="implementer"`: the interactive gate fires AFTER a reviewer verdict and BEFORE the implementer turn, so the resume must hand the open remarks to the IMPLEMENTER first — re-entering at the reviewer would re-review an unchanged diff and burn a round. `run_cross_review` gains `start_with: str = "reviewer"`; `"implementer"` skips the reviewer-turn block once (first loop iteration only), then the loop proceeds normally.
+  - `abort` — clear `pending_gate` + save, exit 5 (log like the interactive abort).
 
 **Tech Stack:** Python 3.11+, pytest. No new dependencies.
 
@@ -148,29 +151,34 @@
 
 **Files:**
 - Create: `spar/exec/headless.py` (`HeadlessExecGate`)
-- Modify: `spar/exec/loop.py` (`Executor._guarded` catches `GatePending`; `_reconcile` pending-gate awareness; `_run_task` review-resume path; `run_continue` decision preload)
-- Test: `tests/test_exec_loop.py`
+- Modify: `spar/exec/review.py` (`run_cross_review` gains `start_with: str = "reviewer"`)
+- Modify: `spar/exec/loop.py` (`Executor._guarded` catches `GatePending`; `_reconcile` pending-gate awareness; `_resume_review_task`; `run_continue` decision preload)
+- Test: `tests/test_exec_loop.py`, `tests/test_exec_review.py`
 
 **Interfaces:**
-- Consumes: `GatePending`, `GateChoice` from `spar/gates.py`; `GateDecision` from `spar/orchestrator.py`.
+- Consumes: `GatePending`, `GateChoice`, `validate_choice` from `spar/gates.py`; `GateDecision` from `spar/orchestrator.py`.
 - Produces:
-  - `HeadlessExecGate(preloaded: tuple[str, GateDecision] | None = None)` implementing `ExecGate`. Each gate method: if `preloaded` is set AND `preloaded[0]` == this gate's name → consume it (set to None) and return the `GateDecision`; else raise `GatePending(name, options, context)`:
+  - `run_cross_review(..., start_with: str = "reviewer")` — `"implementer"` skips the reviewer-turn block on the FIRST loop iteration only (no reviewer verdict, no new remarks, no round counted; the open ledger remarks go straight to the implementer), then the loop proceeds normally from the implementer turn onward. Used exclusively by the review-resume `extend` path.
+  - `HeadlessExecGate(preloaded: tuple[str, GateDecision] | None = None, on_consume=None)` implementing `ExecGate`. Each gate method: if `preloaded` is set AND `preloaded[0]` == this gate's name → consume it (set to None), call `on_consume()` (the executor's callback that clears `state.pending_gate` and saves — clearing happens AT consumption, per Architecture), and return the `GateDecision`; else raise `GatePending(name, options, context)`:
     - `final_merge_gate(summary)` → name `"final_merge"`, options `["accept", "abort"]`, context `{"summary": summary}`.
     - `review_rounds_exhausted_gate(task_id, rounds, pending)` → name `"review_rounds"`, options `["accept", "extend", "abort"]`, context `{"task_id": task_id, "rounds": rounds, "open_remarks": [{"id": r.remark_id, "severity": r.severity.name, "author": r.author, "text": r.text} for r in pending]}`.
-  - `Executor.run_continue(gate_choice: GateChoice | None = None)` — new optional parameter (default None keeps today's signature working). With a choice: load state, `validate_choice(choice, state.pending_gate)` (GateParseError → log + return 2), convert to `GateDecision` (`accept`→accept, `abort`→abort, `extend`→`GateDecision("extend", extra_rounds=n)`), remember `(state.pending_gate["name"], decision)` as the preload for the gate object, clear `state.pending_gate`, save, then proceed as today.
-  - `Executor._guarded` gains: `except GatePending as exc: <persist exc.to_state() into the CURRENT state's pending_gate; save; log; return 10>`. The current state object must be reachable — store it on `self._state` at the top of `_run_fresh`/`_run_continue` (mirroring how `_restore_target_checkout` reloads; here use the live object).
-  - `_reconcile`: a task in status `review` is NOT restarted when `state.pending_gate` (as loaded, BEFORE clearing) names `review_rounds` with `context.task_id == ts.task.id` — its branch/worktree are kept and it is left in status `review`. All other cases unchanged. To make this work, `run_continue` must reconcile BEFORE clearing `pending_gate` (order: load → reconcile(state) → validate/preload/clear → drive).
-  - `_drive`/`_run_task` review-resume: `next_task()` only returns `ready` tasks — add to `_drive`, before `next_task()`: if any task has status `review` (only possible via the pending-gate path), run `self._resume_review_task(state, ts)` for it. `_resume_review_task` mirrors `_run_task` WITHOUT the initial implementer turn and WITHOUT branch/worktree creation (both exist), driving `run_cross_review` → per-task test → merge exactly like `_run_task`'s tail. The preloaded gate decision plays out inside `run_cross_review`'s rounds gate on re-entry:
-    - `accept` — `run_cross_review` is SKIPPED entirely (jump to the testing step); the preload is consumed by `_resume_review_task` itself (it checks the preload's gate name/decision before deciding whether to re-enter review).
-    - `extend:<n>` — re-enter `run_cross_review` with `max_rounds=n` (fresh budget of n rounds from now) and the normal `rounds_gate` wiring (a headless gate that pends again if n more rounds still don't converge).
-    - `abort` — `run_continue` translates to exit 5 directly (log like the interactive abort), no re-entry.
-  - Worktree existence on resume: the review-pending task's worktree survived the exit; `_resume_review_task` asserts it exists and re-creates it from the surviving branch when missing (crash between exit and resume): `gitops.add_worktree(...)` guarded by `worktree.exists()`.
+  - `Executor.run_continue(gate_choice: GateChoice | None = None)` — new optional parameter. ORDER (per review round 1, #2/#3): (1) load state; (2) if `gate_choice`: `validate_choice(gate_choice, state.pending_gate)` — PURE, before any side effect; `GateParseError` → log + return 2 with state untouched; (3) `_reconcile(state)` — pending-gate aware, `pending_gate` still set; (4) stash the decision: for `final_merge` build the `GateDecision` and preload it into the `HeadlessExecGate` (with `on_consume` wired to clear+save); for `review_rounds` set `self._resume_decision = gate_choice` (the EXECUTOR owns this gate's resume — single-owner rule, per #4); (5) drive. `pending_gate` is NOT cleared here.
+  - `Executor._guarded` gains: `except GatePending as exc: <persist exc.to_state() into the live state's pending_gate; save; log; return 10>`. The live state object is stored on `self._state` at the top of `_run_fresh`/`_run_continue`.
+  - `_reconcile`: a task in status `review` is NOT restarted when `state.pending_gate` names `review_rounds` with `context["task_id"] == ts.task.id` — branch/worktree kept, status stays `review`. All other cases unchanged. (Crash-safety: because `pending_gate` survives until consumption, a crash anywhere before the decision is applied leaves a state that reconciles the same way; the operator re-issues the same `--gate`.)
+  - `_drive`: before `next_task()`, if any task has status `review` (only reachable via the pending-gate path), call `self._resume_review_task(state, ts)`.
+  - `_resume_review_task(state, ts)` — the executor-owned consumption point for `review_rounds` decisions. Re-creates the worktree from the surviving branch if missing (`gitops.add_worktree` guarded by `worktree.exists()`), then consumes `self._resume_decision`:
+    - `accept` → clear `pending_gate` + save; skip review; run the per-task test → merge (reuse `_run_task`'s test-loop/merge tail — extract it into a shared `_test_and_merge_task(state, ts, branch, worktree)` helper so the two paths cannot drift).
+    - `extend` (n = `extra_rounds`) → clear `pending_gate` + save; `run_cross_review(..., max_rounds=n, start_with="implementer", rounds_gate=<headless wiring>)`; then the shared test/merge tail.
+    - `abort` → clear `pending_gate` + save; log; raise `_Abort(5)`.
+    - `self._resume_decision is None` (resumed WITHOUT `--gate` while a review gate pends) → re-raise the same `GatePending` from the stored record (exit 10 again, idempotent).
 
+- [ ] **Step 0: Failing test — `start_with="implementer"`.** In `tests/test_exec_review.py`: seed the ledger with an open MUST (TaskState with a pending remark, non-empty branch), call `run_cross_review(..., start_with="implementer")` with impl steps `[Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "fix\n"})]` and review steps `[Step(vblock("DONE"))]` — assert the FIRST adapter call is the implementer's (its prompt lists remark #1), reviewer called exactly once, loop ends DONE.
 - [ ] **Step 1: Failing test — final-merge pends.** Happy 1-task run, `HeadlessExecGate()` as the gate → `ex.run()` returns 10; `store.load().pending_gate["name"] == "final_merge"`; `"accept" in options`; summary in context; repo restored to master (existing helper — integration is clean).
 - [ ] **Step 2: Failing test — final-merge resume accept.** After the pend: build a second executor over the same store with `HeadlessExecGate()` and call `ex2.run_continue(gate_choice=GateChoice(action="accept"))` → rc 0, phase done, merged into master, `pending_gate` cleared.
 - [ ] **Step 3: Failing test — review-rounds pends and resumes.** `max_review_rounds=1`, reviewer scripted to never DONE → rc 10 with `pending_gate.name == "review_rounds"`, task still in status `review`, its branch alive. Resume with `extend:1` and a reviewer that now DONEs → rc continues to final-merge pend (10) — assert task merged and new pending gate is `final_merge`. Also resume-with-`accept` variant: review skipped, task tested + merged.
-- [ ] **Step 4: Failing test — mismatched decision.** Pending `final_merge`, resume with `extend:2` → rc 2, `pending_gate` still set.
-- [ ] **Step 5: Implement** per the interfaces above. Order inside `run_continue`: load → `self._state = state` → `_reconcile(state)` (pending-gate aware) → if `gate_choice`: validate → preload → clear → save → `_drive`.
+- [ ] **Step 4: Failing test — mismatched decision.** Pending `final_merge`, resume with `extend:2` → rc 2, `pending_gate` still set, git artifacts untouched (no reconcile side effects — assert the integration branch tip is unchanged).
+- [ ] **Step 4a: Failing test — resume without `--gate` while pending re-pends.** Pending `review_rounds`, `run_continue()` with no choice → rc 10 again, same `pending_gate`, task still `review`, branch alive (idempotence).
+- [ ] **Step 5: Implement** per the interfaces above. Order inside `run_continue` (matches the Architecture: validate first, clear only at consumption): load → `self._state = state` → if `gate_choice`: `validate_choice(gate_choice, state.pending_gate)` (GateParseError → log + return 2, nothing touched) → `_reconcile(state)` (pending-gate aware, `pending_gate` STILL SET) → stash the decision (final_merge → gate preload with `on_consume`; review_rounds → `self._resume_decision`) → `_drive`. NO clearing in `run_continue`.
 - [ ] **Step 6: Full suite — PASS.**
 - [ ] **Step 7: Commit** — `feat(exec): headless gates — exit 10 + --gate resume (final merge, review rounds)`
 
@@ -191,7 +199,8 @@
     - `rounds_exhausted_gate(artifact_path, pending)` → name `"rounds_exhausted"`, options `["accept", "extend", "abort"]`, context `{"artifact": str(artifact_path), "open_remarks": [...]}`.
     - `recovery_gate(...)` → returns `"repeat"` unconditionally (grill decision: safe default, never pends).
   - `Orchestrator.run_new`/`run_continue` catch `GatePending` exactly like `_Abort`: persist `exc.to_state()` into `state.pending_gate`, `store.save(state)`, log, return 10. (The state object is in scope in `_run_new`/`_run_continue`; catch there, not in the public wrappers.)
-  - `Orchestrator.run_continue(gate_choice: GateChoice | None = None)`: load → validate against `state.pending_gate` (GateParseError → log + 2) → convert (`remarks` → `GateDecision(action="remarks", remarks=choice.remarks)`) → preload into the gate object (the orchestrator owns `self.gate`; when it is a `HeadlessGate`, set its preload) → clear + save → resume the loop. Consensus/rounds conditions re-derive from state, so the gate is re-hit and consumes the preload.
+  - `HeadlessGate` gets the same `on_consume` callback contract as `HeadlessExecGate`: consuming the preload clears `state.pending_gate` and saves — never cleared at preload time.
+  - `Orchestrator.run_continue(gate_choice: GateChoice | None = None)`: load → validate against `state.pending_gate` FIRST (pure; GateParseError → log + 2, state untouched) → convert (`remarks` → `GateDecision(action="remarks", remarks=choice.remarks)`) → preload into the gate object with `on_consume` wired → resume the loop (NO clearing here). Consensus/rounds conditions re-derive from state, so the gate is re-hit, consumes the preload, and clears the pending record at that moment.
 
 - [ ] **Step 1: Failing test — consensus pends.** Drive a scripted debate to consensus with `HeadlessGate()` → rc 10, `pending_gate.name == "consensus"`, artifact path in context.
 - [ ] **Step 2: Failing test — resume with remarks.** `run_continue(gate_choice=GateChoice(action="remarks", remarks=("tighten the API",)))` → remark injected as USER severity (assert in state), debate resumes (scripted sides re-AGREE), next consensus pends again (rc 10).
@@ -268,3 +277,26 @@
 - The one genuinely tricky seam — review-rounds pend/resume vs `_reconcile`'s restart policy — is isolated in Task 2 with explicit ordering (reconcile before clearing `pending_gate`) and a dedicated resume path; assigned to Opus.
 - Backward compatibility: new state fields tolerant; `run_continue` signatures gain optional params only; no interactive behavior changes without `--headless`.
 - Final-merge resume re-runs the final test (documented v1 trade-off; cheap and keeps the gate re-reach trivial).
+
+## Review history
+
+- **Round 1** (codex gpt-5.5): Verdict CONTINUE. All four MUSTs **accepted**:
+  #1 — extend-resume re-entered the wrong half of the review loop (reviewer
+  first); fixed with `run_cross_review(start_with="implementer")` skipping the
+  reviewer block once, so open remarks go to the implementer (+ dedicated
+  test, Task 2 Step 0). #2 — clearing `pending_gate` at preload was not
+  crash-safe; now cleared ONLY at consumption (gate `on_consume` callback /
+  executor's `_resume_review_task`), so a crash mid-resume leaves the gate
+  pending and the same `--gate` can be re-issued. #3 — validation now runs
+  BEFORE reconcile (pure check, exit 2 with zero side effects; test asserts
+  untouched git artifacts). #4 — preload ownership made explicit: gate object
+  owns final_merge/consensus/rounds preloads (consume + on_consume); the
+  EXECUTOR owns review_rounds via `self._resume_decision` consumed in
+  `_resume_review_task` (single-owner rule; resume without --gate re-pends).
+- **Round 2** (codex gpt-5.5): Verdict CONTINUE. #5 [MUST] **accepted** —
+  Task 2 Step 5 still carried the OLD ordering (reconcile before validate,
+  clear at preload), contradicting the corrected architecture. Step 5 now
+  restates the correct order: validate (pure) → reconcile (pending set) →
+  stash decision → drive; no clearing in run_continue.
+- **Round 3** (codex gpt-5.5, verification): Verdict **AGREE**. Confirmed #5
+  and #1-#4 addressed and consistent document-wide.
