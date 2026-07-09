@@ -73,7 +73,17 @@ spar becomes an **agent-operated engine**: the human grills requirements with
 their host agent (Claude Code / Codex), the agent drives spar. Grill-in-spar
 and TUI are DROPPED.
 
-1. **Agent mode**: headless gates (persist + exit + machine-readable status;
-   decision via resume flag), `--task-file` input, `spar status --json`,
-   host-agent wrapper (skill/slash command).
+1. **Agent mode — IMPLEMENTED** (`1746825..24a6137`, plan
+   `docs/superpowers/plans/2026-07-09-agent-mode.md`, 3 challenge rounds):
+   `--headless` exit-and-resume gates (exit 10 + `pending_gate` in state,
+   cleared only at consumption), `--gate accept|abort|extend:<n>|remarks:<f>`
+   on `--continue`, `--task-file`, `spar status --json`, protocol in
+   `docs/AGENT.md` + Claude Code skill in `skills/spar/SKILL.md`.
+   **Remaining: Task 6 — live headless smoke test in spar_tests.**
+   Backlog minors (final review, non-blocking): advanced-target headless
+   merge-conflict pends mid-conflict and its resume path is untested (likely
+   exit 4 — consider surfacing 4 directly); resume+failing-per-task-test
+   combination uncovered; `_resume_review_task` rebuilds the worktree before
+   the abort check (stray worktree on abort); `--gate` against a done state
+   returns 0 (done short-circuit precedes validation).
 2. 2-way concurrency (sequential-first by design; `docs/adr/0002`).
