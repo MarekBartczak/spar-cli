@@ -67,10 +67,13 @@ Small backlog from run 2:
 
 Next feature work comes from the roadmap below.
 
-## Roadmap (unchanged)
+## Roadmap (PIVOTED 2026-07-09 — see docs/adr/0003)
 
-1. **Grill phase**: one model interrogates the user → refined requirements →
-   feeds the debate. Full vision: assumptions → grill → plan(2 models) →
-   exec(2 models) → output.
-2. **TUI** front-end.
-3. 2-way concurrency (sequential-first by design; `docs/adr/0002`).
+spar becomes an **agent-operated engine**: the human grills requirements with
+their host agent (Claude Code / Codex), the agent drives spar. Grill-in-spar
+and TUI are DROPPED.
+
+1. **Agent mode**: headless gates (persist + exit + machine-readable status;
+   decision via resume flag), `--task-file` input, `spar status --json`,
+   host-agent wrapper (skill/slash command).
+2. 2-way concurrency (sequential-first by design; `docs/adr/0002`).
