@@ -34,17 +34,19 @@ merged into the target master as `b5e3850`).
 
 ## Known nits / follow-up backlog
 
-- No graceful SIGINT in exec (raw traceback on Ctrl+C; state IS saved,
-  `--continue` works).
+Cleanup tranche 1 (2026-07-09, `44f6efc..9574c6e`) closed: graceful SIGINT
+(exit 130 + `--continue` hint), per-side `impl_models` floor (config +
+task-list validation + planner contract; set in spar_tests for claude),
+open NICE remarks surfaced at the final-merge gate, omit-empty-remarks
+protocol rule, numeric task-id ordering.
+
+Still open:
 - Final-merge-gate abort leaves the repo checked out on `spar/integration`.
 - Turn timeout hardcoded (`_DEFAULT_TIMEOUT_SEC = 900`), not in config.
 - Claude implementer has no Bash/Grep/Glob (cannot compile-check own work
   before the per-task test).
-- Prompt nits: permanent missing-file rule mentions the foreign section even
-  when absent; foreign list sorts `t10` before `t2`.
-- Debate can still assign weak models (haiku) to implementation; the t4
-  assignment was hand-bumped to sonnet before exec. Consider a config floor
-  for impl models.
+- Permanent missing-file rule mentions the foreign section even when absent
+  (benign prompt-coherence nit).
 - Implementer sometimes "resolves" phantom remark ids (t3: #7/#9) — ignored
   correctly, harmless.
 
