@@ -58,6 +58,18 @@ __all__ = ["Executor", "ExecGate", "ConsoleExecGate"]
 _DEFAULT_TIMEOUT_SEC = 900
 
 
+def _task_id_order(tid: str) -> tuple:
+    """Numeric sort key for a task id: ``t2`` before ``t10`` (not lexicographic).
+
+    Numeric ``t<N>`` ids sort first, ordered by ``N``; any other id sorts
+    after, ordered by its raw string. Shared by every place that must present
+    tasks in a stable, human-sensible order (foreign-file listings in the
+    review prompt, the final-merge NICE-remarks summary).
+    """
+    m = re.match(r"t(\d+)$", tid)
+    return (0, int(m.group(1)), "") if m else (1, 0, tid)
+
+
 # ---------------------------------------------------------------------------
 # Final-merge gate (mirrors v1's ConsoleGate; reuses GateDecision)
 # ---------------------------------------------------------------------------
@@ -461,13 +473,11 @@ class Executor:
                 # mistaking either for a missing-file defect. Sequential
                 # execution: statuses cannot change while this task runs, so
                 # compute once.
-                def _task_order(ts_: TaskState):
-                    m = re.match(r"t(\d+)$", ts_.task.id)
-                    return (0, int(m.group(1)), "") if m else (1, 0, ts_.task.id)
-
                 foreign_files = tuple(
                     (other.task.id, other.task.files)
-                    for other in sorted(state.tasks.values(), key=_task_order)
+                    for other in sorted(
+                        state.tasks.values(), key=lambda ts_: _task_id_order(ts_.task.id)
+                    )
                     if other.task.id != task.id and other.status != "merged"
                 )
                 # present_files, not changed_files: a file DELETED by an
@@ -749,7 +759,7 @@ class Executor:
         # silently die with the run — surface them once, at the final gate.
         nice_lines = [
             f"    [{tid}] #{r.remark_id} ({r.author}): {r.text}"
-            for tid, ts in sorted(state.tasks.items())
+            for tid, ts in sorted(state.tasks.items(), key=lambda kv: _task_id_order(kv[0]))
             for r in ts.pending_remarks
             if r.severity == Severity.NICE
         ]

@@ -1158,6 +1158,51 @@ def test_keyboard_interrupt_exits_130_with_resume_hint(repo, tmp_path):
         pass
 
 
+def test_keyboard_interrupt_on_continue_exits_130_with_resume_hint(repo, tmp_path):
+    # Same interruption/hint contract as
+    # test_keyboard_interrupt_exits_130_with_resume_hint, but driving
+    # run_continue() over a pre-seeded resumable state rather than run().
+    base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "branch", "spar/integration", "master")
+
+    spar_dir = tmp_path / ".spar"
+    store = ExecStateStore(spar_dir)
+    task = make_task("t1", "A", ["work.py"], test="true")
+    state = ExecState(
+        phase="execution",
+        target_branch="master",
+        target_base_oid=base_oid,
+        integration_branch="spar/integration",
+        tasks={"t1": TaskState(task=task, status="pending")},
+    )
+    store.save(state)
+
+    steps = {"A": [Step("", raises=KeyboardInterrupt())], "B": []}
+    make_adapter, adapters = make_factory(steps)
+    gate = FakeGate([])
+    logs = []
+    ex = Executor(
+        repo=repo,
+        spar_dir=spar_dir,
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=tmp_path / "plan.md",
+        tasks=(task,),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate,
+        store=store,
+        log=logs.append,
+    )
+    rc = ex.run_continue()
+    assert rc == 130
+    assert any("--continue" in ln for ln in logs)
+    # state survived and the lock is free: a resume can load it
+    assert store.exists()
+    with store.locked():
+        pass
+
+
 def test_foreign_files_sorted_numerically_by_task_id(repo, tmp_path):
     # Reviewing t1 while t2 and t10 are pending: the foreign list must order
     # t2 before t10 (numeric), not lexicographically (t10 < t2).

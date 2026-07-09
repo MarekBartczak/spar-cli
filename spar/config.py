@@ -392,9 +392,10 @@ def _dump_config_toml(raw: dict) -> str:
     """Serialize a config dict (our restricted schema) back to TOML text.
 
     Handles only the structure spar itself produces: ``[sides.<name>]`` tables
-    with string scalars and a ``[debate]`` table with string/int scalars. This
-    is a deliberate, minimal writer — stdlib has no TOML serializer and the
-    schema is small and fully controlled.
+    with string scalars and string lists (``models``, ``impl_models``), plus
+    ``[debate]`` and ``[execution]`` tables with string/int scalars. This is a
+    deliberate, minimal writer — stdlib has no TOML serializer and the schema
+    is small and fully controlled.
     """
     lines: list[str] = []
     for name, cfg in raw.get("sides", {}).items():
