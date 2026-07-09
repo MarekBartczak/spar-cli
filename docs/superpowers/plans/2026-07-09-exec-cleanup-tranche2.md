@@ -227,10 +227,10 @@ git commit -m "fix(exec): restore target checkout on abort/error exits"
 
 - [ ] **Step 1: Update the argv contract tests (RED)**
 
-In `tests/test_adapter_claude.py`, the three existing argv tests assert `"Read,Edit,Write"` — update all three expected argv lists to `"Read,Edit,Write,Bash,Grep,Glob"`, and add no new test (the readonly test already pins the reviewer allowlist to `"Read"`).
+In `tests/test_adapter_claude.py`, FOUR argv expectations assert `"Read,Edit,Write"` (new session, resume, model+new session, model+resume) — update ALL FOUR expected argv lists to `"Read,Edit,Write,Bash,Grep,Glob"` (`grep -n "Read,Edit,Write" tests/test_adapter_claude.py` must show exactly the four updated lines afterwards), and add no new test (the readonly test already pins the reviewer allowlist to `"Read"`).
 
 Run: `python3 -m pytest tests/test_adapter_claude.py -q`
-Expected: the three updated tests FAIL (code still emits the short list); the readonly test passes.
+Expected: all FOUR updated tests FAIL (code still emits the short list); the readonly test passes.
 
 - [ ] **Step 2: Implement**
 
@@ -334,3 +334,13 @@ git commit -m "fix(exec): prompt polish — hedged foreign reference, no invente
 - Backlog coverage: timeout → Task 1; stranded checkout → Task 2; claude toolset → Task 3; both prompt nits (foreign hedge, phantom ids) → Task 4. Nothing else pending from HANDOFF's "Still open" list.
 - Task 2's helper is deliberately conservative (four guards + swallow-all) so the conflict-surface path and dirty trees are untouched; the existing conflict tests double as its no-op regression net.
 - Task 1 removes `_DEFAULT_TIMEOUT_SEC` entirely — grep for stragglers before committing (`grep -rn _DEFAULT_TIMEOUT_SEC spar/ tests/`).
+
+## Review history
+
+- **Round 1** (codex gpt-5.5): Verdict CONTINUE. #1 [MUST] **accepted** —
+  the plan said "three" argv expectations; the file has FOUR occurrences of
+  `Read,Edit,Write` (new/resume x plain/model). Task 3 Step 1 now says ALL
+  FOUR, with a grep check.
+- **Round 2** (codex gpt-5.5): Verdict **AGREE**. Confirmed #1 addressed.
+  #2 [NICE] **accepted** — red-step expectation updated from "three" to
+  "FOUR" failing tests.
