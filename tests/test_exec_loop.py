@@ -1097,3 +1097,39 @@ def test_reviewer_prompt_lists_unmerged_tasks_files_only(repo, tmp_path):
     # actual file appears in the merged-files section
     assert "t1: work1.py" not in adapters["A"].calls[1]["prompt"]
     assert "work1.py" in adapters["A"].calls[1]["prompt"]
+
+
+def test_merge_summary_lists_open_nice_remarks(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        # DONE with a NICE remark: non-blocking, stays pending through merge
+        "B": [Step(vblock("DONE", remarks=["[NICE] consider a docstring"]))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    summary = gate.calls[0]
+    assert "open NICE remarks" in summary
+    assert "consider a docstring" in summary
+    assert "[t1]" in summary
+
+
+def test_merge_summary_omits_nice_block_when_none(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    assert "open NICE remarks" not in gate.calls[0]

@@ -51,6 +51,7 @@ from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
 from spar.orchestrator import GateDecision
 from spar.state import LockHeld, StateError
+from spar.verdict import Severity
 
 __all__ = ["Executor", "ExecGate", "ConsoleExecGate"]
 
@@ -720,12 +721,23 @@ class Executor:
     def _merge_summary(self, state: ExecState) -> str:
         merged = [tid for tid, ts in state.tasks.items() if ts.status == "merged"]
         diffstat = self._diffstat(state.target_base_oid, state.integration_branch)
-        return (
+        summary = (
             "spar exec: final Test passed. Ready to merge integration into "
             f"'{state.target_branch}'.\n"
             f"  tasks merged: {', '.join(sorted(merged))}\n"
             f"  diff --stat {state.target_branch}..integration:\n{diffstat}"
         )
+        # Open NICE remarks are non-blocking by design, but they should not
+        # silently die with the run — surface them once, at the final gate.
+        nice_lines = [
+            f"    [{tid}] #{r.remark_id} ({r.author}): {r.text}"
+            for tid, ts in sorted(state.tasks.items())
+            for r in ts.pending_remarks
+            if r.severity == Severity.NICE
+        ]
+        if nice_lines:
+            summary += "\n  open NICE remarks (non-blocking):\n" + "\n".join(nice_lines)
+        return summary
 
     # -- test-command execution ----------------------------------------
 
