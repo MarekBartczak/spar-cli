@@ -45,12 +45,15 @@ class Step:
     is returned (used by an implementer turn). A reviewer turn uses ``edits={}``.
     """
 
-    def __init__(self, reply, sid="sess", edits=None):
+    def __init__(self, reply, sid="sess", edits=None, raises=None):
         self.reply = reply
         self.sid = sid
         self.edits = edits or {}
+        self.raises = raises
 
     def __call__(self, root):
+        if self.raises is not None:
+            raise self.raises
         for rel, content in self.edits.items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -1133,3 +1136,23 @@ def test_merge_summary_omits_nice_block_when_none(repo, tmp_path):
     rc = ex.run()
     assert rc == 0
     assert "open NICE remarks" not in gate.calls[0]
+
+
+def test_keyboard_interrupt_exits_130_with_resume_hint(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step("", raises=KeyboardInterrupt())],
+        "B": [],
+    }
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 130
+    assert any("--continue" in ln for ln in logs)
+    # state survived and the lock is free: a resume can load it
+    assert store.exists()
+    with store.locked():
+        pass

@@ -197,6 +197,14 @@ class Executor:
         except LockHeld as exc:
             self.log(f"spar exec: another instance holds the lock ({exc}).")
             return 3
+        except KeyboardInterrupt:
+            # State was persisted by the in-flight save points (every turn is
+            # bracketed by store.save); the lock was released by locked().
+            self.log(
+                "spar exec: interrupted — state saved; resume with "
+                "'spar exec --continue'."
+            )
+            return 130
 
     def run_continue(self) -> int:
         """Resume from ``exec.json`` + git reconciliation (§11.1)."""
@@ -206,6 +214,12 @@ class Executor:
         except LockHeld as exc:
             self.log(f"spar exec: another instance holds the lock ({exc}).")
             return 3
+        except KeyboardInterrupt:
+            self.log(
+                "spar exec: interrupted — state saved; resume with "
+                "'spar exec --continue'."
+            )
+            return 130
 
     def _guarded(self, fn: Callable[[], int]) -> int:
         try:
