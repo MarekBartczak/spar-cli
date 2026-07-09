@@ -443,6 +443,80 @@ def test_gate_abort_restores_target_checkout(repo, tmp_path):
     assert branch_exists(repo, "spar/integration")
 
 
+def test_restore_checkout_noop_when_tree_dirty(repo, tmp_path):
+    # Same scenario as test_gate_abort_restores_target_checkout, but the final
+    # test command leaves an untracked file behind on the integration
+    # checkout. The tree is dirty at exit, so the best-effort restore must
+    # refuse to touch the checkout.
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="echo dirty > stray.txt"),
+    )
+    rc = ex.run()
+    assert rc == 5
+    # untracked file proves the final test command actually dirtied the tree
+    assert (repo / "stray.txt").exists()
+    assert not gitops.is_clean(repo)
+    # restore was refused: repo stays on the integration branch
+    assert gitops.current_branch(repo) == "spar/integration"
+
+
+def test_restore_checkout_runs_on_continue_path(repo, tmp_path):
+    # First run: gate-abort scenario restores the checkout to master (per
+    # test_gate_abort_restores_target_checkout). Then simulate the user
+    # manually leaving the repo on the integration branch (e.g. by poking
+    # around) and resuming via --continue with a second gate abort. The
+    # restore-on-exit path must run again on this run_continue() call too.
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 5
+    assert gitops.current_branch(repo) == "master"
+
+    # Leave the repo checked out on the integration branch, as if the user
+    # (or another tool) switched it back before resuming.
+    git(repo, "checkout", "-q", "spar/integration")
+    assert gitops.current_branch(repo) == "spar/integration"
+
+    # Resume over the same store/state with a fresh Executor. t1 is already
+    # "merged"; reconciliation finds nothing left to do, the final test
+    # passes again, and the second gate abort exits 5 — the restore-on-exit
+    # path in run_continue() must put the repo back on master.
+    make_adapter, adapters2 = make_factory({"A": [], "B": []})
+    gate2 = FakeGate([GateDecision("abort")])
+    logs2 = []
+    ex2 = Executor(
+        repo=repo,
+        spar_dir=tmp_path / ".spar",
+        make_adapter=make_adapter,
+        sides=side_cfg(),
+        order=["A", "B"],
+        plan_path=tmp_path / "plan.md",
+        tasks=tuple(tasks),
+        execution=ExecutionConfig(test_command="true"),
+        gate=gate2,
+        store=store,
+        log=logs2.append,
+    )
+    rc2 = ex2.run_continue()
+    assert rc2 == 5
+    assert gitops.current_branch(repo) == "master"
+
+
 # ---------------------------------------------------------------------------
 # Scenario 3: final test fails once -> a t<next> fix task is generated and run
 # -> re-run passes -> merged, exit 0.

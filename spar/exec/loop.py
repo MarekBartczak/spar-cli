@@ -258,8 +258,8 @@ class Executor:
                 self.log(
                     f"spar exec: restored checkout to '{state.target_branch}'."
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            self.log(f"spar exec: could not restore target checkout: {exc}")
 
     def _guarded(self, fn: Callable[[], int]) -> int:
         try:
