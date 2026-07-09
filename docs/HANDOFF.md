@@ -79,7 +79,13 @@ and TUI are DROPPED.
    cleared only at consumption), `--gate accept|abort|extend:<n>|remarks:<f>`
    on `--continue`, `--task-file`, `spar status --json`, protocol in
    `docs/AGENT.md` + Claude Code skill in `skills/spar/SKILL.md`.
-   **Remaining: Task 6 — live headless smoke test in spar_tests.**
+   **Task 6 DONE (2026-07-09): live headless smoke test PASSED** — full
+   AGENT.md loop on spar_tests (--help feature, brownfield): --task-file
+   debate → codex-hang recovery via --continue → consensus pend (10) →
+   `--gate remarks:<file>` injected a test= requirement the debate then
+   satisfied → accept → exec headless (2 tasks, scope guard caught build
+   artifacts) → final_merge pend with summary in status --json → accept →
+   done. Black-box 28/28.
    Backlog minors (final review, non-blocking): advanced-target headless
    merge-conflict pends mid-conflict and its resume path is untested (likely
    exit 4 — consider surfacing 4 directly); resume+failing-per-task-test
