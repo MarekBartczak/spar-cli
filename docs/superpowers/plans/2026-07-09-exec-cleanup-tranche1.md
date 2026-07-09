@@ -134,6 +134,57 @@ In the side-merge block of `_dict_to_config` (both branches, mirroring `models`)
 
 In `load_config`'s `defaults_dict`, extend each side entry with `"impl_models": list(side.impl_models)`.
 
+- [ ] **Step 3a: Write the failing round-trip test (config writer)**
+
+`set_global_command` rewrites the global config through `_dump_config_toml`, whose whitelist would silently DROP `impl_models` — and it already drops a global `[execution]` table (pre-existing bug: only `sides` + `debate` are emitted). Add to `tests/test_config.py` INSIDE the existing `TestSetGlobalCommand` class (as a method with `self`, matching the file's convention; selector `tests/test_config.py::TestSetGlobalCommand::...`):
+
+```python
+def test_set_global_command_preserves_impl_models_and_execution(self, tmp_path):
+    gp = tmp_path / "c.toml"
+    gp.write_text(
+        '[sides.claude]\nadapter="claude"\ncommand="claude"\n'
+        'models=["opus","sonnet"]\ndefault_model="sonnet"\n'
+        'impl_models=["sonnet"]\n'
+        '\n[execution]\ntest_command="pytest -q"\nmax_review_rounds=3\n'
+    )
+    set_global_command("claude", "claude-v2", global_path=gp)
+    cfg = load_config(tmp_path / "p", global_path=gp)
+    assert cfg.sides["claude"].command == "claude-v2"
+    assert cfg.sides["claude"].impl_models == ("sonnet",)
+    assert cfg.execution.test_command == "pytest -q"
+    assert cfg.execution.max_review_rounds == 3
+```
+
+Run: `python3 -m pytest tests/test_config.py::test_set_global_command_preserves_impl_models_and_execution -v`
+Expected: FAIL (impl_models and/or execution lost after the rewrite).
+
+- [ ] **Step 3b: Extend `_dump_config_toml`**
+
+In the per-side loop, after the `models` handling add:
+
+```python
+        impl_models = cfg.get("impl_models")
+        if impl_models:
+            impl_str = "[" + ", ".join(f'"{_escape_toml_str(m)}"' for m in impl_models) + "]"
+            lines.append(f"impl_models = {impl_str}")
+```
+
+and after the `[debate]` block add an `[execution]` block mirroring debate's scalar handling:
+
+```python
+    execution = raw.get("execution", {})
+    if execution:
+        lines.append("[execution]")
+        for key, val in execution.items():
+            if isinstance(val, str):
+                lines.append(f'{key} = "{_escape_toml_str(val)}"')
+            else:
+                lines.append(f"{key} = {val}")
+        lines.append("")
+```
+
+(Match the exact style of the existing `[debate]` emission — read it first and mirror it.)
+
 - [ ] **Step 4: Run config tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_config.py -q`
@@ -607,3 +658,14 @@ git commit -m "fix(exec): review-protocol omit-empty-remarks rule + numeric fore
 - Spec coverage: floor → Task 1; NICE at gate → Task 2; SIGINT → Task 3; both prompt nits → Task 4. All four tranche-1 items covered; nothing extra.
 - `impl_models` enforcement path: config parse → `parse_task_list` (used by BOTH the debate's consensus gate `_tasks_section_valid` and `spar exec`'s startup parse), so a hand-edited artifact is caught at exec time too.
 - Type consistency: `impl_models: tuple[str, ...]` everywhere; `impl_catalogs: dict[str, tuple[str, ...]] | None` in both prompt-layer functions.
+
+## Review history
+
+- **Round 1** (codex gpt-5.5): Verdict CONTINUE. #1 [MUST] **accepted** —
+  `_dump_config_toml`'s whitelist would drop `impl_models` on
+  `set_global_command` rewrites; it ALSO already drops a global `[execution]`
+  table (pre-existing). Fix applied: Task 1 Steps 3a/3b extend the writer
+  (impl_models list + [execution] block) with a round-trip regression test.
+- **Round 2** (codex gpt-5.5): Verdict **AGREE**. Confirmed #1 addressed.
+  #2 [NICE] **accepted** — the round-trip test belongs inside the existing
+  `TestSetGlobalCommand` class (method with `self`); Step 3a adjusted.
