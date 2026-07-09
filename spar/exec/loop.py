@@ -55,8 +55,6 @@ from spar.verdict import Severity
 
 __all__ = ["Executor", "ExecGate", "ConsoleExecGate"]
 
-_DEFAULT_TIMEOUT_SEC = 900
-
 
 def _task_id_order(tid: str) -> tuple:
     """Numeric sort key for a task id: ``t2`` before ``t10`` (not lexicographic).
@@ -424,7 +422,7 @@ class Executor:
                     exec_state=state,
                     store=self.store,
                     log=self.log,
-                    timeout_sec=_DEFAULT_TIMEOUT_SEC,
+                    timeout_sec=self.execution.turn_timeout_sec,
                     warning=test_warning,
                 )
 
@@ -447,7 +445,7 @@ class Executor:
                         exec_state=state,
                         store=self.store,
                         log=self.log,
-                        timeout_sec=_DEFAULT_TIMEOUT_SEC,
+                        timeout_sec=self.execution.turn_timeout_sec,
                         warning=(
                             "Your previous turn created NO files on disk. You MUST "
                             "create/edit the file(s) in your scope now, on disk, with real "
@@ -495,7 +493,7 @@ class Executor:
                     worktree=worktree,
                     integration_base=state.integration_branch,
                     plan_path=self.plan_path,
-                    timeout_sec=_DEFAULT_TIMEOUT_SEC,
+                    timeout_sec=self.execution.turn_timeout_sec,
                     store=self.store,
                     exec_state=state,
                     log=self.log,

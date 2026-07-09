@@ -792,3 +792,19 @@ class TestExecutionConfig:
         gp.write_text('[execution]\nmax_fix_tasks=-1\n')
         with pytest.raises(ConfigError):
             load_config(tmp_path / "p", global_path=gp)
+
+    def test_turn_timeout_sec_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nturn_timeout_sec=120\n')
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.execution.turn_timeout_sec == 120
+
+    def test_turn_timeout_sec_defaults_to_900(self, tmp_path):
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.execution.turn_timeout_sec == 900
+
+    def test_turn_timeout_sec_must_be_positive_int(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nturn_timeout_sec=0\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)

@@ -42,6 +42,7 @@ class ExecutionConfig:
     test_command: str = ""
     max_review_rounds: int = 0
     max_fix_tasks: int = 0
+    turn_timeout_sec: int = 900
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ def _validate_debate_config(config: dict) -> None:
 
 def _validate_execution_config(config: dict) -> None:
     """Validate execution configuration."""
-    allowed_keys = {"test_command", "max_review_rounds", "max_fix_tasks"}
+    allowed_keys = {"test_command", "max_review_rounds", "max_fix_tasks", "turn_timeout_sec"}
     for key in config.keys():
         if key not in allowed_keys:
             raise ConfigError(f"Unknown key in execution config: {key}")
@@ -141,6 +142,15 @@ def _validate_execution_config(config: dict) -> None:
             raise ConfigError(f"max_fix_tasks must be an integer, got {type(value).__name__}")
         if value < 0:
             raise ConfigError(f"max_fix_tasks must be >= 0, got {value}")
+
+    if "turn_timeout_sec" in config:
+        value = config["turn_timeout_sec"]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConfigError(
+                f"turn_timeout_sec must be an integer, got {type(value).__name__}"
+            )
+        if value < 1:
+            raise ConfigError(f"turn_timeout_sec must be >= 1, got {value}")
 
 
 def _validate_side_config(side_name: str, config: dict) -> None:
@@ -314,15 +324,20 @@ def _dict_to_config(config_dict: dict) -> Config:
         max_fix_tasks = execution_dict.get(
             "max_fix_tasks", defaults.execution.max_fix_tasks
         )
+        turn_timeout_sec = execution_dict.get(
+            "turn_timeout_sec", defaults.execution.turn_timeout_sec
+        )
     else:
         test_command = defaults.execution.test_command
         max_review_rounds = defaults.execution.max_review_rounds
         max_fix_tasks = defaults.execution.max_fix_tasks
+        turn_timeout_sec = defaults.execution.turn_timeout_sec
 
     execution = ExecutionConfig(
         test_command=test_command,
         max_review_rounds=max_review_rounds,
         max_fix_tasks=max_fix_tasks,
+        turn_timeout_sec=turn_timeout_sec,
     )
 
     return Config(sides=sides, debate=debate, execution=execution)
@@ -370,6 +385,7 @@ def load_config(project_dir: Path, global_path: Optional[Path] = None) -> Config
             "test_command": defaults.execution.test_command,
             "max_review_rounds": defaults.execution.max_review_rounds,
             "max_fix_tasks": defaults.execution.max_fix_tasks,
+            "turn_timeout_sec": defaults.execution.turn_timeout_sec,
         },
     }
 

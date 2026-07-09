@@ -73,7 +73,7 @@ class FakeAdapter:
         self.readonly_flags = []  # readonly flag on each make_adapter call
 
     def run_turn(self, prompt, session_id, timeout_sec):
-        self.calls.append({"prompt": prompt, "session_id": session_id})
+        self.calls.append({"prompt": prompt, "session_id": session_id, "timeout": timeout_sec})
         if not self.steps:
             raise AssertionError(f"{self.name}: no scripted step left for this call")
         return self.steps.pop(0)(self.root)
@@ -1232,3 +1232,20 @@ def test_foreign_files_sorted_numerically_by_task_id(repo, tmp_path):
     assert rc == 0
     prompt = adapters["B"].calls[0]["prompt"]  # review of t1
     assert prompt.index("t2: w2.py") < prompt.index("t10: w10.py")
+
+
+def test_turn_timeout_from_execution_config(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true", turn_timeout_sec=123),
+    )
+    rc = ex.run()
+    assert rc == 0
+    # every adapter turn ran with the configured timeout
+    assert all(c["timeout"] == 123 for a in adapters.values() for c in a.calls)
