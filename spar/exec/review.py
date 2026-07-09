@@ -193,6 +193,7 @@ def run_cross_review(
     rounds_gate=None,
     foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
     merged_files: tuple[str, ...] = (),
+    start_with: str = "reviewer",
 ) -> None:
     """Drive the asymmetric cross-review loop until the reviewer emits DONE.
 
@@ -206,6 +207,12 @@ def run_cross_review(
     exhaustion, ``rounds_gate(task_state, rounds_used)`` decides: ``accept``
     stops reviewing (the task proceeds as-is to its per-Task test), ``extend``
     grants ``extra_rounds`` more; anything else — or no gate — aborts loudly.
+
+    ``start_with`` selects which turn opens the loop. ``"reviewer"`` (default)
+    runs the normal reviewer-first loop. ``"implementer"`` runs one implementer
+    turn BEFORE the loop's first reviewer turn — no reviewer verdict, no new
+    remarks, no round counted — sending the still-open ledger remarks straight
+    to the implementer; used only by the review-resume ``extend`` path.
     """
     repo = Path(repo)
     worktree = Path(worktree)
@@ -213,6 +220,41 @@ def run_cross_review(
 
     no_change_streak = 0  # consecutive implementer turns that changed no files
     rounds_used = 0  # non-terminating reviewer verdicts so far
+
+    def _impl_turn() -> None:
+        # One implementer turn plus the anti-spin accounting. The loop only
+        # reaches an implementer turn while there is still blocking work (a
+        # non-terminating reviewer verdict). An implementer that changes NO
+        # files for several consecutive turns is not converging — abort loudly
+        # rather than loop forever writing nothing.
+        nonlocal no_change_streak
+        made_changes = _implementer_turn(
+            task_state=task_state,
+            impl_adapter=impl_adapter,
+            worktree=worktree,
+            plan_path=plan_path,
+            exec_state=exec_state,
+            store=store,
+            log=log,
+            timeout_sec=timeout_sec,
+        )
+        if made_changes:
+            no_change_streak = 0
+        else:
+            no_change_streak += 1
+            if no_change_streak >= _NO_CHANGE_ABORT_TURNS:
+                raise ReviewAbort(
+                    f"task {task.id}: implementer produced no changes across "
+                    f"{no_change_streak} turns"
+                )
+
+    # ``start_with="implementer"`` (the review-resume ``extend`` path): the
+    # round budget was already exhausted once and the operator granted more, so
+    # the still-open remarks go straight to an implementer turn BEFORE the loop
+    # re-enters at the reviewer turn. No reviewer verdict and no round are
+    # counted for this opening turn.
+    if start_with == "implementer":
+        _impl_turn()
 
     while True:
         # -- reviewer turn ------------------------------------------------
@@ -297,30 +339,7 @@ def run_cross_review(
                 )
 
         # -- implementer turn --------------------------------------------
-        made_changes = _implementer_turn(
-            task_state=task_state,
-            impl_adapter=impl_adapter,
-            worktree=worktree,
-            plan_path=plan_path,
-            exec_state=exec_state,
-            store=store,
-            log=log,
-            timeout_sec=timeout_sec,
-        )
-
-        # Anti-spin guard: the loop only reaches an implementer turn while there
-        # is still blocking work (a non-terminating reviewer verdict). An
-        # implementer that changes NO files for several consecutive turns is not
-        # converging — abort loudly rather than loop forever writing nothing.
-        if made_changes:
-            no_change_streak = 0
-        else:
-            no_change_streak += 1
-            if no_change_streak >= _NO_CHANGE_ABORT_TURNS:
-                raise ReviewAbort(
-                    f"task {task.id}: implementer produced no changes across "
-                    f"{no_change_streak} turns"
-                )
+        _impl_turn()
 
 
 def _implementer_turn(

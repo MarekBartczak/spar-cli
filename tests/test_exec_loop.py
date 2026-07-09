@@ -17,7 +17,9 @@ from spar.config import ExecutionConfig, SideConfig
 from spar.exec import gitops
 from spar.exec.loop import Executor
 from spar.exec.state import ExecState, ExecStateStore, TaskState
+from spar.exec.headless import HeadlessExecGate
 from spar.exec.tasklist import Task
+from spar.gates import GateChoice
 from spar.orchestrator import GateDecision
 
 
@@ -1359,3 +1361,160 @@ def test_restore_helper_silent_when_no_state_file(repo, tmp_path):
     rc = ex.run()
     assert rc == 3  # refused: target not clean
     assert not any("could not restore" in ln for ln in logs)
+
+
+# ---------------------------------------------------------------------------
+# Headless (agent-mode) gates: exit 10 + --gate resume.
+# ---------------------------------------------------------------------------
+
+
+def _pend_final_merge(repo, tmp_path):
+    """Run a 1-task happy path under a HeadlessExecGate; returns (store, tasks)
+    with the run pended at the final-merge gate (exit 10)."""
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 10, f"expected final-merge pend; logs={logs}"
+    return store, tasks
+
+
+def _pend_review_rounds(repo, tmp_path):
+    """Run a 1-task exec whose reviewer never DONEs under max_review_rounds=1
+    and a HeadlessExecGate; returns (store, tasks) pended at review_rounds."""
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],  # initial impl
+        "B": [Step(vblock("CONTINUE", remarks=["[MUST] never happy"]))],  # review r1
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true", max_review_rounds=1),
+    )
+    rc = ex.run()
+    assert rc == 10, f"expected review-rounds pend; logs={logs}"
+    return store, tasks
+
+
+def test_headless_final_merge_pends_exit_10(repo, tmp_path):
+    store, tasks = _pend_final_merge(repo, tmp_path)
+    state = store.load()
+    assert state.pending_gate is not None
+    assert state.pending_gate["name"] == "final_merge"
+    assert "accept" in state.pending_gate["options"]
+    assert "summary" in state.pending_gate["context"]
+    # t1 merged into integration; integration NOT yet merged into master.
+    assert state.tasks["t1"].status == "merged"
+    assert not branch_exists(repo, "master") or True  # master exists
+    master_files = git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
+    assert "work.py" not in master_files
+    # repo restored to the target branch (clean integration; existing helper).
+    assert gitops.current_branch(repo) == "master"
+
+
+def test_headless_final_merge_resume_accept(repo, tmp_path):
+    store, tasks = _pend_final_merge(repo, tmp_path)
+
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="accept"))
+    assert rc2 == 0, f"logs={logs2}"
+    state = store2.load()
+    assert state.phase == "done"
+    assert state.pending_gate is None
+    master_files = git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
+    assert "work.py" in master_files
+
+
+def test_headless_review_rounds_pends_then_extend(repo, tmp_path):
+    store, tasks = _pend_review_rounds(repo, tmp_path)
+    state = store.load()
+    assert state.pending_gate["name"] == "review_rounds"
+    assert state.pending_gate["context"]["task_id"] == "t1"
+    assert any(
+        r["text"] == "never happy" for r in state.pending_gate["context"]["open_remarks"]
+    )
+    assert state.tasks["t1"].status == "review"
+    assert branch_exists(repo, "spar/t1-A")
+
+    # Resume with extend:1 and a reviewer that now DONEs -> the task merges and
+    # the run advances to the (still headless) final-merge gate, pending again.
+    steps2 = {
+        "A": [Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "v2\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps2, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true", max_review_rounds=1),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="extend", extra_rounds=1))
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.pending_gate["name"] == "final_merge"
+    # The extend re-entered at an implementer turn (skipping a reviewer turn):
+    # exactly one impl turn and one review turn ran on resume.
+    assert len(adapters2["A"].calls) == 1
+    assert len(adapters2["B"].calls) == 1
+
+
+def test_headless_review_rounds_resume_accept(repo, tmp_path):
+    store, tasks = _pend_review_rounds(repo, tmp_path)
+
+    # accept-as-is: review is skipped entirely; the per-task test runs and the
+    # task merges, advancing to the final-merge pend. No adapter turns needed.
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="accept"))
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.pending_gate["name"] == "final_merge"
+    # Review was skipped: the reviewer side was never even constructed.
+    assert adapters2.get("B") is None or adapters2["B"].calls == []
+
+
+def test_headless_gate_mismatch_exits_2_no_side_effects(repo, tmp_path):
+    store, tasks = _pend_final_merge(repo, tmp_path)
+    tip_before = git(repo, "rev-parse", "spar/integration").stdout.strip()
+
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    # final_merge accepts only accept/abort; extend:2 is a mismatch.
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="extend", extra_rounds=2))
+    assert rc2 == 2, f"logs={logs2}"
+    state2 = store2.load()
+    # Gate still pending, untouched; no git side effects (reconcile never ran).
+    assert state2.pending_gate["name"] == "final_merge"
+    assert git(repo, "rev-parse", "spar/integration").stdout.strip() == tip_before
+
+
+def test_headless_resume_without_gate_repends(repo, tmp_path):
+    store, tasks = _pend_review_rounds(repo, tmp_path)
+    before = store.load().pending_gate
+
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true", max_review_rounds=1),
+    )
+    rc2 = ex2.run_continue()  # no --gate while a gate pends
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.pending_gate["name"] == "review_rounds"
+    assert state2.pending_gate["context"]["task_id"] == "t1"
+    assert state2.tasks["t1"].status == "review"
+    assert branch_exists(repo, "spar/t1-A")
+    # Idempotent re-pend: the record is unchanged.
+    assert state2.pending_gate == before

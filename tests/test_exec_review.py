@@ -165,6 +165,75 @@ def _branch_files(env):
 
 
 # ---------------------------------------------------------------------------
+# start_with="implementer": the review-resume `extend` path re-enters the loop
+# at an implementer turn, skipping the reviewer block exactly once (no reviewer
+# verdict, no new remark, no round counted) so the still-open remarks go
+# straight to the implementer.
+# ---------------------------------------------------------------------------
+
+
+def test_start_with_implementer_skips_reviewer_once(env):
+    from spar.state import StateRemark
+
+    task = _task(files=("work.py",))
+    # Non-empty branch so a later reviewer turn has a real diff to read.
+    (env["worktree"] / "work.py").write_text("seed impl\n", encoding="utf-8")
+    _git(env["worktree"], "add", "-A")
+    _git(env["worktree"], "commit", "-qm", "t1: seed")
+
+    task_state = TaskState(task=task, status="review", branch=env["branch"])
+    task_state.pending_remarks.append(
+        StateRemark(remark_id=1, severity=Severity.MUST, author="reviewer", text="fix the bug")
+    )
+    task_state.next_remark_id = 2
+    exec_state = ExecState(
+        target_branch="feature",
+        integration_branch=env["integration_base"],
+        tasks={task.id: task_state},
+    )
+
+    impl = FakeAdapter(
+        "impl",
+        [Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "fix\n"})],
+        root=env["worktree"],
+    )
+    review = FakeAdapter("review", [Step(vblock("DONE"))], root=None)
+
+    # Record the interleaving of adapter calls to prove the implementer runs first.
+    seq: list[str] = []
+    _orig_impl, _orig_review = impl.run_turn, review.run_turn
+    impl.run_turn = lambda *a, **k: (seq.append("impl"), _orig_impl(*a, **k))[1]
+    review.run_turn = lambda *a, **k: (seq.append("review"), _orig_review(*a, **k))[1]
+
+    logs = []
+    run_cross_review(
+        task_state=task_state,
+        impl_adapter=impl,
+        review_adapter=review,
+        repo=env["repo"],
+        worktree=env["worktree"],
+        integration_base=env["integration_base"],
+        plan_path=env["plan_path"],
+        timeout_sec=30,
+        store=env["store"],
+        exec_state=exec_state,
+        log=logs.append,
+        start_with="implementer",
+    )
+
+    # The FIRST adapter call was the implementer's, and its prompt listed the
+    # still-open remark #1; the reviewer was called exactly once, after.
+    assert seq == ["impl", "review"]
+    assert "#1" in impl.calls[0]["prompt"]
+    assert "fix the bug" in impl.calls[0]["prompt"]
+    assert len(review.calls) == 1
+    # The loop converged: the MUST was resolved, none left pending blocking.
+    assert not [
+        r for r in task_state.pending_remarks if r.severity in (Severity.MUST, Severity.USER)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Scenario 1: MUST raised -> implementer resolves it -> DONE
 # ---------------------------------------------------------------------------
 

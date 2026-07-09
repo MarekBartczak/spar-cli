@@ -49,6 +49,7 @@ from spar.exec.gitops import GitError
 from spar.exec.review import ReviewAbort, _implementer_turn, run_cross_review
 from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
+from spar.gates import GateChoice, GateParseError, GatePending, validate_choice
 from spar.orchestrator import GateDecision
 from spar.state import LockHeld, StateError
 from spar.verdict import Severity
@@ -196,6 +197,13 @@ class Executor:
         self.store = store
         self.log = log
         self.auto_integration_merge = auto_integration_merge
+        # The live state object under mutation, so ``_guarded`` can persist a
+        # pending gate onto it before returning 10. Set at the top of a run.
+        self._state: ExecState | None = None
+        # ``--gate`` decision threaded into a resume, and the review-rounds
+        # decision the Executor owns at its consumption point (single-owner).
+        self._gate_choice: GateChoice | None = None
+        self._resume_decision: GateChoice | None = None
 
     # -- public entry points -------------------------------------------
 
@@ -219,8 +227,16 @@ class Executor:
             )
             return 130
 
-    def run_continue(self) -> int:
-        """Resume from ``exec.json`` + git reconciliation (§11.1)."""
+    def run_continue(self, gate_choice: GateChoice | None = None) -> int:
+        """Resume from ``exec.json`` + git reconciliation (§11.1).
+
+        ``gate_choice`` (the parsed ``--gate`` value, headless mode) is applied
+        to the persisted pending gate. It is validated PURELY against the
+        pending-gate record before any side effect: a mismatch returns 2 with
+        state untouched (see ``_run_continue``).
+        """
+        self._gate_choice = gate_choice
+        self._resume_decision = None
         try:
             with self.store.locked():
                 try:
@@ -269,6 +285,20 @@ class Executor:
     def _guarded(self, fn: Callable[[], int]) -> int:
         try:
             return fn()
+        except GatePending as exc:
+            # A user gate was reached in headless mode: persist the pending gate
+            # onto the live state (cleared only at consumption, never here) and
+            # exit 10 so the operator can resume with ``--gate``. Re-raising an
+            # already-pending gate (resume without ``--gate``) is idempotent:
+            # ``to_state()`` reconstructs the same record.
+            self._state.pending_gate = exc.to_state()
+            self.store.save(self._state)
+            self.log(
+                f"spar exec: gate '{exc.name}' pending (options: "
+                f"{', '.join(exc.options)}); resume with 'spar exec --continue "
+                "--gate <choice>'. (exit 10)"
+            )
+            return 10
         except _Abort as exc:
             return exc.code
         except ReviewAbort as exc:
@@ -315,6 +345,7 @@ class Executor:
             integration_branch="spar/integration",
             tasks={t.id: TaskState(task=t, status="pending") for t in self.tasks},
         )
+        self._state = state
         gitops.create_branch(self.repo, state.integration_branch, target_base_oid)
         self.store.save(state)
         return self._drive(state)
@@ -327,14 +358,55 @@ class Executor:
         except StateError as exc:
             self.log(f"spar exec: cannot load execution state: {exc}")
             return 3
+        self._state = state
 
         if state.phase == "done":
             self.log("spar exec: nothing to resume — execution already done.")
             return 0
 
+        gate_choice = self._gate_choice
+        # (2) Validate the --gate decision PURELY against the persisted pending
+        # gate, BEFORE any side effect (reconcile, git, preload). A mismatch —
+        # or a --gate with no gate pending — returns 2 with state untouched.
+        if gate_choice is not None:
+            try:
+                validate_choice(gate_choice, state.pending_gate)
+            except GateParseError as exc:
+                self.log(f"spar exec: --gate rejected: {exc}")
+                return 2
+
+        # (3) Reconcile against git with the pending gate STILL SET (a review
+        # task named by a pending review_rounds gate is preserved, not restarted).
         self._reconcile(state)
         self.store.save(state)
+
+        # (4) Stash the decision for consumption. ``final_merge`` is consumed by
+        # the gate object (preload + on_consume clears pending_gate at that
+        # point). ``review_rounds`` is owned by the Executor: it is consumed in
+        # ``_resume_review_task`` via ``self._resume_decision`` (single-owner).
+        # ``pending_gate`` is NOT cleared here.
+        if gate_choice is not None:
+            name = (state.pending_gate or {}).get("name")
+            if name == "final_merge":
+                self.gate.preloaded = (
+                    "final_merge",
+                    GateDecision(action=gate_choice.action),
+                )
+                self.gate.on_consume = self._make_gate_on_consume(state)
+            elif name == "review_rounds":
+                self._resume_decision = gate_choice
+
         return self._drive(state)
+
+    def _make_gate_on_consume(self, state: ExecState):
+        """Callback the headless gate runs the moment it consumes a preloaded
+        decision: clear the pending gate and persist (clearing at consumption)."""
+
+        def _on_consume() -> None:
+            state.pending_gate = None
+            self.store.save(state)
+
+        return _on_consume
 
     def _reconcile(self, state: ExecState) -> None:
         """Reconcile recorded FSM state against actual git (§11.1)."""
@@ -345,6 +417,20 @@ class Executor:
                 if self._branch_exists(branch):
                     self._reset_task_artifacts(branch, self._worktree_for(ts.task.side))
                     self.log(f"spar exec: recovery — deleted lingering branch {branch}.")
+                continue
+            # A task left in ``review`` by a pending ``review_rounds`` gate is
+            # NOT restarted: its branch/worktree and open ledger must survive so
+            # the resume can apply the operator's decision. (Crash-safety: the
+            # gate record survives until consumption, so a crash anywhere before
+            # the decision is applied reconciles identically — the operator
+            # re-issues the same ``--gate``.)
+            pg = state.pending_gate
+            if (
+                ts.status == "review"
+                and pg is not None
+                and pg.get("name") == "review_rounds"
+                and (pg.get("context") or {}).get("task_id") == ts.task.id
+            ):
                 continue
             if ts.status in ("implementing", "review", "testing"):
                 # A merged task branch is a STRICT ancestor of integration: it
@@ -395,6 +481,23 @@ class Executor:
 
     def _drive(self, state: ExecState) -> int:
         while True:
+            # A task left in ``review`` is only reachable via the pending-gate
+            # resume path (a normal reconcile restarts an interrupted review).
+            # Consume the operator's review-rounds decision before scheduling.
+            pending_review = next(
+                (
+                    ts
+                    for ts in sorted(
+                        state.tasks.values(),
+                        key=lambda t: _task_id_order(t.task.id),
+                    )
+                    if ts.status == "review"
+                ),
+                None,
+            )
+            if pending_review is not None:
+                self._resume_review_task(state, pending_review)
+                continue
             state.mark_ready()
             self.store.save(state)
             ts = state.next_task()
@@ -432,23 +535,40 @@ class Executor:
         gitops.add_worktree(self.repo, worktree, branch)
         self.log(f"spar exec: [{task.id}] branch {branch} + worktree {worktree}.")
 
-        # Failure context threaded into the NEXT implement turn on a test-fail
-        # re-entry (§6): without it the re-implement prompt would be identical
-        # and the testing→implementing loop could never converge.
-        test_warning: str | None = None
         try:
-            while True:
-                ts.status = "implementing"
-                self.store.save(state)
-                impl_adapter = self.make_adapter(task.side, worktree, task.model)
-                # The reviewer only reads the diff embedded in its prompt; it
-                # must never be able to write to the main repo checkout.
-                review_adapter = self.make_adapter(
-                    reviewer, self.repo, task.review_model, readonly=True
-                )
+            # Initial code-creating implement turn BEFORE the first reviewer
+            # turn (the reviewer must have a non-empty diff to read).
+            ts.status = "implementing"
+            self.store.save(state)
+            impl_adapter = self.make_adapter(task.side, worktree, task.model)
+            # The reviewer only reads the diff embedded in its prompt; it must
+            # never be able to write to the main repo checkout.
+            review_adapter = self.make_adapter(
+                reviewer, self.repo, task.review_model, readonly=True
+            )
+            _implementer_turn(
+                task_state=ts,
+                impl_adapter=impl_adapter,
+                worktree=worktree,
+                plan_path=self.plan_path,
+                exec_state=state,
+                store=self.store,
+                log=self.log,
+                timeout_sec=self.execution.turn_timeout_sec,
+                warning=None,
+            )
 
-                # Initial code-creating implement turn BEFORE the first reviewer
-                # turn (the reviewer must have a non-empty diff to read).
+            # Empty-implementation guard (§6/§8): if the initial turn created
+            # nothing on the task branch, review/test would run on an empty
+            # diff — the reviewer can emit DONE on nothing and the per-Task
+            # test then fails, spinning forever. Retry the turn ONCE with a
+            # stern warning; if it is STILL empty, abort this task loudly at
+            # the source rather than proceeding to review/test on nothing.
+            if self._task_branch_empty(branch, worktree, state.integration_branch):
+                self.log(
+                    f"spar exec: [{task.id}] initial implement produced no files; "
+                    "retrying the turn once with a warning."
+                )
                 _implementer_turn(
                     task_state=ts,
                     impl_adapter=impl_adapter,
@@ -458,103 +578,136 @@ class Executor:
                     store=self.store,
                     log=self.log,
                     timeout_sec=self.execution.turn_timeout_sec,
-                    warning=test_warning,
+                    warning=(
+                        "Your previous turn created NO files on disk. You MUST "
+                        "create/edit the file(s) in your scope now, on disk, with real "
+                        "content per the plan, using your file-editing tools. Do not "
+                        "merely describe the change."
+                    ),
                 )
-
-                # Empty-implementation guard (§6/§8): if the initial turn created
-                # nothing on the task branch, review/test would run on an empty
-                # diff — the reviewer can emit DONE on nothing and the per-Task
-                # test then fails, spinning forever. Retry the turn ONCE with a
-                # stern warning; if it is STILL empty, abort this task loudly at
-                # the source rather than proceeding to review/test on nothing.
-                if self._task_branch_empty(branch, worktree, state.integration_branch):
-                    self.log(
-                        f"spar exec: [{task.id}] initial implement produced no files; "
-                        "retrying the turn once with a warning."
+                if self._task_branch_empty(
+                    branch, worktree, state.integration_branch
+                ):
+                    raise ReviewAbort(
+                        f"task {task.id}: implementer created no files"
                     )
-                    _implementer_turn(
-                        task_state=ts,
-                        impl_adapter=impl_adapter,
-                        worktree=worktree,
-                        plan_path=self.plan_path,
-                        exec_state=state,
-                        store=self.store,
-                        log=self.log,
-                        timeout_sec=self.execution.turn_timeout_sec,
-                        warning=(
-                            "Your previous turn created NO files on disk. You MUST "
-                            "create/edit the file(s) in your scope now, on disk, with real "
-                            "content per the plan, using your file-editing tools. Do not "
-                            "merely describe the change."
-                        ),
-                    )
-                    if self._task_branch_empty(
-                        branch, worktree, state.integration_branch
-                    ):
-                        raise ReviewAbort(
-                            f"task {task.id}: implementer created no files"
-                        )
 
-                ts.status = "review"
-                self.store.save(state)
-
-                # Review context (A2). Foreign files: file scopes (globs) of
-                # other, not-yet-merged tasks — legitimately absent on the
-                # task branch. Merged files: ACTUAL paths already merged into
-                # integration — present on the branch though invisible in the
-                # reviewer's diff. Together they stop the reviewer from
-                # mistaking either for a missing-file defect. Sequential
-                # execution: statuses cannot change while this task runs, so
-                # compute once.
-                foreign_files = tuple(
-                    (other.task.id, other.task.files)
-                    for other in sorted(
-                        state.tasks.values(), key=lambda ts_: _task_id_order(ts_.task.id)
-                    )
-                    if other.task.id != task.id and other.status != "merged"
-                )
-                # present_files, not changed_files: a file DELETED by an
-                # earlier task must not be vouched for as present — deletion
-                # regression, review round 2.
-                merged_files = gitops.present_files(
+            ts.status = "review"
+            self.store.save(state)
+            run_cross_review(
+                task_state=ts,
+                impl_adapter=impl_adapter,
+                review_adapter=review_adapter,
+                repo=self.repo,
+                worktree=worktree,
+                integration_base=state.integration_branch,
+                plan_path=self.plan_path,
+                timeout_sec=self.execution.turn_timeout_sec,
+                store=self.store,
+                exec_state=state,
+                log=self.log,
+                max_rounds=self.execution.max_review_rounds,
+                rounds_gate=self._review_rounds_gate(state),
+                # Review context (A2). Foreign files: file scopes of other,
+                # not-yet-merged tasks — legitimately absent on the task branch.
+                # Merged files: ACTUAL paths already merged into integration —
+                # present on the branch though invisible in the reviewer's diff.
+                foreign_files=self._foreign_files(state, task),
+                merged_files=gitops.present_files(
                     self.repo, state.target_base_oid, state.integration_branch
-                )
+                ),
+            )
 
-                run_cross_review(
-                    task_state=ts,
-                    impl_adapter=impl_adapter,
-                    review_adapter=review_adapter,
-                    repo=self.repo,
-                    worktree=worktree,
-                    integration_base=state.integration_branch,
-                    plan_path=self.plan_path,
-                    timeout_sec=self.execution.turn_timeout_sec,
-                    store=self.store,
-                    exec_state=state,
-                    log=self.log,
-                    max_rounds=self.execution.max_review_rounds,
-                    rounds_gate=self._review_rounds_gate(state),
-                    foreign_files=foreign_files,
-                    merged_files=merged_files,
-                )
-
-                ts.status = "testing"
-                self.store.save(state)
-                passed, output = self._run_test_capture(
-                    self._task_test_cmd(task), worktree
-                )
-                if passed:
-                    break
-                test_warning = (
-                    "The per-task test command "
-                    f"(`{self._task_test_cmd(task)}`) failed. You MUST change the "
-                    "implementation so the tests pass. Captured failing output:\n"
-                    f"{output}"
-                )
-                self.log(f"spar exec: [{task.id}] per-task test failed; re-implementing.")
+            # Per-task test → merge, shared with the review-resume path.
+            self._test_and_merge_task(state, ts, branch, worktree)
         except BaseException:
             self.store.save(state)
             raise
+
+    def _foreign_files(
+        self, state: ExecState, task: Task
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """File scopes of other, not-yet-merged tasks (A2 review context).
+
+        Sequential execution: statuses cannot change while a task runs, so this
+        is computed fresh at each review entry rather than cached.
+        """
+        return tuple(
+            (other.task.id, other.task.files)
+            for other in sorted(
+                state.tasks.values(), key=lambda ts_: _task_id_order(ts_.task.id)
+            )
+            if other.task.id != task.id and other.status != "merged"
+        )
+
+    def _test_and_merge_task(
+        self, state: ExecState, ts: TaskState, branch: str, worktree: Path
+    ) -> None:
+        """Per-task test loop → merge into integration → cleanup.
+
+        On a per-task test failure the captured output is threaded back into a
+        fresh implement+review cycle (§6) until the test passes, then the branch
+        is merged no-ff into integration and its artifacts are swept. Shared by
+        the normal task path (:meth:`_run_task`) and the review-resume path
+        (:meth:`_resume_review_task`) so the two cannot drift.
+        """
+        task = ts.task
+        reviewer = self._other_side(task.side)
+        while True:
+            ts.status = "testing"
+            self.store.save(state)
+            passed, output = self._run_test_capture(
+                self._task_test_cmd(task), worktree
+            )
+            if passed:
+                break
+            self.log(
+                f"spar exec: [{task.id}] per-task test failed; re-implementing."
+            )
+            warning = (
+                "The per-task test command "
+                f"(`{self._task_test_cmd(task)}`) failed. You MUST change the "
+                "implementation so the tests pass. Captured failing output:\n"
+                f"{output}"
+            )
+            ts.status = "implementing"
+            self.store.save(state)
+            impl_adapter = self.make_adapter(task.side, worktree, task.model)
+            review_adapter = self.make_adapter(
+                reviewer, self.repo, task.review_model, readonly=True
+            )
+            _implementer_turn(
+                task_state=ts,
+                impl_adapter=impl_adapter,
+                worktree=worktree,
+                plan_path=self.plan_path,
+                exec_state=state,
+                store=self.store,
+                log=self.log,
+                timeout_sec=self.execution.turn_timeout_sec,
+                warning=warning,
+            )
+            ts.status = "review"
+            self.store.save(state)
+            run_cross_review(
+                task_state=ts,
+                impl_adapter=impl_adapter,
+                review_adapter=review_adapter,
+                repo=self.repo,
+                worktree=worktree,
+                integration_base=state.integration_branch,
+                plan_path=self.plan_path,
+                timeout_sec=self.execution.turn_timeout_sec,
+                store=self.store,
+                exec_state=state,
+                log=self.log,
+                max_rounds=self.execution.max_review_rounds,
+                rounds_gate=self._review_rounds_gate(state),
+                foreign_files=self._foreign_files(state, task),
+                merged_files=gitops.present_files(
+                    self.repo, state.target_base_oid, state.integration_branch
+                ),
+            )
 
         # Merge the task branch into integration.
         gitops.checkout(self.repo, state.integration_branch)
@@ -570,6 +723,90 @@ class Executor:
         # Idempotent cleanup, tolerant of an already-removed worktree/branch.
         self._reset_task_artifacts(branch, worktree)
         self.log(f"spar exec: [{task.id}] merged into integration.")
+
+    def _resume_review_task(self, state: ExecState, ts: TaskState) -> None:
+        """Executor-owned consumption point for a ``review_rounds`` decision.
+
+        Applies ``self._resume_decision`` to a task left in ``review`` by a
+        pending gate: ``accept`` skips review and proceeds to the per-task
+        test/merge tail; ``extend`` re-enters the review loop with a FRESH
+        budget starting at an implementer turn (``start_with="implementer"``);
+        ``abort`` aborts (exit 5). Resumed WITHOUT ``--gate`` (no decision)
+        re-pends the same gate (exit 10, idempotent). ``pending_gate`` is
+        cleared here — at consumption — never before.
+        """
+        task = ts.task
+        branch = ts.branch or self._task_branch(task)
+        worktree = self._worktree_for(task.side)
+        reviewer = self._other_side(task.side)
+
+        decision = self._resume_decision
+        if decision is None:
+            # Resumed without --gate while a review gate pends: re-pend it
+            # unchanged (branch/worktree/status all preserved). ``_guarded``
+            # re-persists the identical record and exits 10.
+            record = state.pending_gate or {}
+            raise GatePending(
+                record.get("name", "review_rounds"),
+                record.get("options", ["accept", "extend", "abort"]),
+                record.get("context", {}),
+            )
+
+        # Re-create the worktree from the surviving branch if it is gone.
+        if not worktree.exists():
+            gitops.add_worktree(self.repo, worktree, branch)
+
+        if decision.action == "abort":
+            state.pending_gate = None
+            self.store.save(state)
+            self.log(
+                f"spar exec: aborted by user at the review-rounds gate "
+                f"(task {task.id})."
+            )
+            raise _Abort(5)
+
+        # accept | extend: clear the gate AT consumption, then proceed.
+        state.pending_gate = None
+        self.store.save(state)
+        self._resume_decision = None
+
+        if decision.action == "extend":
+            n = decision.extra_rounds
+            self.log(
+                f"spar exec: [{task.id}] review-rounds extended by {n} round(s) "
+                "on resume."
+            )
+            impl_adapter = self.make_adapter(task.side, worktree, task.model)
+            review_adapter = self.make_adapter(
+                reviewer, self.repo, task.review_model, readonly=True
+            )
+            run_cross_review(
+                task_state=ts,
+                impl_adapter=impl_adapter,
+                review_adapter=review_adapter,
+                repo=self.repo,
+                worktree=worktree,
+                integration_base=state.integration_branch,
+                plan_path=self.plan_path,
+                timeout_sec=self.execution.turn_timeout_sec,
+                store=self.store,
+                exec_state=state,
+                log=self.log,
+                max_rounds=n,
+                start_with="implementer",
+                rounds_gate=self._review_rounds_gate(state),
+                foreign_files=self._foreign_files(state, task),
+                merged_files=gitops.present_files(
+                    self.repo, state.target_base_oid, state.integration_branch
+                ),
+            )
+        else:
+            self.log(
+                f"spar exec: [{task.id}] review accepted as-is on resume; "
+                "proceeding to the per-task test."
+            )
+
+        self._test_and_merge_task(state, ts, branch, worktree)
 
     def _review_rounds_gate(self, state: ExecState):
         """Adapter between ``run_cross_review``'s ``rounds_gate`` callback and
