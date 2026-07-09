@@ -423,6 +423,26 @@ def test_merge_abort_is_noop_without_merge(repo):
     assert gitops.is_clean(repo)
 
 
+def test_gate_abort_restores_target_checkout(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "x\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    # user aborts at the final-merge gate
+    gate = FakeGate([GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 5
+    # the repo must NOT be left on spar/integration
+    assert gitops.current_branch(repo) == "master"
+    # integration branch still exists (nothing was merged or deleted)
+    assert branch_exists(repo, "spar/integration")
+
+
 # ---------------------------------------------------------------------------
 # Scenario 3: final test fails once -> a t<next> fix task is generated and run
 # -> re-run passes -> merged, exit 0.

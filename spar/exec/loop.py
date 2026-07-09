@@ -203,7 +203,10 @@ class Executor:
         """Start a fresh Execution. Holds the single-instance lock throughout."""
         try:
             with self.store.locked():
-                return self._guarded(self._run_fresh)
+                try:
+                    return self._guarded(self._run_fresh)
+                finally:
+                    self._restore_target_checkout()
         except LockHeld as exc:
             self.log(f"spar exec: another instance holds the lock ({exc}).")
             return 3
@@ -220,7 +223,10 @@ class Executor:
         """Resume from ``exec.json`` + git reconciliation (§11.1)."""
         try:
             with self.store.locked():
-                return self._guarded(self._run_continue)
+                try:
+                    return self._guarded(self._run_continue)
+                finally:
+                    self._restore_target_checkout()
         except LockHeld as exc:
             self.log(f"spar exec: another instance holds the lock ({exc}).")
             return 3
@@ -230,6 +236,30 @@ class Executor:
                 "'spar exec --continue'."
             )
             return 130
+
+    def _restore_target_checkout(self) -> None:
+        """Best-effort: leave the user's repo on the target branch.
+
+        The final Test phase (and each task merge) checks out the integration
+        branch in the user's repo; an abort or error can otherwise strand the
+        checkout there. Only acts when it is unambiguously safe: state loads,
+        the current branch IS the integration branch, no merge is in progress,
+        and the tree is clean. Never raises — the real exit code always wins.
+        """
+        try:
+            state = self.store.load()
+            if (
+                gitops.current_branch(self.repo) == state.integration_branch
+                and not gitops.merge_in_progress(self.repo)
+                and gitops.is_clean(self.repo)
+                and self._branch_exists(state.target_branch)
+            ):
+                gitops.checkout(self.repo, state.target_branch)
+                self.log(
+                    f"spar exec: restored checkout to '{state.target_branch}'."
+                )
+        except Exception:
+            pass
 
     def _guarded(self, fn: Callable[[], int]) -> int:
         try:
