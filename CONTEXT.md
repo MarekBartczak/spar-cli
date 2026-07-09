@@ -59,6 +59,16 @@ The file scope + dependencies make the Task List **parallelism-aware**:
 concurrent Tasks are planned to be file-disjoint so their merges into the
 Integration branch don't conflict, and dependent Tasks are serialized by deps.
 
+Two planning invariants follow from Task-branch isolation (a Task's branch
+contains only its merged deps):
+- **Cross-reference rule**: if a Task's file content references files owned by
+  another Task, it must depend on that Task (a build-config/scaffold Task that
+  wires the whole project together therefore typically comes last).
+- **Per-Task test satisfiability**: a Task's per-Task test must be runnable on
+  the Task's own branch — judged against only the Task's deps, not the finished
+  project (partial states get compile/lint-level checks; the full suite belongs
+  to the final Test phase).
+
 ## Task List
 The breakdown of the Plan into Tasks, agreed by Consensus during the Debate
 phase (proposed by one Side, accepted/amended by the other). Machine-parsable —
@@ -86,6 +96,12 @@ implements, codex reviews, and vice versa. Asymmetric: the reviewer only judges
 edits the code. The implementer addresses remarks, the reviewer re-reviews, and
 the loop ends when the reviewer emits DONE (no blocking remarks). This reuses
 the verdict protocol but with a single editing Side, unlike the symmetric Debate.
+
+**Foreign files**: the file scopes of other, not-yet-merged Tasks. From the
+reviewer's seat these files may be legitimately absent (they arrive with later
+merges), so their absence is never a defect — the reviewer judges only whether
+the reviewed Task's references to them match the planned names/paths. A
+reference to a file that is neither in the diff nor foreign IS a defect.
 
 ## Integration branch
 The single accumulator branch (`spar/integration`), created from the user's
