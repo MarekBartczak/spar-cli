@@ -191,6 +191,8 @@ def run_cross_review(
     log=print,
     max_rounds: int = 0,
     rounds_gate=None,
+    foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    merged_files: tuple[str, ...] = (),
 ) -> None:
     """Drive the asymmetric cross-review loop until the reviewer emits DONE.
 
@@ -215,7 +217,11 @@ def run_cross_review(
     while True:
         # -- reviewer turn ------------------------------------------------
         diff_text = gitops.diff(repo, integration_base, task_state.branch or integration_base)
-        prompt = build_review_prompt(task, diff_text, list(task_state.pending_remarks))
+        prompt = build_review_prompt(
+            task, diff_text, list(task_state.pending_remarks),
+            foreign_files=foreign_files,
+            merged_files=merged_files,
+        )
         result = _invoke(
             role="review",
             adapter=review_adapter,

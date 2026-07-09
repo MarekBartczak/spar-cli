@@ -437,6 +437,27 @@ class Executor:
 
                 ts.status = "review"
                 self.store.save(state)
+
+                # Review context (A2). Foreign files: file scopes (globs) of
+                # other, not-yet-merged tasks — legitimately absent on the
+                # task branch. Merged files: ACTUAL paths already merged into
+                # integration — present on the branch though invisible in the
+                # reviewer's diff. Together they stop the reviewer from
+                # mistaking either for a missing-file defect. Sequential
+                # execution: statuses cannot change while this task runs, so
+                # compute once.
+                foreign_files = tuple(
+                    (other.task.id, other.task.files)
+                    for other in sorted(state.tasks.values(), key=lambda t: t.task.id)
+                    if other.task.id != task.id and other.status != "merged"
+                )
+                # present_files, not changed_files: a file DELETED by an
+                # earlier task must not be vouched for as present — deletion
+                # regression, review round 2.
+                merged_files = gitops.present_files(
+                    self.repo, state.target_base_oid, state.integration_branch
+                )
+
                 run_cross_review(
                     task_state=ts,
                     impl_adapter=impl_adapter,
@@ -451,6 +472,8 @@ class Executor:
                     log=self.log,
                     max_rounds=self.execution.max_review_rounds,
                     rounds_gate=self._review_rounds_gate(state),
+                    foreign_files=foreign_files,
+                    merged_files=merged_files,
                 )
 
                 ts.status = "testing"

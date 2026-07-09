@@ -11,7 +11,9 @@ from spar.exec.gitops import (
     is_ancestor,
     is_clean,
     merge_no_ff,
+    present_files,
     remove_worktree,
+    rev_parse,
 )
 
 
@@ -58,3 +60,25 @@ def test_is_clean(repo):
     assert is_clean(repo)
     (repo / "seed.txt").write_text("y\n")
     assert not is_clean(repo)
+
+
+def test_present_files_excludes_deletions(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _run(repo, "init", "-q", "-b", "master")
+    _run(repo, "config", "user.email", "t@t")
+    _run(repo, "config", "user.name", "t")
+    (repo / "kept.txt").write_text("x\n", encoding="utf-8")
+    (repo / "doomed.txt").write_text("y\n", encoding="utf-8")
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-qm", "base")
+    base = rev_parse(repo, "HEAD")
+
+    (repo / "new.txt").write_text("z\n", encoding="utf-8")
+    (repo / "doomed.txt").unlink()
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-qm", "change")
+
+    # changed_files reports the deletion; present_files must not
+    assert "doomed.txt" in changed_files(repo, base, "HEAD")
+    assert present_files(repo, base, "HEAD") == ("new.txt",)

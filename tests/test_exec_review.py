@@ -674,3 +674,16 @@ def test_impl_own_remarks_not_added_to_ledger(env):
         rr.remark.text for rr in task_state.resolved_remarks
     ]
     assert not any("impl's own" in t for t in all_texts)
+
+
+def test_foreign_and_merged_files_reach_the_review_prompt(env):
+    task = _task(files=("work.py",))
+    impl_steps = []
+    review_steps = [Step(vblock("DONE"))]
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps,
+        foreign_files=(("t9", ("src/*.cpp",)),),
+        merged_files=("lib/util.py",),
+    )
+    assert "t9: src/*.cpp" in review.calls[0]["prompt"]
+    assert "lib/util.py" in review.calls[0]["prompt"]

@@ -88,6 +88,8 @@ def build_review_prompt(
     task: Task,
     diff_text: str,
     open_remarks: list[StateRemark],
+    foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    merged_files: tuple[str, ...] = (),
 ) -> str:
     """Build a prompt for the reviewer (review phase).
 
@@ -100,6 +102,10 @@ def build_review_prompt(
         task: The Task being reviewed
         diff_text: The diff showing changes made
         open_remarks: List of open StateRemark to consider
+        foreign_files: ``(task_id, file_globs)`` pairs for other, not-yet-merged
+            tasks' file scopes — legitimately absent on this branch.
+        merged_files: Actual paths already merged into integration (and still
+            present there) — invisible in ``diff_text`` but present on disk.
 
     Returns:
         A formatted prompt string
@@ -111,6 +117,32 @@ def build_review_prompt(
             remarks_lines.append(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
         remarks_section = "\n" + "\n".join(remarks_lines)
 
+    context_section = ""
+    context_lines: list[str] = []
+    if foreign_files:
+        context_lines.append(
+            "Files owned by other, not-yet-merged tasks (they arrive with "
+            "later merges and may be ABSENT on this branch): do NOT require "
+            "this task to create them — their absence is NOT a defect by "
+            "itself; check that references to them match these planned "
+            "names/paths. HOWEVER, if this task's own files HARD-reference a "
+            "foreign file (import/include/link/build-source) so that this "
+            "task cannot build or pass its test on THIS branch, raise a "
+            "[MUST] naming the missing dependency — that is a plan-ordering "
+            "defect (the task should have depended on the owner)."
+        )
+        for task_id, globs in foreign_files:
+            context_lines.append(f"  {task_id}: {', '.join(globs)}")
+    if merged_files:
+        context_lines.append(
+            "Files already merged from earlier tasks (present on this branch "
+            "even though they do not appear in the diff above):"
+        )
+        for path in merged_files:
+            context_lines.append(f"  {path}")
+    if context_lines:
+        context_section = "\n" + "\n".join(context_lines) + "\n"
+
     protocol = _REVIEW_PROTOCOL_BLOCK
 
     return f"""\
@@ -119,7 +151,8 @@ Description: {task.description}
 
 Review the following diff (read-only — you must NOT edit code):
 
-{diff_text}{remarks_section}
+{diff_text}
+{context_section}{remarks_section}
 
 {protocol}\
 """
@@ -161,6 +194,11 @@ remarks:
 Protocol for review:
 - Do not edit the code — this is read-only. You are reviewing only, not implementing.
 - In `remarks:` raise new concerns, tagged `[MUST]` (blocking) or `[NICE]` (optional).
+- Treat a reference to a MISSING file as a defect only if it matches none of
+  the diff, the context lists above (if any), and a file already present in the repository.
+  This does NOT override the hard-reference rule of the foreign-files section
+  (a plan-ordering defect stays a [MUST] even though the file matches the
+  foreign list).
 - Use `status: DONE` only if you have NO blocking `[MUST]` remarks remaining.
 - Use `status: CONTINUE` if you have open `[MUST]`/`[NICE]` remarks to raise.
 """

@@ -1063,3 +1063,37 @@ def test_console_review_rounds_gate_accept_extend_abort():
     decision, printed = drive(["?", "a"])
     assert decision.action == "accept"
     assert any("'a', 'e' or 'x'" in p for p in printed)
+
+
+def test_reviewer_prompt_lists_unmerged_tasks_files_only(repo, tmp_path):
+    # While t1 is under review, t2 (pending) is foreign; after t1 merges,
+    # t2's review must NOT list t1 (already merged).
+    tasks = [
+        make_task("t1", "A", ["work1.py"]),
+        make_task("t2", "B", ["work2.py"], deps=["t1"], model="mb", review="ma"),
+    ]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work1.py": "print(1)\n"}),  # impl t1
+            Step(vblock("DONE")),  # review t2
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review t1
+            Step(vblock("CONTINUE"), edits={"work2.py": "print(2)\n"}),  # impl t2
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0
+    # B's first call reviewed t1: t2 was pending -> listed as foreign;
+    # nothing merged yet -> no merged-files section
+    assert "t2: work2.py" in adapters["B"].calls[0]["prompt"]
+    assert "already merged from earlier tasks" not in adapters["B"].calls[0]["prompt"]
+    # A's second call reviewed t2: t1 already merged -> NOT foreign, but its
+    # actual file appears in the merged-files section
+    assert "t1: work1.py" not in adapters["A"].calls[1]["prompt"]
+    assert "work1.py" in adapters["A"].calls[1]["prompt"]

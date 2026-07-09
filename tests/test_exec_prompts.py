@@ -101,6 +101,38 @@ def test_impl_prompt_no_remarks_leads_with_imperative_not_review():
     assert "do not emit done" in low
 
 
+def test_review_prompt_lists_foreign_and_merged_files():
+    p = build_review_prompt(
+        T,
+        "diff --git a/CMakeLists.txt ...",
+        [],
+        foreign_files=(("t3", ("src/main.cpp",)), ("t4", ("tests/*.cpp",))),
+        merged_files=("src/factorial.hpp", "src/factorial.cpp"),
+    )
+    # the foreign section names each scope with its owning task
+    assert "Files owned by other, not-yet-merged tasks" in p
+    assert "t3: src/main.cpp" in p
+    assert "t4: tests/*.cpp" in p
+    assert "their absence is NOT a defect by itself" in p
+    # ...but a hard reference breaking THIS task's isolation is flagged
+    assert "HARD-reference" in p
+    assert "plan-ordering defect" in p
+    # the merged section lists real paths present on the branch
+    assert "Files already merged from earlier tasks" in p
+    assert "src/factorial.hpp" in p
+    # the defect rule accounts for diff, both lists, AND pre-existing files
+    assert "already present in the repository" in p
+
+
+def test_review_prompt_omits_context_sections_when_empty():
+    p = build_review_prompt(T, "diff --git a/x ...", [])
+    assert "not-yet-merged tasks" not in p
+    assert "already merged from earlier tasks" not in p
+    # ...but the missing-file protocol rule is PERMANENT: a standalone first
+    # task must not draw MUSTs about files that pre-date the run
+    assert "already present in the repository" in p
+
+
 def test_impl_prompt_with_remarks_resolves_ids_and_still_forces_edit():
     # Open remarks -> must instruct resolving each id AND still making the real
     # edit on disk; still forbid remarks:/DONE.

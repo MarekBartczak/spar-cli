@@ -109,3 +109,19 @@ def changed_files(repo: Path, base: str, ref: str) -> tuple[str, ...]:
     result = _run_ok(repo, "-c", "core.quotePath=false", "diff", "--name-only", f"{base}..{ref}")
     lines = result.stdout.strip("\n").split("\n")
     return tuple(line for line in lines if line)
+
+
+def present_files(repo: Path, base: str, ref: str) -> tuple[str, ...]:
+    """Files changed between ``base`` and ``ref`` that still EXIST at ``ref``.
+
+    Like :func:`changed_files` but with ``--diff-filter=d``: a path deleted
+    between the two refs is excluded, so callers can treat the result as
+    "files present on ``ref``" (the review-context merged-files list must
+    never vouch for a file a prior task deleted).
+    """
+    result = _run_ok(
+        repo, "-c", "core.quotePath=false", "diff", "--name-only",
+        "--diff-filter=d", f"{base}..{ref}",
+    )
+    lines = result.stdout.strip("\n").split("\n")
+    return tuple(line for line in lines if line)
