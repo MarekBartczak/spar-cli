@@ -43,10 +43,30 @@ def repo_state(project_dir: "str | Path") -> str:
     return "ok"
 
 
+def _ensure_spar_gitignored(project_dir: "str | Path") -> None:
+    """Make sure ``.spar/`` is gitignored before the initial commit.
+
+    spar's runtime state (live.log, session.json, transcripts) lives in
+    ``.spar/`` and mutates constantly; left untracked it dirties the work
+    tree and ``spar exec`` then refuses to start ("target not clean").
+    Appends to an existing .gitignore, creates one otherwise; no-op when
+    ``.spar`` is already covered.
+    """
+    from pathlib import Path as _P
+
+    gi = _P(project_dir) / ".gitignore"
+    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    if any(line.strip().rstrip("/") == ".spar" for line in existing.splitlines()):
+        return
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    gi.write_text(existing + prefix + ".spar/\n", encoding="utf-8")
+
+
 def create_repo(project_dir: "str | Path") -> None:
     """Initialize a fresh repo in ``project_dir`` with an initial commit."""
     _run(project_dir, "init", "-b", "master")
     _ensure_commit_identity(project_dir)
+    _ensure_spar_gitignored(project_dir)
     _run(project_dir, "add", "-A")
     _run(project_dir, "commit", "--allow-empty", "-m", _INITIAL_COMMIT_MESSAGE)
 
@@ -68,5 +88,6 @@ def _ensure_commit_identity(project_dir: "str | Path") -> None:
 def create_initial_commit(project_dir: "str | Path") -> None:
     """Commit whatever is staged/untracked in an existing headless repo."""
     _ensure_commit_identity(project_dir)
+    _ensure_spar_gitignored(project_dir)
     _run(project_dir, "add", "-A")
     _run(project_dir, "commit", "--allow-empty", "-m", _INITIAL_COMMIT_MESSAGE)

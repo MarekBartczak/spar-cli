@@ -364,3 +364,26 @@ def test_repo_check_precedes_the_new_debate_dialog(tmp_path, monkeypatch):
         assert opened == []  # form never constructed
     finally:
         win.close()
+
+
+def test_create_repo_gitignores_spar_dir(tmp_path):
+    # Fresh-project E2E: .spar/ runtime state must be ignored from the very
+    # first commit, or exec later refuses on a "dirty" target.
+    from spar.gui import repo as repo_mod
+
+    (tmp_path / ".spar").mkdir()
+    (tmp_path / ".spar" / "config.toml").write_text("# cfg\n", encoding="utf-8")
+    repo_mod.create_repo(tmp_path)
+
+    gi = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".spar/" in gi
+    import subprocess
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files"], capture_output=True, text=True
+    ).stdout
+    assert ".spar/config.toml" not in tracked
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path), "status", "--porcelain"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert status == ""  # clean tree despite .spar content
