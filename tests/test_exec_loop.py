@@ -120,8 +120,12 @@ class FakeGate:
         self.calls.append(summary)
         return self.decisions.pop(0)
 
-    def review_rounds_exhausted_gate(self, task_id, rounds, pending):
-        self.review_calls.append((task_id, rounds, list(pending)))
+    def review_rounds_exhausted_gate(
+        self, task_id, rounds, pending, *, allow_fix=False, command=None
+    ):
+        self.review_calls.append(
+            (task_id, rounds, list(pending), allow_fix, command)
+        )
         return self.review_decisions.pop(0)
 
 
@@ -1341,6 +1345,157 @@ def test_stalled_per_task_test_headless_pends_review_rounds(repo, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Broken test COMMAND (exit 126/127): escalate to the user gate IMMEDIATELY,
+# without burning an implementer turn. The gate also offers ``fix:<command>``
+# to replace the broken command and re-run.
+# ---------------------------------------------------------------------------
+
+
+_BROKEN_CMD = "spar_definitely_not_a_command_zzz --nope"
+
+
+def test_broken_command_escalates_immediately_without_reimplementing(repo, tmp_path):
+    # test command exits 127 (command not found). The gate must fire on the
+    # FIRST test run — BEFORE any re-implement turn — and the implementer must
+    # NOT be invoked a second time.
+    tasks = [make_task("t1", "A", ["work.py"], test=_BROKEN_CMD)]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],  # initial impl only
+        "B": [Step(vblock("DONE"))],  # review only
+    }
+    gate = FakeGate(
+        [GateDecision("accept")], review_decisions=[GateDecision("accept")]
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    # No re-implement turn: side A's adapter ran exactly once (initial impl).
+    assert len(adapters["A"].calls) == 1, f"A calls={adapters['A'].calls}"
+    # Gate fired exactly once, as a fixable test escalation naming the command.
+    assert len(gate.review_calls) == 1
+    task_id, _rounds, _pending, allow_fix, command = gate.review_calls[0]
+    assert task_id == "t1"
+    assert allow_fix is True
+    assert command == _BROKEN_CMD
+    assert any(
+        "exit 127" in ln and _BROKEN_CMD in ln for ln in logs
+    ), f"missing broken-command log; logs={logs}"
+    assert store.load().tasks["t1"].status == "merged"
+
+
+def test_broken_command_fix_replaces_and_reruns(repo, tmp_path):
+    # 127 → gate → fix:"true" → re-run passes → merge. Still no re-implement.
+    tasks = [make_task("t1", "A", ["work.py"], test=_BROKEN_CMD)]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate(
+        [GateDecision("accept")],
+        review_decisions=[GateDecision(action="fix", command="true")],
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    assert len(adapters["A"].calls) == 1  # never re-implemented
+    state = store.load()
+    assert state.tasks["t1"].status == "merged"
+    # The per-task test command was persisted as the corrected one.
+    assert state.tasks["t1"].task.test == "true"
+    assert any("command replaced" in ln for ln in logs), f"logs={logs}"
+
+
+def test_fix_accepted_at_stalled_test_gate(repo, tmp_path):
+    # An ORDINARY failing test (exit 1, not 126/127) stalls after 2 no-change
+    # iterations; the user then realizes the command is wrong and supplies
+    # fix:"true" at the SAME gate → re-run passes → merge.
+    tasks = [make_task("t1", "A", ["work.py"], test="false")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [Step(vblock("DONE")), Step(vblock("DONE")), Step(vblock("DONE"))],
+    }
+    gate = FakeGate(
+        [GateDecision("accept")],
+        review_decisions=[GateDecision(action="fix", command="true")],
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    state = store.load()
+    assert state.tasks["t1"].status == "merged"
+    assert state.tasks["t1"].task.test == "true"
+    # allow_fix was offered at the stalled-test gate too.
+    assert gate.review_calls and gate.review_calls[0][3] is True
+
+
+def test_headless_broken_command_pends_with_fix_option(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"], test=_BROKEN_CMD)]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 10, f"logs={logs}"
+    assert len(adapters["A"].calls) == 1  # no re-implement before the pend
+    pg = store.load().pending_gate
+    assert pg["name"] == "review_rounds"
+    assert "fix" in pg["options"]
+    assert pg["context"]["command"] == _BROKEN_CMD
+    # the broken command + exit code rode into the context for the operator
+    assert any(
+        "exit 127" in r["text"] and _BROKEN_CMD in r["text"]
+        for r in pg["context"]["open_remarks"]
+    ), f"ctx={pg['context']}"
+
+
+def test_headless_broken_command_resume_fix_converges(repo, tmp_path):
+    # Pend on the broken command, then resume with --gate fix:<good command>.
+    tasks = [make_task("t1", "A", ["work.py"], test=_BROKEN_CMD)]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    assert ex.run() == 10
+
+    # Resume: supply the corrected command. No adapter turns needed — the fix
+    # merely re-runs the (now good) test, which passes, and the single task
+    # merges, advancing to the (still headless) final-merge pend.
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(
+        gate_choice=GateChoice(action="fix", command="true")
+    )
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.tasks["t1"].task.test == "true"
+    assert state2.pending_gate["name"] == "final_merge"
+
+
+# ---------------------------------------------------------------------------
 # Fix-task cap: a final test that keeps failing opens at most max_fix_tasks
 # integration-fix tasks, then aborts loudly instead of churning forever.
 # ---------------------------------------------------------------------------
@@ -1439,6 +1594,38 @@ def test_console_review_rounds_gate_accept_extend_abort():
 
     # unknown answer re-prompts
     decision, printed = drive(["?", "a"])
+    assert decision.action == "accept"
+    assert any("'a', 'e' or 'x'" in p for p in printed)
+
+
+def test_console_review_rounds_gate_fix_when_allowed():
+    from spar.exec.loop import ConsoleExecGate
+
+    def drive(answers, **kw):
+        answers = list(answers)
+        printed = []
+        gate = ConsoleExecGate(
+            input_fn=lambda _: answers.pop(0), print_fn=printed.append
+        )
+        return gate.review_rounds_exhausted_gate("t1", 1, [], **kw), printed
+
+    # allow_fix: 'f' then a command -> fix decision carrying that command.
+    decision, printed = drive(
+        ["f", "python3 -m py_compile a.py"],
+        allow_fix=True,
+        command="python -m py_compile a.py",
+    )
+    assert decision.action == "fix"
+    assert decision.command == "python3 -m py_compile a.py"
+    # the current (broken) command was shown to the user
+    assert any("python -m py_compile a.py" in p for p in printed)
+
+    # empty command re-prompts, then accepts a real one
+    decision, _ = drive(["f", "  ", "f", "true"], allow_fix=True, command="x")
+    assert decision.action == "fix" and decision.command == "true"
+
+    # without allow_fix, 'f' is just an unknown answer -> re-prompt
+    decision, printed = drive(["f", "a"], allow_fix=False)
     assert decision.action == "accept"
     assert any("'a', 'e' or 'x'" in p for p in printed)
 

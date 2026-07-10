@@ -105,10 +105,12 @@ Flags relevant to agent mode (see `spar --help` for the full list):
 - `--headless` — exit 10 with a pending gate instead of blocking on stdin.
 - `--gate VALUE` — resolve a pending gate headlessly. Requires
   `--continue` **and** `--headless`. `VALUE` is one of `accept`, `abort`,
-  `extend:<n>`, or `remarks:<file>` (file: one remark per non-empty line).
-  A `VALUE` not in the pending gate's allowed options is a usage error
-  (exit 2), e.g. passing `extend:2` to a gate that only accepts
-  accept/abort.
+  `extend:<n>`, `remarks:<file>` (file: one remark per non-empty line), or
+  `fix:<command>` (replace a broken per-task test command). A `VALUE` not in
+  the pending gate's allowed options is a usage error (exit 2), e.g. passing
+  `extend:2` to a gate that only accepts accept/abort.
+  `fix:` is split on the FIRST colon only, so the command may contain spaces
+  and colons: `--gate fix:python3 -m py_compile todo.py`.
 - `--continue` — resume an interrupted debate.
 
 ### `spar exec` (execution)
@@ -172,7 +174,7 @@ Always call `spar status --json` immediately after any exit-10 run to read
 |------|-------|---------|-------|
 | `consensus` | debate | `accept` / `remarks:<file>` / `abort` | Both sides gave `AGREE` on the same artifact hash. `accept` ends the debate; `remarks:<file>` re-opens the loop with new `[USER]` remarks; `abort` ends it. |
 | `rounds_exhausted` | debate | `accept` / `extend:<n>` / `abort` | Round budget hit with open remarks still unresolved. `accept` takes the artifact as-is; `extend:<n>` adds `n` more rounds; `abort` ends it. |
-| `review_rounds` | execution | `accept` / `extend:<n>` / `abort` | A task's cross-review loop hit `max_review_rounds` without a `DONE` verdict. `accept` merges as-is; `extend:<n>` adds rounds; `abort` ends the run. |
+| `review_rounds` | execution | `accept` / `extend:<n>` / `abort` (+ `fix:<command>` at a test escalation) | A task's cross-review loop hit `max_review_rounds` without a `DONE` verdict, OR a per-task test kept failing (a stalled test, or a broken command that exits 126/127 — escalated immediately, before any re-implement). `accept` merges as-is; `extend:<n>` adds rounds; `abort` ends the run. When the escalation is a test failure the gate also offers `fix:<command>`, which replaces that task's `test` command and re-runs it; the pending gate's `context.command` carries the current command and `options` include `fix`. |
 | `final_merge` | execution | `accept` / `abort` | All tasks merged into the integration branch and the final test command passed; this is the last gate before merging into the caller's branch. `accept` performs the merge; `abort` leaves the integration branch untouched. |
 | `recovery` | debate (internal) | n/a | Not a real user gate: on resume after an interrupted turn, headless mode always auto-repeats the turn (`recovery_gate` never pends). Nothing to relay here. |
 

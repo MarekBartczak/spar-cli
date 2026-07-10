@@ -30,22 +30,32 @@ class GatePending(Exception):
 class GateChoice:
     """A parsed --gate value, not yet validated against a pending gate."""
 
-    action: str  # "accept" | "abort" | "extend" | "remarks"
+    action: str  # "accept" | "abort" | "extend" | "remarks" | "fix"
     extra_rounds: int = 0  # > 0 iff action == "extend"
     remarks: tuple[str, ...] = ()  # non-empty iff action == "remarks"
+    command: str = ""  # non-empty iff action == "fix" (the replacement test cmd)
 
 
 def parse_gate_value(value: str) -> GateChoice:
-    """Parse ``accept`` / ``abort`` / ``extend:<n>`` / ``remarks:<file>``.
+    """Parse ``accept`` / ``abort`` / ``extend:<n>`` / ``remarks:<file>`` /
+    ``fix:<command>``.
 
     ``remarks:<file>`` reads the file (UTF-8); each non-empty line is one
-    remark. Raises :class:`GateParseError` on bad syntax, n < 1, an
-    unreadable/empty remarks file.
+    remark. ``fix:<command>`` carries a replacement per-task test command —
+    the value is split on the FIRST colon only, so the command itself may
+    contain spaces and colons (e.g. ``fix:python3 -m py_compile a.py``).
+    Raises :class:`GateParseError` on bad syntax, n < 1, an unreadable/empty
+    remarks file, or an empty ``fix:`` command.
     """
     if value == "accept":
         return GateChoice(action="accept")
     if value == "abort":
         return GateChoice(action="abort")
+    if value.startswith("fix:"):
+        command = value[len("fix:"):].strip()
+        if not command:
+            raise GateParseError("fix needs a non-empty command, e.g. fix:python3 -m py_compile a.py")
+        return GateChoice(action="fix", command=command)
     if value.startswith("extend:"):
         raw = value[len("extend:"):]
         try:
@@ -66,7 +76,8 @@ def parse_gate_value(value: str) -> GateChoice:
             raise GateParseError(f"remarks file {path!r} contains no remarks")
         return GateChoice(action="remarks", remarks=remarks)
     raise GateParseError(
-        f"unknown --gate value {value!r} (expected accept, abort, extend:<n> or remarks:<file>)"
+        f"unknown --gate value {value!r} (expected accept, abort, extend:<n>, "
+        "remarks:<file> or fix:<command>)"
     )
 
 

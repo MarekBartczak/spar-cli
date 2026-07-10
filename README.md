@@ -167,8 +167,18 @@ spar exec --continue --headless --quiet --gate accept         # e.g. approve the
 ```
 
 Every interactive gate becomes: persist state → exit `10` → decision returns
-via `--gate accept | abort | extend:<n> | remarks:<file>` on resume. Without
-`--headless` all gates stay interactive on stdin.
+via `--gate accept | abort | extend:<n> | remarks:<file> | fix:<command>` on
+resume. Without `--headless` all gates stay interactive on stdin.
+
+`fix:<command>` applies only at a per-task **test** gate (a review-round or
+stalled test that surfaced a failing test command): it replaces that task's
+`test` command and re-runs it immediately. A test command that exits `126`
+(not executable) or `127` (command not found) is treated as a broken command,
+not a code failure — spar escalates to this gate at once instead of burning
+re-implement turns, and the message names the offending command (e.g. a plan
+generated for `python` on a `python3`-only host). The value is split on the
+FIRST colon only, so the command may contain spaces and colons:
+`--gate fix:python3 -m py_compile todo.py`.
 
 ### Exit codes
 

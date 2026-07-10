@@ -39,6 +39,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -88,7 +89,13 @@ class ExecGate(Protocol):
     def final_merge_gate(self, summary: str) -> GateDecision: ...
 
     def review_rounds_exhausted_gate(
-        self, task_id: str, rounds: int, pending: list
+        self,
+        task_id: str,
+        rounds: int,
+        pending: list,
+        *,
+        allow_fix: bool = False,
+        command: str | None = None,
     ) -> GateDecision: ...
 
 
@@ -114,7 +121,13 @@ class ConsoleExecGate:
             self._print("Please answer with 'a' or 'x'.")
 
     def review_rounds_exhausted_gate(
-        self, task_id: str, rounds: int, pending: list
+        self,
+        task_id: str,
+        rounds: int,
+        pending: list,
+        *,
+        allow_fix: bool = False,
+        command: str | None = None,
     ) -> GateDecision:
         self._print(
             f"\nTask {task_id}: review-round budget exhausted after {rounds} "
@@ -124,10 +137,16 @@ class ConsoleExecGate:
             self._print("Still-open remarks:")
             for r in pending:
                 self._print(f"  #{r.remark_id} [{r.severity.name}] ({r.author}): {r.text}")
+        # ``fix`` is offered only for a test escalation (``allow_fix``): the
+        # user can replace a broken/wrong per-task test command outright.
+        prompt = (
+            "[a]ccept task as-is / [e]xtend / [f]ix test command / [x] abort? "
+            if allow_fix
+            else "[a]ccept task as-is / [e]xtend / [x] abort? "
+        )
+        hint = "'a', 'e', 'f' or 'x'" if allow_fix else "'a', 'e' or 'x'"
         while True:
-            choice = self._input(
-                "[a]ccept task as-is / [e]xtend / [x] abort? "
-            ).strip().lower()
+            choice = self._input(prompt).strip().lower()
             if choice in ("a", "accept"):
                 return GateDecision(action="accept")
             if choice in ("x", "abort"):
@@ -142,7 +161,15 @@ class ConsoleExecGate:
                     return GateDecision(action="extend", extra_rounds=extra)
                 self._print("Please enter a positive number.")
                 continue
-            self._print("Please answer with 'a', 'e' or 'x'.")
+            if allow_fix and choice in ("f", "fix"):
+                if command:
+                    self._print(f"Current test command: {command}")
+                new_cmd = self._input("New test command: ").strip()
+                if new_cmd:
+                    return GateDecision(action="fix", command=new_cmd)
+                self._print("Please enter a non-empty command.")
+                continue
+            self._print(f"Please answer with {hint}.")
 
 
 # ---------------------------------------------------------------------------
@@ -750,11 +777,59 @@ class Executor:
         while True:
             ts.status = "testing"
             self.store.save(state)
-            passed, output = self._run_test_capture(
-                self._task_test_cmd(task), worktree
-            )
-            if passed:
+            cmd = self._task_test_cmd(task)
+            rc, output = self._run_test_rc(cmd, worktree)
+            if rc == 0:
                 break
+
+            # Broken test COMMAND (126 not executable / 127 command not found):
+            # the command itself is wrong, not the implementation — no amount of
+            # re-implementing can fix it (live incident: a plan naming ``python``
+            # on a ``python3``-only host looped 127 forever). Do NOT enter the
+            # re-implement loop; escalate IMMEDIATELY to the SAME user gate as a
+            # review/test dispute so the operator can supply a corrected command
+            # (``fix:``), override (``accept``), grant re-implement rounds anyway
+            # (``extend``), or abort.
+            if rc in (126, 127):
+                reason = (
+                    "command not found" if rc == 127 else "command not executable"
+                )
+                message = (
+                    f"test command failed with exit {rc} ({reason}): {cmd}\n\n"
+                    f"{output}"
+                )
+                self.log(
+                    f"spar exec: [{task.id}] test command failed with exit {rc} "
+                    f"({reason}): {cmd} — escalating to the user gate without "
+                    "burning an implementer turn."
+                )
+                # Mark ``review`` so a headless pend reconciles/resumes through
+                # the review-resume machinery (the task WAS already reviewed in
+                # ``_run_task`` before this test).
+                ts.status = "review"
+                self.store.save(state)
+                decision = self._review_rounds_gate(state, test_output=message)(ts, 0)
+                if decision.action == "fix":
+                    task = self._apply_fix_command(state, ts, decision.command)
+                    no_change_iters = 0
+                    stall_budget = _TEST_FAIL_STALL_ITERS
+                    continue
+                if decision.action == "accept":
+                    self.log(
+                        f"spar exec: [{task.id}] user ACCEPTED the task with a "
+                        "FAILING per-task test (broken command); merging on the "
+                        "user's override."
+                    )
+                    break
+                # extend: the user chose to spend implementer rounds anyway
+                # (e.g. the code is expected to create the missing command).
+                stall_budget = decision.extra_rounds
+                no_change_iters = 0
+                self.log(
+                    f"spar exec: [{task.id}] granting {decision.extra_rounds} "
+                    "re-implement round(s) on a broken test command per the user."
+                )
+
             self.log(
                 f"spar exec: [{task.id}] per-task test failed; re-implementing."
             )
@@ -825,6 +900,13 @@ class Executor:
             decision = self._review_rounds_gate(state, test_output=output)(
                 ts, no_change_iters
             )
+            if decision.action == "fix":
+                # The user realized the test COMMAND itself is wrong: replace it
+                # and re-run from the top with a fresh stall budget.
+                task = self._apply_fix_command(state, ts, decision.command)
+                no_change_iters = 0
+                stall_budget = _TEST_FAIL_STALL_ITERS
+                continue
             if decision.action == "accept":
                 self.log(
                     f"spar exec: [{task.id}] user ACCEPTED the task with a "
@@ -896,10 +978,18 @@ class Executor:
             )
             raise _Abort(5)
 
-        # accept | extend: clear the gate AT consumption, then proceed.
+        # accept | extend | fix: clear the gate AT consumption, then proceed.
         state.pending_gate = None
         self.store.save(state)
         self._resume_decision = None
+
+        if decision.action == "fix":
+            # The pending gate was a per-task-test escalation and the operator
+            # supplied a corrected command: swap it in, then fall through to the
+            # per-task test/merge tail, which re-runs the (now fixed) command.
+            self._apply_fix_command(state, ts, decision.command)
+            self._test_and_merge_task(state, ts, branch, worktree)
+            return
 
         if decision.action == "extend":
             n = decision.extra_rounds
@@ -965,22 +1055,32 @@ class Executor:
                     if rr.resolution == "rejected"
                 ]
             if test_output is not None:
-                # Per-task-test stall: the user is arbitrating a test that will
-                # not pass, not a review dispute. Prepend a synthetic remark
-                # carrying the (truncated) failing output.
+                # Per-task-test escalation: the user is arbitrating a test that
+                # will not pass, not a review dispute. Prepend a synthetic
+                # remark carrying the (truncated) failing output (which, for a
+                # broken command, names the offending command).
                 synthetic = StateRemark(
                     remark_id=0,
                     severity=Severity.USER,
                     author="per-task-test",
                     text=(
-                        "per-task test still FAILING and the implementer is "
-                        "making no progress. Last captured output (truncated):\n"
-                        + (test_output or "")[:2000]
+                        "per-task test FAILING. Last captured output "
+                        "(truncated):\n" + (test_output or "")[:2000]
                     ),
                 )
                 remarks = [synthetic, *remarks]
             decision = self.gate.review_rounds_exhausted_gate(
-                task_state.task.id, rounds, remarks
+                task_state.task.id,
+                rounds,
+                remarks,
+                # A test escalation lets the user correct a wrong test command
+                # (``fix:``); a pure review dispute does not.
+                allow_fix=test_output is not None,
+                command=(
+                    self._task_test_cmd(task_state.task)
+                    if test_output is not None
+                    else None
+                ),
             )
             if decision.action == "abort":
                 self.store.save(state)
@@ -1208,15 +1308,43 @@ class Executor:
     def _task_test_cmd(self, task: Task) -> str:
         return task.test if task.test else self.execution.test_command
 
+    def _apply_fix_command(self, state: ExecState, ts: TaskState, command: str) -> Task:
+        """Replace the task's per-task ``test`` command (``fix:`` gate decision).
+
+        ``Task`` is frozen, so a new one is built via ``dataclasses.replace``
+        and swapped onto the ``TaskState``; the change is persisted to
+        ``exec.json`` immediately so a crash before the re-run keeps the fix.
+        Returns the new ``Task`` so callers can refresh their local binding.
+        """
+        old = self._task_test_cmd(ts.task)
+        ts.task = replace(ts.task, test=command)
+        self.store.save(state)
+        self.log(
+            f"spar exec: [{ts.task.id}] per-task test command replaced on the "
+            f"user's request: {old!r} → {command!r}; re-running the test."
+        )
+        return ts.task
+
     def _run_test_capture(self, cmd: str, cwd: Path) -> tuple[bool, str]:
         """Run ``cmd`` (shell) in ``cwd``; empty command is a pass."""
+        rc, output = self._run_test_rc(cmd, cwd)
+        return rc == 0, output
+
+    def _run_test_rc(self, cmd: str, cwd: Path) -> tuple[int, str]:
+        """Run ``cmd`` (shell) in ``cwd``, returning ``(returncode, output)``.
+
+        An empty command is a pass (rc 0). Exposes the raw exit code so the
+        per-task loop can distinguish a broken test COMMAND (126 not
+        executable / 127 command not found) — which no amount of
+        re-implementing can fix — from ordinary test failures.
+        """
         if not cmd:
-            return True, ""
+            return 0, ""
         result = subprocess.run(
             cmd, shell=True, cwd=str(cwd), capture_output=True, text=True
         )
         output = (result.stdout or "") + (result.stderr or "")
-        return result.returncode == 0, output
+        return result.returncode, output
 
     # -- small git / path helpers --------------------------------------
 

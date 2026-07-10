@@ -36,7 +36,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -186,7 +188,7 @@ def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = N
 # Gate button mapping (pure)
 # ---------------------------------------------------------------------------
 
-_KNOWN_OPTIONS = {"accept", "abort", "extend", "remarks"}
+_KNOWN_OPTIONS = {"accept", "abort", "extend", "remarks", "fix"}
 
 
 @dataclass(frozen=True)
@@ -244,6 +246,8 @@ def gate_buttons(pending_gate: dict | None) -> list[ButtonSpec]:
             specs.append(ButtonSpec("Abort", "abort", primary=False))
         elif option == "extend":
             specs.append(ButtonSpec("Dodaj rundy", "extend", primary=False))
+        elif option == "fix":
+            specs.append(ButtonSpec("Popraw komendę…", "fix", primary=False))
         elif option == "remarks":
             specs.append(ButtonSpec("Wyślij remarks", "remarks", primary=False))
     return specs
@@ -502,14 +506,16 @@ class GatePanel(QWidget):
 
         specs = [s for s in gate_buttons(pending_gate) if s.option != "remarks"]
         accept_specs = [s for s in specs if s.option == "accept"]
-        extend_specs = [s for s in specs if s.option == "extend"]
+        # ``fix`` (correct a broken test command) sits in the middle group
+        # alongside ``extend``.
+        middle_specs = [s for s in specs if s.option in ("extend", "fix")]
         abort_specs = [s for s in specs if s.option == "abort"]
 
         for spec in accept_specs:
             self._add_button(spec)
-        if extend_specs:
+        if middle_specs:
             self._buttons_layout.addStretch(1)
-            for spec in extend_specs:
+            for spec in middle_specs:
                 self._add_button(spec)
         self._buttons_layout.addStretch(1)
         for spec in abort_specs:
@@ -576,6 +582,13 @@ class GatePanel(QWidget):
             self._buttons_layout.addWidget(button)
             self._interactive_widgets.extend([spin, button])
 
+        elif spec.option == "fix":
+            button = QPushButton(spec.label, self._buttons_row)
+            button.setObjectName("fixCommandButton")
+            button.clicked.connect(lambda _=False: self._on_fix())
+            self._buttons_layout.addWidget(button)
+            self._interactive_widgets.append(button)
+
         # 'remarks' is handled by the dedicated editor+button built in
         # __init__/set_pending_gate, never by this per-spec button row
         # (fix 6a) -- gate_buttons' remarks spec is filtered out before
@@ -621,6 +634,28 @@ class GatePanel(QWidget):
     def _on_extend(self, spin: QSpinBox) -> None:
         self._disable_all()
         self._runner.resume(f"extend:{spin.value()}")
+
+    def _on_fix(self) -> None:
+        """Prompt for a replacement per-task test command, then resume with
+        ``fix:<command>``.
+
+        The dialog is prefilled with the current command (from the gate
+        ``context``); cancelling or an empty entry leaves the gate actionable
+        (no ``_disable_all`` until a real command is submitted).
+        """
+        context = (self._pending_gate or {}).get("context") or {}
+        current = context.get("command", "")
+        text, ok = QInputDialog.getText(
+            self,
+            "Popraw komendę testu",
+            "Nowa komenda testu (per-task):",
+            QLineEdit.EchoMode.Normal,
+            current,
+        )
+        if not ok or not text.strip():
+            return  # cancelled / empty — gate stays actionable
+        self._disable_all()
+        self._runner.resume(f"fix:{text.strip()}")
 
     def _on_remarks(self, text_edit: QPlainTextEdit) -> None:
         self._disable_all()

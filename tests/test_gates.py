@@ -30,6 +30,23 @@ class TestParseGateValue:
         assert choice.action == "remarks"
         assert choice.remarks == ("first remark", "second remark")
 
+    def test_fix_command(self):
+        choice = parse_gate_value("fix:python3 -m py_compile todo.py")
+        assert choice.action == "fix"
+        # split on the FIRST colon only: spaces AND colons survive in the cmd
+        assert choice.command == "python3 -m py_compile todo.py"
+
+    def test_fix_command_preserves_colons(self):
+        choice = parse_gate_value("fix:bash -c 'a:b'")
+        assert choice.action == "fix"
+        assert choice.command == "bash -c 'a:b'"
+
+    def test_fix_empty_command_raises(self):
+        with pytest.raises(GateParseError):
+            parse_gate_value("fix:")
+        with pytest.raises(GateParseError):
+            parse_gate_value("fix:   ")
+
     def test_extend_non_integer_raises(self):
         with pytest.raises(GateParseError):
             parse_gate_value("extend:x")

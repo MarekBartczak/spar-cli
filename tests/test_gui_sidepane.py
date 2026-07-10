@@ -73,6 +73,19 @@ class TestGateButtons:
         options_seen = [s.option for s in specs]
         assert options_seen == ["accept", "extend", "abort"]
 
+    def test_review_rounds_with_fix_option(self):
+        # A per-task-test escalation exposes a "fix" option -> a "fix" button.
+        gate = {
+            "name": "review_rounds",
+            "options": ["accept", "extend", "fix", "abort"],
+            "context": {"task_id": "t1", "rounds": 0, "command": "python -m x"},
+        }
+        specs = gate_buttons(gate)
+        options_seen = [s.option for s in specs]
+        assert options_seen == ["accept", "extend", "fix", "abort"]
+        fix_spec = next(s for s in specs if s.option == "fix")
+        assert fix_spec.label
+
     def test_final_merge_accept_abort_only(self):
         gate = {
             "name": "final_merge",
@@ -466,6 +479,48 @@ class TestGatePanel:
         qtbot.mouseClick(button, _LEFT)
 
         runner.resume.assert_called_once_with("extend:5")
+
+    def test_fix_button_prompts_and_resumes(self, qtbot, monkeypatch):
+        from PySide6.QtWidgets import QInputDialog, QPushButton
+
+        runner = MagicMock()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate(
+            {
+                "name": "review_rounds",
+                "options": ["accept", "extend", "fix", "abort"],
+                "context": {
+                    "task_id": "t1",
+                    "rounds": 0,
+                    "command": "python -m py_compile todo.py",
+                },
+            }
+        )
+
+        fix_button = next(
+            w for w in panel._interactive_widgets
+            if isinstance(w, QPushButton) and "popraw" in w.text().lower()
+        )
+
+        # Cancelled dialog -> resume NOT called, gate stays actionable.
+        monkeypatch.setattr(
+            QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False))
+        )
+        qtbot.mouseClick(fix_button, _LEFT)
+        runner.resume.assert_not_called()
+
+        # Prefilled with the current command; entering a new one -> fix:<cmd>.
+        captured = {}
+
+        def fake_get_text(parent, title, label, echo, text):
+            captured["prefill"] = text
+            return ("python3 -m py_compile todo.py", True)
+
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(fake_get_text))
+        qtbot.mouseClick(fix_button, _LEFT)
+        assert captured["prefill"] == "python -m py_compile todo.py"
+        runner.resume.assert_called_once_with("fix:python3 -m py_compile todo.py")
 
     def test_abort_button_requires_confirmation(self, qtbot, monkeypatch):
         from PySide6.QtWidgets import QMessageBox, QPushButton

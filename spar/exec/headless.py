@@ -61,7 +61,13 @@ class HeadlessExecGate:
         )
 
     def review_rounds_exhausted_gate(
-        self, task_id: str, rounds: int, pending: list
+        self,
+        task_id: str,
+        rounds: int,
+        pending: list,
+        *,
+        allow_fix: bool = False,
+        command: str | None = None,
     ) -> GateDecision:
         context = {
             "task_id": task_id,
@@ -76,6 +82,12 @@ class HeadlessExecGate:
                 for r in pending
             ],
         }
-        return self._consume_or_pend(
-            "review_rounds", ["accept", "extend", "abort"], context
-        )
+        # ``fix`` is offered only for a test escalation (a broken/failing
+        # per-task test command); the current command rides into the context so
+        # the operator (and the GUI's prefill) can see what they are replacing.
+        options = ["accept", "extend", "abort"]
+        if allow_fix:
+            options = ["accept", "extend", "fix", "abort"]
+            if command is not None:
+                context["command"] = command
+        return self._consume_or_pend("review_rounds", options, context)
