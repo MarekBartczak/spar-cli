@@ -357,6 +357,64 @@ def test_no_auto_exec_does_not_chain(runner, project_dir, tmp_path, qtbot):
     assert len(_read_records(record)) == 1
 
 
+def test_auto_exec_chain_emits_notice(runner, project_dir, tmp_path, qtbot):
+    record = tmp_path / "rec.jsonl"
+    _use_fake(runner, _make_fake(tmp_path, record, exit_code=0))
+
+    notices = []
+    runner.notice.connect(notices.append)
+
+    finishes = []
+    runner.finished.connect(lambda code: finishes.append(code))
+    runner.resume("accept", auto_exec=True)
+    qtbot.waitUntil(lambda: len(finishes) >= 2, timeout=15000)
+
+    assert any("konsensus przyjęty" in n for n in notices)
+
+
+# ----------------------------------------------------------------------
+# Double-start guard (fix 2) -- a manual click must not race the auto-exec
+# chain (or itself) into a second spawn while a child is still alive.
+# ----------------------------------------------------------------------
+def test_double_start_exec_guarded_while_busy(runner, project_dir, tmp_path, qtbot):
+    record = tmp_path / "rec.jsonl"
+    _use_fake(runner, _make_fake(tmp_path, record, sleep=True))
+
+    notices = []
+    runner.notice.connect(notices.append)
+
+    runner.start_exec()
+    qtbot.waitUntil(lambda: record.exists(), timeout=10000)
+
+    runner.start_exec()  # must no-op: a child is already alive
+    qtbot.wait(200)
+
+    assert len(_read_records(record)) == 1
+    assert len(notices) == 1
+    assert "zignorowany" in notices[0]
+
+    runner.stop()
+
+
+def test_double_resume_guarded_while_busy(runner, project_dir, tmp_path, qtbot):
+    record = tmp_path / "rec.jsonl"
+    _use_fake(runner, _make_fake(tmp_path, record, sleep=True))
+
+    notices = []
+    runner.notice.connect(notices.append)
+
+    runner.resume(None)
+    qtbot.waitUntil(lambda: record.exists(), timeout=10000)
+
+    runner.resume(None)  # must no-op: a child is already alive
+    qtbot.wait(200)
+
+    assert len(_read_records(record)) == 1
+    assert len(notices) == 1
+
+    runner.stop()
+
+
 # ----------------------------------------------------------------------
 # Lock probe (review #2)
 # ----------------------------------------------------------------------

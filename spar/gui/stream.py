@@ -46,13 +46,47 @@ from PySide6.QtWidgets import (
 
 from spar.gui.theme import TOKENS
 
-__all__ = ["LiveLogTailer", "StreamPane", "humanize_prefix"]
+__all__ = ["LiveLogTailer", "StreamPane", "humanize_prefix", "derive_chip_specs"]
 
 # Ported from spar/watch.py (colorize / follow) -- kept in sync by hand since
 # that module must stay Qt-free (task brief).
 _PREFIX_RE = re.compile(r"^\[([^\]]+)\](.*)$")
 _GATE_PENDING_RE = re.compile(r"gate '[^']*' pending")
 _ROUND_RE = re.compile(r"^r(\d+)$")
+
+# Chip derivation (smoke-feedback round 2, fix 4c) -- chips are shown ONLY
+# for prefixes matching one of the engine's actual wire shapes; anything else
+# (a stray "t=t1" fragment, a JSON blob that happened to land inside
+# brackets, ...) must never become a filter chip.
+_CHIP_SIDE_ROUND_RE = re.compile(r"^(\w+) r(\d+)$")
+_CHIP_SIDE_TASK_ROLE_RE = re.compile(r"^(\w+) (t\d+) (impl|review)$")
+_CHIP_LABEL_MAX = 24
+
+
+def derive_chip_specs(prefix: str) -> list[tuple[str, str]]:
+    """Pure: map a raw ``[<prefix>]`` engine prefix to the chip
+    ``(kind, value)`` pairs it should register, or ``[]`` when the prefix
+    doesn't match a known engine shape.
+
+    Recognized shapes ONLY:
+
+    * ``"<side> rN"``                  -> ``[("side", side)]``
+    * ``"<side> <tid> impl"/"review"`` -> ``[("side", side), ("task", tid)]``
+    * literal ``"spar"``               -> ``[]`` (covered by the fixed
+      "spar" filter chip, not a dynamic one)
+
+    Anything else -- e.g. ``"t=t1"``, a raw JSON fragment, an arbitrary
+    multi-word remark -- yields no chip at all.
+    """
+    if prefix == "spar":
+        return []
+    match = _CHIP_SIDE_ROUND_RE.match(prefix)
+    if match:
+        return [("side", match.group(1))]
+    match = _CHIP_SIDE_TASK_ROLE_RE.match(prefix)
+    if match:
+        return [("side", match.group(1)), ("task", match.group(2))]
+    return []
 
 
 def humanize_prefix(prefix: str, models: dict | None = None) -> str:
@@ -273,6 +307,10 @@ class StreamPane(QWidget):
         self.text.setObjectName("streamText")
         self.text.setReadOnly(True)
         self.text.setMaximumBlockCount(_RING_MAX)
+        # Wrap long lines instead of forcing the pane (and window) to grow
+        # horizontally -- smoke-feedback round 2, fix 4b ("screen rozjechał
+        # się przy długich liniach").
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.text.verticalScrollBar().valueChanged.connect(self._on_scroll)
         layout.addWidget(self.text)
 
@@ -296,22 +334,41 @@ class StreamPane(QWidget):
         finally:
             self._programmatic_scroll = False
 
+    def append_notice(self, text: str) -> None:
+        """Append a synthetic UI notice line directly to the view (fix 1).
+
+        Notices announce something the GUI itself did (a spawn just fired,
+        an auto-exec chain just kicked off) -- they are NOT part of the
+        engine's transcript, so they deliberately bypass the ring buffer and
+        the filter machinery entirely: they render immediately in the
+        ``spar-log`` bold style used for spar's own log lines, and (being
+        outside the ring) do not survive a ``set_filter``/rerender, which
+        only replays lines that were fed via :meth:`feed_lines`.
+        """
+        self._programmatic_scroll = True
+        try:
+            cursor = QTextCursor(self.text.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(TOKENS["spar-log"]))
+            fmt.setFontWeight(QFont.Weight.Bold)
+            cursor.insertText(text, fmt)
+            cursor.insertBlock()
+            if self._following:
+                self._scroll_to_bottom()
+        finally:
+            self._programmatic_scroll = False
+
     def _register_prefix(self, line: str) -> None:
         match = _PREFIX_RE.match(line)
         if not match:
             return
-        parts = match.group(1).split()
-        if not parts:
-            return
-        side = parts[0]
-        if side not in self._known_sides:
-            self._known_sides.append(side)
-            self._add_chip("side", side, side)
-        if len(parts) > 1:
-            task = parts[1]
-            if task not in self._known_tasks:
-                self._known_tasks.append(task)
-                self._add_chip("task", task, task)
+        prefix = match.group(1)
+        for kind, value in derive_chip_specs(prefix):
+            known = self._known_sides if kind == "side" else self._known_tasks
+            if value not in known:
+                known.append(value)
+                self._add_chip(kind, value, value[:_CHIP_LABEL_MAX])
 
     # ------------------------------------------------------------------
     # Model resolution (fix 4 -- humanize_prefix's ``models`` argument)

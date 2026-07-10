@@ -42,6 +42,28 @@ _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Di
 _SPLITTER_SIZES = [1700, 1000]
 
 
+def _short_action_label(cmd: str) -> str:
+    """Pure: map a spawned command line to a short Polish action label for
+    the stream's start notice (smoke-feedback round 2, fix 1) -- the
+    previous statusbar-only indicator was invisible to the user, so this
+    text is what gets echoed straight into the transcript view instead.
+
+    Recognizes the shapes ``SparRunner`` actually spawns: a fresh debate
+    (``--task-file``), a fresh exec (``exec`` without ``--continue``), and a
+    resume of either (``--continue``, optionally prefixed by ``exec``).
+    """
+    tokens = cmd.split()
+    if "--task-file" in tokens:
+        return "nowa debata"
+    has_exec = "exec" in tokens
+    has_continue = "--continue" in tokens
+    if has_continue:
+        return "wznów exec" if has_exec else "wznów"
+    if has_exec:
+        return "start exec"
+    return "spar"
+
+
 class Toolbar(QToolBar):
     """Toolbar with disabled placeholder actions; wired up in a later task."""
 
@@ -136,6 +158,10 @@ class MainWindow(QMainWindow):
         self.runner.started.connect(self._on_started)
         self.runner.finished.connect(self._on_finished)
         self.runner.state_changed.connect(self._on_state_changed)
+        # Notices (double-start guard rejections, the auto-exec chain
+        # kicking off, ...) surface straight into the stream transcript
+        # (fix 1/2) -- not just the statusbar, which is easy to miss.
+        self.runner.notice.connect(self.stream_pane.append_notice)
         self._wire_toolbar()
         self._sync_toolbar()
 
@@ -186,6 +212,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"uruchomiono: {cmd}")
         self._startup_label.show()
         self._startup_progress.show()
+        # Visible-in-the-stream start feedback (fix 1) -- the statusbar
+        # message above is easy to miss; this line lands right in the
+        # transcript the user is already watching.
+        self.stream_pane.append_notice(f"▶ uruchamiam: {_short_action_label(cmd)}…")
 
     def _on_finished(self, exit_code: int) -> None:
         self.statusBar().showMessage(f"zakończono (exit {exit_code})")

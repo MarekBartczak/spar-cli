@@ -113,6 +113,10 @@ class SparRunner(QObject):
     started = Signal(str)  # the full command line that was spawned
     finished = Signal(int)  # the child's exit code (or _CRASH_EXIT on crash)
     state_changed = Signal(object)  # RunnerState
+    #: Human-readable one-off announcements (double-start guard rejections,
+    #: the auto-exec chain kicking off, ...) -- the gui surfaces these as
+    #: notice lines in the StreamPane (smoke-feedback round 2, fixes 1/2).
+    notice = Signal(str)
 
     #: Base command; overridable in tests to point at a fake spar script.
     def __init__(self, project_dir: "str | Path", parent: QObject | None = None):
@@ -151,7 +155,11 @@ class SparRunner(QObject):
         If the persisted status is a *finished* execution (``phase == "done"``)
         the stale ``exec.json`` is archived first (review #6) so status/resume
         routing flips back to the new debate instead of the old exec.
+
+        No-ops (with a :attr:`notice`) if a child is already alive (fix 2).
         """
+        if self._guard_busy("nowa debata"):
+            return
         self._archive_stale_exec()
 
         task_path = self._tmp_dir / f"task-{int(time.time() * 1000)}.md"
@@ -170,7 +178,14 @@ class SparRunner(QObject):
         self._spawn(args)
 
     def start_exec(self) -> None:
-        """Spawn a fresh ``spar exec`` run over the agreed plan's tasks."""
+        """Spawn a fresh ``spar exec`` run over the agreed plan's tasks.
+
+        No-ops (with a :attr:`notice`) if a child is already alive (fix 2) --
+        this is the guard that prevents a manual "Start exec" click racing
+        the auto-exec chain (see :meth:`_on_finished`) into a lock error.
+        """
+        if self._guard_busy("start exec"):
+            return
         self._spawn(["exec", "--headless", "--quiet"])
 
     def resume(self, gate_value: str | None, auto_exec: bool = False) -> None:
@@ -180,7 +195,11 @@ class SparRunner(QObject):
         -> ``spar exec --continue``. ``gate_value`` (when given) is passed as
         ``--gate``. ``auto_exec`` is only meaningful for a consensus *accept*:
         on a clean (exit 0) finish it chains :meth:`start_exec` (review #6).
+
+        No-ops (with a :attr:`notice`) if a child is already alive (fix 2).
         """
+        if self._guard_busy("wznów"):
+            return
         self._auto_exec = bool(auto_exec)
 
         phase = self._read_status().get("phase")
@@ -198,7 +217,13 @@ class SparRunner(QObject):
         The runner owns the file: it is created WITHOUT delete-on-close (the
         child opens it after spawn) and is unlinked in :meth:`_on_finished`
         (review #4).
+
+        No-ops (with a :attr:`notice`) if a child is already alive (fix 2) --
+        checked up front so a busy runner never even writes the orphaned
+        remarks temp file.
         """
+        if self._guard_busy("wznów"):
+            return
         remarks_path = self._tmp_dir / f"remarks-{int(time.time() * 1000)}.txt"
         body = text if text.endswith("\n") else text + "\n"
         remarks_path.write_text(body, encoding="utf-8")
@@ -260,6 +285,15 @@ class SparRunner(QObject):
             and self._process.state() != QProcess.ProcessState.NotRunning
         )
 
+    def _guard_busy(self, action: str) -> bool:
+        """Return ``True`` (emitting a :attr:`notice`) if a child is already
+        alive, so the caller can no-op instead of racing a second spawn onto
+        the ``.spar`` lock (fix 2)."""
+        if not self._is_alive():
+            return False
+        self.notice.emit(f"▶ {action} zignorowany — proces już działa")
+        return True
+
     def _read_status(self) -> dict:
         # The status files may be mid-write; never let that crash the GUI.
         try:
@@ -312,6 +346,7 @@ class SparRunner(QObject):
         # Auto-exec chain: a consensus accept that exited cleanly launches exec.
         if self._auto_exec and effective == 0:
             self._auto_exec = False
+            self.notice.emit("▶ konsensus przyjęty — startuję exec…")
             self.start_exec()
             return
         self._auto_exec = False

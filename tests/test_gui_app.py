@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from spar.gui import theme
-from spar.gui.app import MainWindow, SidePane, StreamPane, Toolbar
+from spar.gui.app import MainWindow, SidePane, StreamPane, Toolbar, _short_action_label
 
 _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Diff"]
 
@@ -146,6 +146,49 @@ class TestStartupIndicator:
 
         assert window._startup_progress.isVisible() is False
         assert window._startup_label.isVisible() is False
+
+
+class TestShortActionLabel:
+    """Pure helper behind the stream's start notice (fix 1)."""
+
+    def test_new_debate(self):
+        cmd = "python -m spar.cli --task-file /tmp/x.md --sides claude,codex --first claude --headless --quiet --tasks"
+        assert _short_action_label(cmd) == "nowa debata"
+
+    def test_start_exec(self):
+        assert _short_action_label("python -m spar.cli exec --headless --quiet") == "start exec"
+
+    def test_resume_debate(self):
+        assert _short_action_label("python -m spar.cli --continue --headless --quiet") == "wznów"
+
+    def test_resume_exec(self):
+        cmd = "python -m spar.cli exec --continue --headless --quiet --gate accept"
+        assert _short_action_label(cmd) == "wznów exec"
+
+
+class TestStreamNotices:
+    """Smoke-feedback round 2, fix 1/2: visible-in-stream start/guard/chain
+    feedback, wired from SparRunner's started/notice signals."""
+
+    def test_on_started_appends_notice_to_stream(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        window._on_started(
+            "python -m spar.cli --task-file /tmp/x.md --sides claude,codex --first claude --headless --quiet"
+        )
+
+        text = window.stream_pane.text.toPlainText()
+        assert "▶ uruchamiam: nowa debata…" in text
+
+    def test_runner_notice_appends_to_stream(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        window.runner.notice.emit("▶ konsensus przyjęty — startuję exec…")
+
+        text = window.stream_pane.text.toPlainText()
+        assert "konsensus przyjęty" in text
 
 
 class TestTheme:

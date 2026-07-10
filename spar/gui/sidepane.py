@@ -122,11 +122,32 @@ def _reviewer_for_configured(side: str | None, side_order: "list[str] | tuple[st
     return "?"
 
 
+def _format_side_label(
+    side: "str | None", reviewer: str, model: "str | None", review_model: "str | None"
+) -> str:
+    """Pure: render the TaskBoard's ``Side`` column right-hand string.
+
+    ``codex·gpt-5.4 → claude·opus`` when both the implementer's ``model``
+    and the reviewer's ``review_model`` are known (fix 5); falls back to the
+    plain ``side -> reviewer`` string when either model is absent, so a
+    project/status without model metadata renders exactly as before.
+    """
+    side_part = side or "?"
+    if model:
+        side_part = f"{side_part}·{model}"
+    reviewer_part = reviewer
+    if review_model:
+        reviewer_part = f"{reviewer_part}·{review_model}"
+    return f"{side_part} → {reviewer_part}"
+
+
 def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = None) -> list[dict]:
     """Pure projection of ``status['tasks']`` to displayable row dicts.
 
     Each row: ``task_id``, ``status``, ``pill`` (ok/warn/muted), ``side``,
-    ``reviewer``, ``label`` (the ``side -> reviewer`` right-hand string).
+    ``reviewer``, ``model``, ``review_model``, ``label`` (the
+    ``side -> reviewer`` right-hand string, fix 5: includes each side's
+    model when the task carries one).
 
     ``side_order`` (when given) is the project's configured side names
     (``spar.config.load_config(project_dir).sides`` keys, in order); the
@@ -143,7 +164,9 @@ def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = N
             reviewer = _reviewer_for_configured(side, side_order)
         else:
             reviewer = _reviewer_for(side, all_sides)
-        label = f"{side or '?'} → {reviewer}"
+        model = task.get("model")
+        review_model = task.get("review_model")
+        label = _format_side_label(side, reviewer, model, review_model)
         rows.append(
             {
                 "task_id": task_id,
@@ -151,6 +174,8 @@ def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = N
                 "pill": _pill_for(task.get("status")),
                 "side": side,
                 "reviewer": reviewer,
+                "model": model,
+                "review_model": review_model,
                 "label": label,
             }
         )
@@ -240,8 +265,17 @@ def _severity_color(severity: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_TASK_BOARD_PLACEHOLDER_TEXT = "taski pojawią się po konsensusie"
+
+
 class TaskBoard(QWidget):
-    """Read-only table of tasks: id, status pill, ``side -> reviewer``."""
+    """Read-only table of tasks: id, status pill, ``side -> reviewer``.
+
+    Dead during a debate (fix 3): with no tasks yet and the phase still
+    debate/unknown, the table (and its headers) stay hidden behind a muted
+    placeholder label instead of showing an empty, header-only table -- the
+    headers only appear once the first real task row lands.
+    """
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -250,15 +284,23 @@ class TaskBoard(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        self.placeholder = QLabel(_TASK_BOARD_PLACEHOLDER_TEXT, self)
+        self.placeholder.setObjectName("taskPlaceholder")
+        self.placeholder.setStyleSheet(f"color: {TOKENS['muted']};")
+        layout.addWidget(self.placeholder)
+
         self.table = QTableWidget(0, 3, self)
         self.table.setObjectName("taskTable")
         self.table.setHorizontalHeaderLabels(["Task", "Status", "Side"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.horizontalHeader().setVisible(False)
         layout.addWidget(self.table)
 
         self._rows: list[dict] = []
+        self.placeholder.setVisible(True)
+        self.table.setVisible(False)
 
     def set_status(self, status: dict, side_order: "list[str] | None" = None) -> None:
         """Rebuild rows from a fresh status dict (numeric task-id order)."""
@@ -280,6 +322,13 @@ class TaskBoard(QWidget):
             side_item = QTableWidgetItem(row["label"])
             side_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(i, 2, side_item)
+
+        has_tasks = bool(self._rows)
+        phase = status.get("phase")
+        show_placeholder = not has_tasks and phase in (None, "debate")
+        self.placeholder.setVisible(show_placeholder)
+        self.table.setVisible(has_tasks)
+        self.table.horizontalHeader().setVisible(has_tasks)
 
     @property
     def rows(self) -> list[dict]:
@@ -587,6 +636,10 @@ class SidePane(QWidget):
     def __init__(self, project_dir: "str | Path", runner, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("sidePane")
+        # Layout hardening (fix 4a): a long stream line or a wide splitter
+        # drag must never squeeze the side pane's task board/gate panel down
+        # to unreadable widths.
+        self.setMinimumWidth(320)
         self.project_dir = Path(project_dir)
         self._runner = runner
         self._last_good_status: dict = {

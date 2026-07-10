@@ -189,6 +189,38 @@ class TestTaskRows:
         rows = task_rows(status)
         assert rows[0]["reviewer"] == "?"
 
+    def test_label_includes_models_when_present(self):
+        # Fix 5: "codex·gpt-5.4 -> claude·opus" using the task's implementer
+        # model and the reviewer's review_model.
+        status = {
+            "tasks": {
+                "t1": {
+                    "status": "pending",
+                    "side": "codex",
+                    "model": "gpt-5.4",
+                    "review_model": "opus",
+                }
+            }
+        }
+        rows = task_rows(status, side_order=["claude", "codex"])
+        assert rows[0]["label"] == "codex·gpt-5.4 → claude·opus"
+        assert rows[0]["model"] == "gpt-5.4"
+        assert rows[0]["review_model"] == "opus"
+
+    def test_label_falls_back_to_plain_sides_without_models(self):
+        status = {"tasks": {"t1": {"status": "pending", "side": "codex"}}}
+        rows = task_rows(status, side_order=["claude", "codex"])
+        assert rows[0]["label"] == "codex → claude"
+        assert rows[0]["model"] is None
+        assert rows[0]["review_model"] is None
+
+    def test_label_with_only_implementer_model_known(self):
+        status = {
+            "tasks": {"t1": {"status": "pending", "side": "codex", "model": "gpt-5.4"}}
+        }
+        rows = task_rows(status, side_order=["claude", "codex"])
+        assert rows[0]["label"] == "codex·gpt-5.4 → claude"
+
 
 # ---------------------------------------------------------------------------
 # TaskBoard -- Qt widget smoke test (ordering/pills flow through)
@@ -216,6 +248,68 @@ class TestTaskBoard:
         assert board.rows[0]["reviewer"] == "claude"
         # Side column item (index 2) shows the "side -> reviewer" label.
         assert board.table.item(0, 2).text() == "codex → claude"
+
+    def test_set_status_with_models_shows_models_in_side_column(self, qtbot):
+        # Fix 5: "codex·gpt-5.4 -> claude·opus".
+        board = TaskBoard()
+        qtbot.addWidget(board)
+        status = {
+            "tasks": {
+                "t1": {
+                    "status": "pending",
+                    "side": "codex",
+                    "model": "gpt-5.4",
+                    "review_model": "opus",
+                }
+            }
+        }
+        board.set_status(status, side_order=["claude", "codex"])
+        assert board.table.item(0, 2).text() == "codex·gpt-5.4 → claude·opus"
+
+
+# ---------------------------------------------------------------------------
+# TaskBoard -- debate placeholder (fix 3)
+# ---------------------------------------------------------------------------
+class TestTaskBoardPlaceholder:
+    def test_placeholder_visible_by_default_before_any_status(self, qtbot):
+        board = TaskBoard()
+        qtbot.addWidget(board)
+        board.show()
+
+        assert board.placeholder.isVisible() is True
+        assert board.table.isVisible() is False
+        assert board.table.horizontalHeader().isVisible() is False
+
+    def test_placeholder_visible_during_debate_with_no_tasks(self, qtbot):
+        board = TaskBoard()
+        qtbot.addWidget(board)
+        board.show()
+
+        board.set_status({"tasks": {}, "phase": "debate"})
+
+        assert board.placeholder.isVisible() is True
+        assert board.table.isVisible() is False
+        assert board.table.horizontalHeader().isVisible() is False
+
+        board.set_status({"tasks": {}, "phase": None})
+        assert board.placeholder.isVisible() is True
+
+    def test_placeholder_hidden_once_a_real_task_appears(self, qtbot):
+        board = TaskBoard()
+        qtbot.addWidget(board)
+        board.show()
+
+        board.set_status({"tasks": {}, "phase": "debate"})
+        board.set_status(
+            {
+                "tasks": {"t1": {"status": "pending", "side": "claude"}},
+                "phase": "execution",
+            }
+        )
+
+        assert board.placeholder.isVisible() is False
+        assert board.table.isVisible() is True
+        assert board.table.horizontalHeader().isVisible() is True
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +601,15 @@ class TestGatePanelLayout:
 # ---------------------------------------------------------------------------
 # SidePane -- task panel wiring (fix 5) + reviewer resolution (fix 6b)
 # ---------------------------------------------------------------------------
+class TestSidePaneLayout:
+    def test_has_minimum_width_of_320(self, qtbot, tmp_path):
+        (tmp_path / ".spar").mkdir()
+        pane = SidePane(tmp_path, MagicMock())
+        qtbot.addWidget(pane)
+
+        assert pane.minimumWidth() >= 320
+
+
 class TestSidePaneTaskPanel:
     def test_task_panel_hidden_when_no_task_md(self, qtbot, tmp_path):
         (tmp_path / ".spar").mkdir()
@@ -567,4 +670,6 @@ class TestSidePaneTaskPanel:
 
         rows = {r["task_id"]: r for r in pane.task_board.rows}
         assert rows["t1"]["reviewer"] == "claude"
-        assert rows["t1"]["label"] == "codex → claude"
+        # Fix 5: the Side column includes each side's model when the task
+        # carries one -- "codex·gpt-5.5 -> claude·sonnet".
+        assert rows["t1"]["label"] == "codex·gpt-5.5 → claude·sonnet"

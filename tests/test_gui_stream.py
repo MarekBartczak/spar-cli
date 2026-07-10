@@ -22,8 +22,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QPlainTextEdit
 
-from spar.gui.stream import LiveLogTailer, StreamPane, humanize_prefix
+from spar.gui.stream import LiveLogTailer, StreamPane, derive_chip_specs, humanize_prefix
 
 
 # ----------------------------------------------------------------------
@@ -272,6 +273,49 @@ class TestStreamPane:
         assert "[claude · sonnet · runda 1] hello" in text
         assert "[codex · gpt-5.5 · t1 · implementacja] working" in text
 
+    def test_stream_text_wraps_at_widget_width(self, qtbot):
+        # Layout hardening, fix 4b: long lines wrap instead of forcing the
+        # pane (and window) to grow horizontally.
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+        assert pane.text.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth
+
+    def test_garbage_prefixes_produce_no_chips(self, qtbot):
+        # Fix 4c: chips must be derived only from the engine's known wire
+        # shapes -- a stray "t=t1" fragment or a JSON-ish bracket blob must
+        # never surface as a filter chip, even though it still renders in
+        # the transcript.
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+
+        pane.feed_lines(
+            [
+                "[t=t1] resolution: something happened",
+                '[{"side": "claude"}] noise',
+                "[claude r0] legit line",
+            ]
+        )
+
+        assert ("side", "t=t1") not in pane._chip_buttons
+        assert ("side", '{"side": "claude"}') not in pane._chip_buttons
+        assert ("side", "claude") in pane._chip_buttons
+        assert "t=t1" not in pane._known_sides
+        assert "claude" in pane._known_sides
+        # The raw lines still render -- sanitization is chip-only.
+        text = pane.text.toPlainText()
+        assert "resolution: something happened" in text
+        assert "legit line" in text
+
+    def test_chip_label_capped_at_24_chars(self, qtbot):
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+        long_side = "x" * 40
+        pane.feed_lines([f"[{long_side} r0] hi"])
+
+        button = pane._chip_buttons[("side", long_side)]
+        assert len(button.text()) == 24
+        assert button.text() == long_side[:24]
+
     def test_filter_still_matches_raw_side_after_translation(self, qtbot):
         # Filter chips must key on the RAW side/task, not the translated
         # label (fix 4) -- the chip for "claude" must still isolate its
@@ -286,6 +330,65 @@ class TestStreamPane:
         text = pane.text.toPlainText()
         assert "alpha" in text
         assert "beta" not in text
+
+    def test_append_notice_renders_bold_spar_log_line(self, qtbot):
+        from spar.gui.theme import TOKENS
+
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+
+        pane.append_notice("▶ uruchamiam: nowa debata…")
+
+        assert "▶ uruchamiam: nowa debata…" in pane.text.toPlainText()
+        doc = pane.text.document()
+        found = False
+        block = doc.begin()
+        while block.isValid():
+            if "uruchamiam: nowa debata" in block.text():
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid() and "uruchamiam" in frag.text():
+                        fmt = frag.charFormat()
+                        assert fmt.fontWeight() > QFont.Weight.Normal
+                        assert fmt.foreground().color().name() == TOKENS["spar-log"]
+                        found = True
+                    it += 1
+            block = block.next()
+        assert found
+
+    def test_append_notice_bypasses_ring_and_filters(self, qtbot):
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+
+        pane.append_notice("▶ uruchamiam: start exec…")
+        assert len(pane._ring) == 0
+
+        # Notices are ephemeral: a re-render from the ring buffer (any
+        # set_filter call) doesn't carry them along.
+        pane.set_filter("all")
+        assert "uruchamiam" not in pane.text.toPlainText()
+
+
+# ----------------------------------------------------------------------
+# derive_chip_specs -- pure
+# ----------------------------------------------------------------------
+class TestDeriveChipSpecs:
+    def test_side_round_shape_yields_side_chip(self):
+        assert derive_chip_specs("claude r0") == [("side", "claude")]
+
+    def test_side_task_role_shape_yields_side_and_task_chips(self):
+        assert derive_chip_specs("A t1 impl") == [("side", "A"), ("task", "t1")]
+        assert derive_chip_specs("B t2 review") == [("side", "B"), ("task", "t2")]
+
+    def test_literal_spar_yields_no_chip(self):
+        assert derive_chip_specs("spar") == []
+
+    def test_garbage_shapes_yield_no_chip(self):
+        assert derive_chip_specs("t=t1") == []
+        assert derive_chip_specs('{"side": "claude"}') == []
+        assert derive_chip_specs("claude weirdtoken") == []
+        assert derive_chip_specs("") == []
 
 
 # ----------------------------------------------------------------------
