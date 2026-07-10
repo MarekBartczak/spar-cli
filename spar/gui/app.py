@@ -1,12 +1,11 @@
-"""spar gui: PySide6 dashboard-pilot for the spar engine (skeleton).
+"""spar gui: PySide6 dashboard-pilot for the spar engine.
 
 ``main_gui`` is the sole entry point (routed from ``spar.cli``). It parses
 ``--dir`` into a single ``project_dir`` that is the one working directory
 for the whole GUI session: every future ``QProcess``/``git`` call this
 package makes must be scoped to it (``setWorkingDirectory(project_dir)`` /
 ``git -C project_dir``) so the GUI never polls one project while driving
-another (see task brief, review #1). This task only builds the window
-skeleton; process/git wiring lands in later tasks.
+another (see task brief, review #1).
 """
 
 from __future__ import annotations
@@ -23,11 +22,11 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
-    QWidget,
 )
 
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.runner import RunnerState, SparRunner
+from spar.gui.sidepane import SidePane
 from spar.gui.stream import LiveLogTailer, StreamPane
 from spar.gui.theme import build_qss
 from spar.status import build_status
@@ -38,14 +37,6 @@ _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Di
 
 # QSplitter sizes expressing the required 1.7 : 1 left:right ratio.
 _SPLITTER_SIZES = [1700, 1000]
-
-
-class SidePane(QWidget):
-    """Right pane placeholder: tasks + gate view (built in a later task)."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("sidePane")
 
 
 class Toolbar(QToolBar):
@@ -69,17 +60,39 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.project_dir = Path(project_dir)
         self.setWindowTitle(f"spar — {self.project_dir.name}")
+        # A real default size: without it the window starts at whatever tiny
+        # size Qt picks before a show(), which is too small for the splitter
+        # to honor the 1.7:1 ratio against the side pane's now-nonzero
+        # minimum size hint (task/gate widgets, unlike the old placeholder).
+        self.resize(1600, 900)
 
         self.toolbar = Toolbar(self)
         self.addToolBar(self.toolbar)
 
+        # Process pilot: owns the spar QProcess for this project_dir. Built
+        # before the side pane, which needs it to wire the gate buttons.
+        self.runner = SparRunner(self.project_dir, self)
+
         self.stream_pane = StreamPane(self)
-        self.side_pane = SidePane(self)
+        self.side_pane = SidePane(self.project_dir, self.runner, self)
+        self.side_pane.status_changed.connect(self._on_status_changed)
+        # SidePane's own constructor already ran one refresh() before this
+        # connection existed; re-sync now so Plan/Diff reflect the current
+        # status immediately rather than waiting for the next 2s tick.
+        self.side_pane.refresh()
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.addWidget(self.stream_pane)
         self.splitter.addWidget(self.side_pane)
+        # QSplitter.setSizes() scales its request to the splitter's OWN
+        # current size, which without a show()/layout pass is still Qt's
+        # tiny default -- too small to honor the ratio once the side pane
+        # gained a real minimum size hint (task board/gate widgets, unlike
+        # the old empty placeholder). Resize the splitter itself first so
+        # the ratio holds pre-show too (tests construct the window without
+        # showing it).
+        self.splitter.resize(sum(_SPLITTER_SIZES), 900)
         self.splitter.setSizes(list(_SPLITTER_SIZES))
         self.setCentralWidget(self.splitter)
 
@@ -89,8 +102,6 @@ class MainWindow(QMainWindow):
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
 
-        # Process pilot: owns the spar QProcess for this project_dir.
-        self.runner = SparRunner(self.project_dir, self)
         self.runner.started.connect(self._on_started)
         self.runner.finished.connect(self._on_finished)
         self.runner.state_changed.connect(self._on_state_changed)
@@ -112,12 +123,19 @@ class MainWindow(QMainWindow):
         actions[toolbar_mod.START_EXEC].triggered.connect(self.runner.start_exec)
         actions[toolbar_mod.RESUME].triggered.connect(lambda: self.runner.resume(None))
         actions[toolbar_mod.STOP].triggered.connect(self.runner.stop)
+        actions["Plan"].triggered.connect(self.side_pane.show_plan)
+        actions["Diff"].triggered.connect(self.side_pane.show_diff)
+
+    def _on_status_changed(self, status: dict) -> None:
+        actions = self.toolbar.actions_by_label
+        actions["Plan"].setEnabled(bool(status.get("artifact")))
+        actions["Diff"].setEnabled(bool(status.get("branches")))
 
     def _current_status(self) -> dict:
         try:
             return build_status(self.project_dir / ".spar")
         except Exception:
-            return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None}
+            return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None, "branches": None}
 
     def _sync_toolbar(self) -> None:
         self._on_state_changed(self.runner.current_state())

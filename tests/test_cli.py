@@ -534,6 +534,7 @@ class TestStatusSubcommand:
             "pending_gate": None,
             "tasks": {},
             "artifact": None,
+            "branches": None,
         }
 
     def test_debate_state_reports_phase_debate(self, tmp_path, monkeypatch, capsys):
@@ -558,6 +559,8 @@ class TestStatusSubcommand:
             "options": ["accept", "remarks", "abort"],
             "context": {},
         }
+        # Debate-only state has no exec branches yet.
+        assert out["branches"] is None
 
     def test_exec_state_reports_tasks_and_takes_precedence(
         self, tmp_path, monkeypatch, capsys
@@ -583,6 +586,8 @@ class TestStatusSubcommand:
             phase="execution",
             tasks={"t1": TaskState(task=task, status="merged")},
             pending_gate={"name": "final_merge", "options": ["accept", "abort"], "context": {}},
+            target_branch="main",
+            integration_branch="spar/integration",
         )
         ExecStateStore(spar_dir).save(exec_state)
 
@@ -593,6 +598,9 @@ class TestStatusSubcommand:
         assert out["tasks"] == {"t1": {"status": "merged", "side": "claude", "model": "sonnet"}}
         assert out["pending_gate"]["name"] == "final_merge"
         assert out["artifact"] == str(Path(".spar") / "artifact.md")
+        # Sanctioned additive field (task 4): exec branch names for the diff
+        # viewer, straight from state -- never hard-coded elsewhere.
+        assert out["branches"] == {"target": "main", "integration": "spar/integration"}
 
     def test_status_without_json_flag_is_usage_error(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

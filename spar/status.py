@@ -44,6 +44,10 @@ def build_status(spar_dir: Path) -> dict:
             "pending_gate": state.pending_gate,
             "tasks": tasks,
             "artifact": artifact,
+            "branches": {
+                "target": state.target_branch,
+                "integration": state.integration_branch,
+            },
         }
 
     debate_store = StateStore(spar_dir)
@@ -54,6 +58,13 @@ def build_status(spar_dir: Path) -> dict:
             "pending_gate": state.pending_gate,
             "tasks": {},
             "artifact": artifact,
+            "branches": None,
         }
 
-    return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None}
+    return {
+        "phase": None,
+        "pending_gate": None,
+        "tasks": {},
+        "artifact": None,
+        "branches": None,
+    }

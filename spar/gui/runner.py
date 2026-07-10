@@ -265,7 +265,7 @@ class SparRunner(QObject):
         try:
             return build_status(self.spar_dir)
         except Exception:
-            return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None}
+            return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None, "branches": None}
 
     def _archive_stale_exec(self) -> None:
         if self._read_status().get("phase") != "done":
