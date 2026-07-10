@@ -198,6 +198,13 @@ def _validate_task(rt: dict, *, sides: dict, order: list, id_set: set[str]) -> N
             f"review model {rt['review']!r} not in catalog for side {other_side!r}, line: {line!r}"
         )
 
+    review_allowed = getattr(sides[other_side], "review_models", ()) or ()
+    if review_allowed and rt["review"] not in review_allowed:
+        raise TaskListError(
+            f"review model {rt['review']!r} not allowed for review on side {other_side!r} "
+            f"(review_models={list(review_allowed)}), line: {line!r}"
+        )
+
     for dep in rt["deps"]:
         if dep not in id_set:
             raise TaskListError(f"unknown dependency {dep!r} in line: {line!r}")

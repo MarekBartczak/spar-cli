@@ -162,6 +162,35 @@ class TestBuildOrchestrator:
         assert orch.sink.quiet is False
         orch.sink.close()
 
+    def test_debate_model_overrides_model_for_debate_adapter(self, tmp_path, monkeypatch):
+        """A side with debate_model set builds its debate adapter on that
+        model, even though ``model`` is unset (the common case: model=""
+        lets the CLI decide, debate_model makes planning explicit)."""
+        from spar.config import load_config
+
+        monkeypatch.chdir(tmp_path)
+        global_cfg = tmp_path / "global.toml"
+        global_cfg.write_text(
+            '[sides.claude]\nmodels=["opus","sonnet"]\ndebate_model="opus"\n'
+        )
+        config = load_config(Path.cwd(), global_path=global_cfg)
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt"])
+        orch = cli._build_orchestrator(args, config)
+        assert orch.sides["claude"].model == "opus"
+
+    def test_no_debate_model_falls_back_to_model(self, tmp_path, monkeypatch):
+        from spar.config import load_config
+
+        monkeypatch.chdir(tmp_path)
+        global_cfg = tmp_path / "global.toml"
+        global_cfg.write_text('[sides.claude]\nmodels=["opus","sonnet"]\nmodel="sonnet"\n')
+        config = load_config(Path.cwd(), global_path=global_cfg)
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt"])
+        orch = cli._build_orchestrator(args, config)
+        assert orch.sides["claude"].model == "sonnet"
+
 
 class TestTasksFlagWiring:
     """`main(...)` threads the --tasks flag through to _build_orchestrator."""

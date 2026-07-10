@@ -264,6 +264,7 @@ def _format_remarks(open_remarks: list[StateRemark]) -> str:
 def _format_tasks_contract(
     catalogs: dict[str, tuple[str, ...]] | None,
     impl_catalogs: dict[str, tuple[str, ...]] | None = None,
+    review_catalogs: dict[str, tuple[str, ...]] | None = None,
 ) -> str:
     """The opt-in `## Tasks` planning contract appended to a turn prompt.
 
@@ -293,6 +294,8 @@ def _format_tasks_contract(
         "of the reviewing side.",
         "- review is one of the OTHER side's models (the reviewer is the "
         "non-implementing side).",
+        "- where a side's catalog notes a review restriction, review= (when "
+        "that side reviews) MUST be one of those models.",
         "- deps is a comma list of earlier task ids this task depends on, or "
         "`-` for none.",
         "- files is a comma list of globs naming the task's file scope.",
@@ -318,15 +321,16 @@ def _format_tasks_contract(
         "Model catalogs (assign only models a side actually has):",
     ]
     impl_catalogs = impl_catalogs or {}
+    review_catalogs = review_catalogs or {}
     for side, models in catalogs.items():
         impl = impl_catalogs.get(side, ())
+        review = review_catalogs.get(side, ())
+        line = f"- {side}: {', '.join(models)}"
         if impl:
-            lines.append(
-                f"- {side}: {', '.join(models)} "
-                f"(implementation: ONLY {', '.join(impl)})"
-            )
-        else:
-            lines.append(f"- {side}: {', '.join(models)}")
+            line += f" (implementation: ONLY {', '.join(impl)})"
+        if review:
+            line += f" (review: ONLY {', '.join(review)})"
+        lines.append(line)
     lines.append("")
     lines.append(
         "Consensus is NOT accepted until this `## Tasks` section parses; a "
@@ -345,6 +349,7 @@ def build_turn_prompt(
     kind: str = "turn",
     catalogs: dict[str, tuple[str, ...]] | None = None,
     impl_catalogs: dict[str, tuple[str, ...]] | None = None,
+    review_catalogs: dict[str, tuple[str, ...]] | None = None,
     require_tasks: bool = False,
 ) -> str:
     """Pure, unit-testable builder for the prompt handed to a side.
@@ -403,7 +408,7 @@ def build_turn_prompt(
         "",
     ]
     if require_tasks:
-        parts += [_format_tasks_contract(catalogs, impl_catalogs), ""]
+        parts += [_format_tasks_contract(catalogs, impl_catalogs, review_catalogs), ""]
     parts.append(PROTOCOL_BLOCK)
     return "\n".join(parts)
 
@@ -1073,6 +1078,7 @@ class Orchestrator:
     ) -> str:
         catalogs = self._catalogs() if self.require_tasks else None
         impl_catalogs = self._impl_catalogs() if self.require_tasks else None
+        review_catalogs = self._review_catalogs() if self.require_tasks else None
         if kind == "creation":
             base = build_turn_prompt(
                 side_name=side,
@@ -1083,6 +1089,7 @@ class Orchestrator:
                 kind="creation",
                 catalogs=catalogs,
                 impl_catalogs=impl_catalogs,
+                review_catalogs=review_catalogs,
                 require_tasks=self.require_tasks,
             )
         else:
@@ -1095,6 +1102,7 @@ class Orchestrator:
                 kind="turn",
                 catalogs=catalogs,
                 impl_catalogs=impl_catalogs,
+                review_catalogs=review_catalogs,
                 require_tasks=self.require_tasks,
             )
         if warning:
@@ -1115,6 +1123,15 @@ class Orchestrator:
         cfgs = self.side_configs or {}
         return {
             name: getattr(cfgs[name], "impl_models", ()) or ()
+            for name in self.order
+            if name in cfgs
+        }
+
+    def _review_catalogs(self) -> dict[str, tuple[str, ...]]:
+        """Per-side review-model floors (empty tuple = unrestricted)."""
+        cfgs = self.side_configs or {}
+        return {
+            name: getattr(cfgs[name], "review_models", ()) or ()
             for name in self.order
             if name in cfgs
         }

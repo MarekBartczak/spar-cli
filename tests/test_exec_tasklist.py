@@ -90,6 +90,70 @@ def test_model_outside_impl_models_rejected():
     assert "impl_models" in str(excinfo.value)
 
 
+def test_review_model_outside_review_models_rejected():
+    from spar.config import SideConfig
+
+    sides = {
+        "claude": SideConfig(
+            adapter="claude", command="claude",
+            models=("opus", "sonnet", "haiku"), default_model="sonnet",
+        ),
+        "codex": SideConfig(
+            adapter="codex", command="codex",
+            models=("gpt-5.5", "gpt-5.4"), default_model="gpt-5.5",
+            review_models=("gpt-5.5",),
+        ),
+    }
+    # claude implements, codex reviews; codex's review_models excludes gpt-5.4
+    plan = """## Tasks
+- [t1] do it | side=claude | model=opus | review=gpt-5.4 | deps=- | files=a.py
+"""
+    with pytest.raises(TaskListError) as excinfo:
+        parse_task_list(plan, sides=sides, order=["claude", "codex"])
+    assert "review_models" in str(excinfo.value)
+
+
+def test_review_model_within_review_models_accepted():
+    from spar.config import SideConfig
+
+    sides = {
+        "claude": SideConfig(
+            adapter="claude", command="claude",
+            models=("opus", "sonnet", "haiku"), default_model="sonnet",
+        ),
+        "codex": SideConfig(
+            adapter="codex", command="codex",
+            models=("gpt-5.5", "gpt-5.4"), default_model="gpt-5.5",
+            review_models=("gpt-5.5",),
+        ),
+    }
+    plan = """## Tasks
+- [t1] do it | side=claude | model=opus | review=gpt-5.5 | deps=- | files=a.py
+"""
+    tasks = parse_task_list(plan, sides=sides, order=["claude", "codex"])
+    assert tasks[0].review_model == "gpt-5.5"
+
+
+def test_empty_review_models_allows_any_catalog_model():
+    from spar.config import SideConfig
+
+    sides = {
+        "claude": SideConfig(
+            adapter="claude", command="claude",
+            models=("opus",), default_model="opus",
+        ),
+        "codex": SideConfig(
+            adapter="codex", command="codex",
+            models=("gpt-5.5", "gpt-5.4"), default_model="gpt-5.5",
+        ),
+    }
+    plan = """## Tasks
+- [t1] do it | side=claude | model=opus | review=gpt-5.4 | deps=- | files=a.py
+"""
+    tasks = parse_task_list(plan, sides=sides, order=["claude", "codex"])
+    assert tasks[0].review_model == "gpt-5.4"
+
+
 def test_empty_impl_models_allows_any_catalog_model():
     from spar.config import SideConfig
 

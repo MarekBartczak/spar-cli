@@ -396,6 +396,19 @@ class TestSetGlobalCommand:
         assert cfg.execution.test_command == "pytest -q"
         assert cfg.execution.max_review_rounds == 3
 
+    def test_set_global_command_preserves_debate_model_and_review_models(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nadapter="claude"\ncommand="claude"\n'
+            'models=["opus","sonnet"]\ndefault_model="sonnet"\n'
+            'debate_model="opus"\nreview_models=["opus","sonnet"]\n'
+        )
+        set_global_command("claude", "claude-v2", global_path=gp)
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].command == "claude-v2"
+        assert cfg.sides["claude"].debate_model == "opus"
+        assert cfg.sides["claude"].review_models == ("opus", "sonnet")
+
 
 class TestValidationAdapterValues:
     """Test validation of adapter values."""
@@ -759,6 +772,86 @@ class TestSideModelsAndDefault:
     def test_impl_models_must_be_string_list(self, tmp_path):
         gp = tmp_path / "c.toml"
         gp.write_text('[sides.claude]\nimpl_models="opus"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+
+class TestDebateModel:
+    """Test the per-side debate_model field (planning-turn model override)."""
+
+    def test_debate_model_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nmodels=["opus","sonnet"]\ndefault_model="sonnet"\n'
+            'debate_model="opus"\n'
+        )
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].debate_model == "opus"
+
+    def test_debate_model_default_empty(self, tmp_path):
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.sides["claude"].debate_model == ""
+
+    def test_debate_model_must_be_in_catalog(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nmodels=["opus"]\ndebate_model="sonnet"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_debate_model_with_no_models_key_raises_error(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\ndebate_model="opus"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_debate_model_from_project_invalid_against_global_models(self, tmp_path):
+        global_config = tmp_path / "global_config.toml"
+        global_config.write_text('[sides.claude]\nmodels=["opus","sonnet"]\n')
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        project_config = project_dir / ".spar" / "config.toml"
+        project_config.parent.mkdir(parents=True)
+        project_config.write_text('[sides.claude]\ndebate_model="haiku"\n')
+
+        with pytest.raises(ConfigError):
+            load_config(project_dir, global_path=global_config)
+
+    def test_debate_model_must_be_string(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        # TOML list where a string is expected -> not a str, triggers type check
+        gp.write_text('[sides.claude]\nmodels=["opus"]\ndebate_model=["opus"]\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+
+class TestReviewModels:
+    """Test the per-side review_models floor (mirrors impl_models)."""
+
+    def test_review_models_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nmodels=["opus","sonnet","haiku"]\n'
+            'default_model="sonnet"\nreview_models=["opus","sonnet"]\n'
+        )
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.sides["claude"].review_models == ("opus", "sonnet")
+
+    def test_review_models_default_empty(self, tmp_path):
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.sides["claude"].review_models == ()
+
+    def test_review_models_must_be_subset_of_models(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nmodels=["sonnet"]\nreview_models=["opus"]\n'
+        )
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_review_models_must_be_string_list(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[sides.claude]\nreview_models="opus"\n')
         with pytest.raises(ConfigError):
             load_config(tmp_path / "p", global_path=gp)
 

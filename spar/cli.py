@@ -114,7 +114,7 @@ def _build_orchestrator(args, config) -> Orchestrator:
         adapter_cls = _ADAPTERS[side_cfg.adapter]
         adapters[name] = adapter_cls(
             command=side_cfg.command,
-            model=side_cfg.model,
+            model=(side_cfg.debate_model or side_cfg.model),
             cwd=cwd,
             events_dir=events_dir,
             side_name=name,

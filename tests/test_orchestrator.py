@@ -270,6 +270,25 @@ def test_tasks_contract_shows_impl_model_restriction():
     assert "review= may use any model of the reviewing side" in text
 
 
+def test_tasks_contract_shows_review_model_restriction():
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract(
+        {"claude": ("opus", "sonnet", "haiku"), "codex": ("gpt-5.5", "gpt-5.4")},
+        review_catalogs={"claude": ("opus", "sonnet"), "codex": ()},
+    )
+    # restricted side: review subset called out
+    assert "claude: opus, sonnet, haiku (review: ONLY opus, sonnet)" in text
+    # unrestricted side: plain catalog line, no restriction note
+    assert "- codex: gpt-5.5, gpt-5.4" in text
+    assert "codex: gpt-5.5, gpt-5.4 (review" not in text
+    # the rule is stated
+    assert (
+        "where a side's catalog notes a review restriction, review= (when "
+        "that side reviews) MUST be one of those models." in text
+    )
+
+
 def test_build_turn_prompt_default_omits_tasks_contract():
     prompt = build_turn_prompt(
         side_name="claude",
