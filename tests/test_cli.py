@@ -137,6 +137,30 @@ class TestBuildOrchestrator:
         orch = cli._build_orchestrator(args, config)
         assert orch.require_tasks is False
 
+    def test_quiet_flag_reaches_sink(self, tmp_path, monkeypatch):
+        from spar.config import load_config
+
+        monkeypatch.chdir(tmp_path)
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt", "--quiet"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.sink is not None
+        assert orch.sink.quiet is True
+        orch.sink.close()
+
+    def test_default_quiet_is_false(self, tmp_path, monkeypatch):
+        from spar.config import load_config
+
+        monkeypatch.chdir(tmp_path)
+        parser = cli._build_parser()
+        args = parser.parse_args(["prompt"])
+        config = load_config(Path.cwd())
+        orch = cli._build_orchestrator(args, config)
+        assert orch.sink is not None
+        assert orch.sink.quiet is False
+        orch.sink.close()
+
 
 class TestTasksFlagWiring:
     """`main(...)` threads the --tasks flag through to _build_orchestrator."""
@@ -478,6 +502,22 @@ class TestExecHeadlessGateFlags:
         tasks = parse_task_list(plan_text, sides=config.sides, order=["claude", "codex"])
         executor = cli._build_executor(args, config, tasks, ["claude", "codex"], plan_path)
         assert isinstance(executor.gate, HeadlessExecGate)
+
+    def test_quiet_flag_reaches_sink(self, tmp_path, monkeypatch):
+        from spar.config import load_config
+        from spar.exec.tasklist import parse_task_list
+
+        _write_plan(tmp_path, monkeypatch, VALID_PLAN, with_side_config=True)
+        parser = cli._build_exec_parser()
+        args = parser.parse_args(["--quiet"])
+        config = load_config(Path.cwd())
+        plan_path = Path(".spar/artifact.md")
+        plan_text = plan_path.read_text(encoding="utf-8")
+        tasks = parse_task_list(plan_text, sides=config.sides, order=["claude", "codex"])
+        executor = cli._build_executor(args, config, tasks, ["claude", "codex"], plan_path)
+        assert executor.sink is not None
+        assert executor.sink.quiet is True
+        executor.sink.close()
 
 
 class TestStatusSubcommand:

@@ -45,21 +45,26 @@ class Step:
 
     ``edits`` maps a worktree-relative path -> content written before the reply
     is returned (used by an implementer turn). A reviewer turn uses ``edits={}``.
+    ``emit`` (optional) is a display line fed to ``on_event`` when the caller
+    passed one, so wiring tests can assert it lands in the sink.
     """
 
-    def __init__(self, reply, sid="sess", edits=None, raises=None):
+    def __init__(self, reply, sid="sess", edits=None, raises=None, emit=None):
         self.reply = reply
         self.sid = sid
         self.edits = edits or {}
         self.raises = raises
+        self.emit = emit
 
-    def __call__(self, root):
+    def __call__(self, root, on_event=None):
         if self.raises is not None:
             raise self.raises
         for rel, content in self.edits.items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+        if self.emit is not None and on_event is not None:
+            on_event(self.emit)
         return TurnResult(
             session_id=self.sid, reply_text=self.reply, events_path=Path("ev"), exit_code=0
         )
@@ -74,11 +79,11 @@ class FakeAdapter:
         self.models = []  # model passed on each make_adapter call for this side
         self.readonly_flags = []  # readonly flag on each make_adapter call
 
-    def run_turn(self, prompt, session_id, timeout_sec):
+    def run_turn(self, prompt, session_id, timeout_sec, on_event=None):
         self.calls.append({"prompt": prompt, "session_id": session_id, "timeout": timeout_sec})
         if not self.steps:
             raise AssertionError(f"{self.name}: no scripted step left for this call")
-        return self.steps.pop(0)(self.root)
+        return self.steps.pop(0)(self.root, on_event=on_event)
 
 
 def make_factory(steps_by_side):
@@ -173,7 +178,7 @@ def make_task(tid, side, files, deps=(), test=None, model="ma", review="mb"):
 
 
 def build_executor(repo, tmp_path, *, tasks, steps_by_side, gate, execution,
-                   auto=False):
+                   auto=False, sink=None):
     spar_dir = tmp_path / ".spar"
     make_adapter, adapters = make_factory(steps_by_side)
     store = ExecStateStore(spar_dir)
@@ -191,6 +196,7 @@ def build_executor(repo, tmp_path, *, tasks, steps_by_side, gate, execution,
         store=store,
         log=logs.append,
         auto_integration_merge=auto,
+        sink=sink,
     )
     return ex, adapters, store, logs
 
@@ -252,6 +258,78 @@ def test_happy_path_two_tasks(repo, tmp_path):
     # (model=t2.model == "mb").
     assert adapters["A"].models == ["ma", "ma"]
     assert adapters["B"].models == ["mb", "mb"]
+
+
+def test_sink_wiring_emits_impl_and_review_prefixed_lines(repo, tmp_path):
+    import io
+
+    from spar.stream import StreamSink
+
+    tasks = [
+        make_task("t1", "A", ["work1.py"], model="ma", review="mb"),
+    ]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work1.py": "print(1)\n"}, emit="implementer says hi"),
+        ],
+        "B": [
+            Step(vblock("DONE"), emit="reviewer says hi"),
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    out = io.StringIO()
+    sink = StreamSink(tmp_path / ".spar", quiet=False, stdout=out)
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"), sink=sink,
+    )
+    rc = ex.run()
+    sink.close()
+    assert rc == 0
+
+    stdout_text = out.getvalue()
+    assert "[A t1 impl] implementer says hi" in stdout_text
+    assert "[A t1 review] reviewer says hi" in stdout_text
+    live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
+    assert "[A t1 impl] implementer says hi" in live_log
+    assert "[A t1 review] reviewer says hi" in live_log
+
+
+def test_sink_wiring_quiet_suppresses_event_but_not_log(repo, tmp_path):
+    import io
+
+    from spar.stream import StreamSink
+
+    tasks = [
+        make_task("t1", "A", ["work1.py"], model="ma", review="mb"),
+    ]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work1.py": "print(1)\n"}, emit="implementer says hi"),
+        ],
+        "B": [
+            Step(vblock("DONE"), emit="reviewer says hi"),
+        ],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    out = io.StringIO()
+    sink = StreamSink(tmp_path / ".spar", quiet=True, stdout=out)
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"), sink=sink,
+    )
+    rc = ex.run()
+    sink.close()
+    assert rc == 0
+
+    stdout_text = out.getvalue()
+    assert "implementer says hi" not in stdout_text
+    assert "reviewer says hi" not in stdout_text
+    # spar's own log lines always reach stdout, even under quiet.
+    assert "spar exec:" in stdout_text
+    live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
+    assert "[A t1 impl] implementer says hi" in live_log
+    assert "[A t1 review] reviewer says hi" in live_log
 
 
 # ---------------------------------------------------------------------------

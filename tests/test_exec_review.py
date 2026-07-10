@@ -45,14 +45,15 @@ class Step:
     own ``git commit`` inside the worktree).
     """
 
-    def __init__(self, reply, sid="sess", edits=None, raises=None, commit=False):
+    def __init__(self, reply, sid="sess", edits=None, raises=None, commit=False, emit=None):
         self.reply = reply
         self.sid = sid
         self.edits = edits or {}
         self.raises = raises
         self.commit = commit
+        self.emit = emit
 
-    def __call__(self, prompt, session_id, root):
+    def __call__(self, prompt, session_id, root, on_event=None):
         if self.raises is not None:
             raise self.raises
         for rel, content in self.edits.items():
@@ -62,6 +63,8 @@ class Step:
         if self.commit:
             _git(root, "add", "-A")
             _git(root, "commit", "-qm", "agent self-commit")
+        if self.emit is not None and on_event is not None:
+            on_event(self.emit)
         return TurnResult(
             session_id=self.sid, reply_text=self.reply, events_path=Path("ev"), exit_code=0
         )
@@ -74,13 +77,13 @@ class FakeAdapter:
         self.root = root  # worktree for the implementer; None for the reviewer
         self.calls = []
 
-    def run_turn(self, prompt, session_id, timeout_sec):
+    def run_turn(self, prompt, session_id, timeout_sec, on_event=None):
         self.calls.append(
             {"prompt": prompt, "session_id": session_id, "timeout": timeout_sec}
         )
         if not self.steps:
             raise AssertionError(f"{self.name}: no scripted step left for this call")
-        return self.steps.pop(0)(prompt, session_id, self.root)
+        return self.steps.pop(0)(prompt, session_id, self.root, on_event=on_event)
 
 
 def _git(cwd, *args):

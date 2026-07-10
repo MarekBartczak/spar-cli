@@ -194,6 +194,8 @@ def run_cross_review(
     foreign_files: tuple[tuple[str, tuple[str, ...]], ...] = (),
     merged_files: tuple[str, ...] = (),
     start_with: str = "reviewer",
+    on_event_impl=None,
+    on_event_review=None,
 ) -> None:
     """Drive the asymmetric cross-review loop until the reviewer emits DONE.
 
@@ -213,6 +215,13 @@ def run_cross_review(
     turn BEFORE the loop's first reviewer turn — no reviewer verdict, no new
     remarks, no round counted — sending the still-open ledger remarks straight
     to the implementer; used only by the review-resume ``extend`` path.
+
+    ``on_event_impl``/``on_event_review`` are the (optional) display-line
+    callbacks (``Callable[[str], None]``) forwarded to the implementer's and
+    reviewer's adapter turns respectively — TWO callbacks (not one keyed by
+    role) because ``on_event_impl`` is exactly the same callback
+    ``_implementer_turn`` already accepts when called directly (outside a
+    review loop, e.g. the initial implement turn in ``spar/exec/loop.py``).
     """
     repo = Path(repo)
     worktree = Path(worktree)
@@ -237,6 +246,7 @@ def run_cross_review(
             store=store,
             log=log,
             timeout_sec=timeout_sec,
+            on_event=on_event_impl,
         )
         if made_changes:
             no_change_streak = 0
@@ -274,6 +284,7 @@ def run_cross_review(
             store=store,
             log=log,
             timeout_sec=timeout_sec,
+            on_event=on_event_review,
         )
         verdict = _parse_verdict_with_retry(
             role="review",
@@ -284,6 +295,7 @@ def run_cross_review(
             store=store,
             log=log,
             timeout_sec=timeout_sec,
+            on_event=on_event_review,
         )
 
         # Append the reviewer's new remarks to the ledger with fresh ids.
@@ -353,6 +365,7 @@ def _implementer_turn(
     log,
     timeout_sec: int,
     warning: str | None = None,
+    on_event=None,
 ) -> bool:
     """Run one implementer turn; return ``True`` iff it committed file changes.
 
@@ -388,6 +401,7 @@ def _implementer_turn(
             store=store,
             log=log,
             timeout_sec=timeout_sec,
+            on_event=on_event,
         )
 
         # Parse the verdict FIRST. ``_parse_verdict_with_retry`` may run the
@@ -404,6 +418,7 @@ def _implementer_turn(
             store=store,
             log=log,
             timeout_sec=timeout_sec,
+            on_event=on_event,
         )
 
         # The implementer never ends the review — only the reviewer's DONE does.
@@ -529,6 +544,7 @@ def _invoke(
     store: ExecStateStore,
     log,
     timeout_sec: int,
+    on_event=None,
 ):
     """Run one adapter turn, bracketing it with ``turn_in_progress`` and
     handling a lost session with a single fresh retry."""
@@ -541,10 +557,10 @@ def _invoke(
 
     session_id = task_state.impl_session_id if role == "impl" else task_state.review_session_id
     try:
-        result = adapter.run_turn(prompt, session_id, timeout_sec)
+        result = adapter.run_turn(prompt, session_id, timeout_sec, on_event=on_event)
     except SessionLost:
         log(f"[t={task_state.task.id}] {role} session lost; retrying with a fresh session.")
-        result = adapter.run_turn(prompt, None, timeout_sec)
+        result = adapter.run_turn(prompt, None, timeout_sec, on_event=on_event)
 
     if role == "impl":
         task_state.impl_session_id = result.session_id
@@ -565,6 +581,7 @@ def _parse_verdict_with_retry(
     store: ExecStateStore,
     log,
     timeout_sec: int,
+    on_event=None,
 ) -> Verdict:
     """Parse the reply's verdict; on failure, demand exactly one corrected
     verdict in the same session, then raise :class:`ReviewAbort` if still bad."""
@@ -583,6 +600,7 @@ def _parse_verdict_with_retry(
         store=store,
         log=log,
         timeout_sec=timeout_sec,
+        on_event=on_event,
     )
     try:
         return parse_verdict(retry_result.reply_text)

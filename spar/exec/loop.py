@@ -52,6 +52,7 @@ from spar.exec.tasklist import Task
 from spar.gates import GateChoice, GateParseError, GatePending, validate_choice
 from spar.orchestrator import GateDecision
 from spar.state import LockHeld, StateError
+from spar.stream import StreamSink
 from spar.verdict import Severity
 
 __all__ = ["Executor", "ExecGate", "ConsoleExecGate"]
@@ -176,6 +177,7 @@ class Executor:
         store: ExecStateStore,
         log=print,
         auto_integration_merge: bool = False,
+        sink: StreamSink | None = None,
     ) -> None:
         # ``sides`` (SideConfig catalog) extends the brief: it is required to
         # generate the model/review of an integration-fix Task from each Side's
@@ -195,7 +197,11 @@ class Executor:
         self.execution = execution
         self.gate = gate
         self.store = store
-        self.log = log
+        self.sink = sink
+        # ``sink`` present -> route spar's own log lines through it (stdout +
+        # .spar/live.log); otherwise keep the caller's ``log`` (tests pass
+        # ``log=`` directly with no sink).
+        self.log = sink.log if sink is not None else log
         self.auto_integration_merge = auto_integration_merge
         # The live state object under mutation, so ``_guarded`` can persist a
         # pending gate onto it before returning 10. Set at the top of a run.
@@ -514,11 +520,23 @@ class Executor:
 
     # -- a single task through implement → review → test → merge -------
 
+    def _event_callbacks(self, task: Task):
+        """Build the per-task (impl-prefixed, review-prefixed) ``on_event``
+        callbacks the sink fans adapter turn lines out through, or
+        ``(None, None)`` when no sink was configured."""
+        if self.sink is None:
+            return None, None
+        side = task.side
+        on_event_impl = lambda ln: self.sink.event(f"{side} {task.id} impl", ln)
+        on_event_review = lambda ln: self.sink.event(f"{side} {task.id} review", ln)
+        return on_event_impl, on_event_review
+
     def _run_task(self, state: ExecState, ts: TaskState) -> None:
         task = ts.task
         branch = self._task_branch(task)
         worktree = self._worktree_for(task.side)
         reviewer = self._other_side(task.side)
+        on_event_impl, on_event_review = self._event_callbacks(task)
 
         # Record intent BEFORE creating any git artifact (§11.1): persist the
         # branch name and ``implementing`` status first, so a crash between the
@@ -556,6 +574,7 @@ class Executor:
                 log=self.log,
                 timeout_sec=self.execution.turn_timeout_sec,
                 warning=None,
+                on_event=on_event_impl,
             )
 
             # Empty-implementation guard (§6/§8): if the initial turn created
@@ -584,6 +603,7 @@ class Executor:
                         "content per the plan, using your file-editing tools. Do not "
                         "merely describe the change."
                     ),
+                    on_event=on_event_impl,
                 )
                 if self._task_branch_empty(
                     branch, worktree, state.integration_branch
@@ -616,6 +636,8 @@ class Executor:
                 merged_files=gitops.present_files(
                     self.repo, state.target_base_oid, state.integration_branch
                 ),
+                on_event_impl=on_event_impl,
+                on_event_review=on_event_review,
             )
 
             # Per-task test → merge, shared with the review-resume path.
@@ -653,6 +675,7 @@ class Executor:
         """
         task = ts.task
         reviewer = self._other_side(task.side)
+        on_event_impl, on_event_review = self._event_callbacks(task)
         while True:
             ts.status = "testing"
             self.store.save(state)
@@ -686,6 +709,7 @@ class Executor:
                 log=self.log,
                 timeout_sec=self.execution.turn_timeout_sec,
                 warning=warning,
+                on_event=on_event_impl,
             )
             ts.status = "review"
             self.store.save(state)
@@ -707,6 +731,8 @@ class Executor:
                 merged_files=gitops.present_files(
                     self.repo, state.target_base_oid, state.integration_branch
                 ),
+                on_event_impl=on_event_impl,
+                on_event_review=on_event_review,
             )
 
         # Merge the task branch into integration.
@@ -739,6 +765,7 @@ class Executor:
         branch = ts.branch or self._task_branch(task)
         worktree = self._worktree_for(task.side)
         reviewer = self._other_side(task.side)
+        on_event_impl, on_event_review = self._event_callbacks(task)
 
         decision = self._resume_decision
         if decision is None:
@@ -799,6 +826,8 @@ class Executor:
                 merged_files=gitops.present_files(
                     self.repo, state.target_base_oid, state.integration_branch
                 ),
+                on_event_impl=on_event_impl,
+                on_event_review=on_event_review,
             )
         else:
             self.log(

@@ -35,6 +35,7 @@ from spar.state import (
     check_recovery,
     hash_artifact,
 )
+from spar.stream import StreamSink
 from spar.verdict import Severity, Verdict, VerdictError, parse_verdict
 
 __all__ = [
@@ -465,6 +466,7 @@ class Orchestrator:
         log=print,
         side_configs: dict[str, SideConfig] | None = None,
         require_tasks: bool = False,
+        sink: StreamSink | None = None,
     ) -> None:
         if len(order) < 2:
             raise ValueError("a debate needs at least two sides")
@@ -478,7 +480,11 @@ class Orchestrator:
         self.debate = debate
         self.gate = gate
         self.guard = guard
-        self.log = log
+        self.sink = sink
+        # ``sink`` present -> route spar's own log lines through it (so they
+        # always hit stdout AND .spar/live.log); otherwise keep the caller's
+        # ``log`` (tests pass ``log=`` directly with no sink).
+        self.log = sink.log if sink is not None else log
         self.side_configs = side_configs
         self.require_tasks = require_tasks
         # The parsed ``--gate`` decision threaded into a resume (headless
@@ -1039,11 +1045,16 @@ class Orchestrator:
         adapter = self.sides[side]
         session_id = state.sides[side].session_id
         timeout = self.debate.turn_timeout_sec
+        on_event = (
+            (lambda ln, _p=f"{side} r{state.round}": self.sink.event(_p, ln))
+            if self.sink is not None
+            else None
+        )
         try:
-            result = adapter.run_turn(prompt, session_id, timeout)
+            result = adapter.run_turn(prompt, session_id, timeout, on_event=on_event)
         except SessionLost:
             self.log(f"[{side}] session lost; retrying with a fresh session.")
-            result = adapter.run_turn(prompt, None, timeout)
+            result = adapter.run_turn(prompt, None, timeout, on_event=on_event)
 
         state.sides[side] = replace(state.sides[side], session_id=result.session_id)
         state.turn_in_progress = None

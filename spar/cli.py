@@ -18,6 +18,7 @@ from spar.headless import HeadlessGate
 from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
 from spar.status import build_status
+from spar.stream import StreamSink
 
 _ADAPTERS = {"claude": ClaudeAdapter, "codex": CodexAdapter}
 
@@ -69,6 +70,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--gate", default=None, metavar="VALUE",
         help="Resolve a pending gate headlessly: accept, abort, extend:<n> "
              "or remarks:<file>. Requires --continue and --headless.",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress live model output on stdout; spar's own logs and "
+             ".spar/live.log are unaffected",
     )
     parser.add_argument(
         "-m", "--adapter", choices=sorted(_ADAPTERS),
@@ -123,6 +129,10 @@ def _build_orchestrator(args, config) -> Orchestrator:
     artifact_path = Path(args.artifact)
     guard = Guard(repo_dir=cwd, artifact_path=artifact_path, spar_dir=Path(".spar"))
     gate = HeadlessGate() if getattr(args, "headless", False) else ConsoleGate()
+    # A fresh StreamSink per CLI invocation truncates .spar/live.log, so a
+    # --continue resume also starts a fresh live view -- accepted v1 behavior
+    # (see spar/stream.py's module docstring).
+    sink = StreamSink(Path(".spar"), quiet=getattr(args, "quiet", False))
     return Orchestrator(
         sides=adapters,
         order=order,
@@ -133,6 +143,7 @@ def _build_orchestrator(args, config) -> Orchestrator:
         guard=guard,
         side_configs=config.sides,
         require_tasks=args.tasks,
+        sink=sink,
     )
 
 
@@ -173,6 +184,11 @@ def _build_exec_parser() -> argparse.ArgumentParser:
         help="Resolve a pending gate headlessly: accept, abort, extend:<n> "
              "or remarks:<file>. Requires --continue and --headless.",
     )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress live model output on stdout; spar's own logs and "
+             ".spar/live.log are unaffected",
+    )
     return parser
 
 
@@ -199,6 +215,10 @@ def _build_executor(
         )
 
     gate = HeadlessExecGate() if getattr(args, "headless", False) else ConsoleExecGate()
+    # A fresh StreamSink per CLI invocation truncates .spar/live.log, so a
+    # --continue resume also starts a fresh live view -- accepted v1 behavior
+    # (see spar/stream.py's module docstring).
+    sink = StreamSink(Path(".spar"), quiet=getattr(args, "quiet", False))
     return Executor(
         repo=Path.cwd(),
         spar_dir=Path(".spar"),
@@ -211,6 +231,7 @@ def _build_executor(
         gate=gate,
         store=ExecStateStore(Path(".spar")),
         auto_integration_merge=args.auto_integration_merge,
+        sink=sink,
     )
 
 

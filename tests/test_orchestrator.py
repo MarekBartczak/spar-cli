@@ -54,18 +54,21 @@ def vblock(status, resolved=(), remarks=()):
 class Step:
     """One scripted adapter turn."""
 
-    def __init__(self, reply, sid="sess", write=None, artifact=None, raises=None):
+    def __init__(self, reply, sid="sess", write=None, artifact=None, raises=None, emit=None):
         self.reply = reply
         self.sid = sid
         self.write = write
         self.artifact = artifact
         self.raises = raises
+        self.emit = emit
 
-    def __call__(self, prompt, session_id):
+    def __call__(self, prompt, session_id, on_event=None):
         if self.raises is not None:
             raise self.raises
         if self.write is not None:
             self.artifact.write_text(self.write, encoding="utf-8")
+        if self.emit is not None and on_event is not None:
+            on_event(self.emit)
         return TurnResult(
             session_id=self.sid, reply_text=self.reply, events_path=Path("ev"), exit_code=0
         )
@@ -77,13 +80,13 @@ class FakeAdapter:
         self.steps = list(steps)
         self.calls = []  # list of {"prompt", "session_id", "timeout"}
 
-    def run_turn(self, prompt, session_id, timeout_sec):
+    def run_turn(self, prompt, session_id, timeout_sec, on_event=None):
         self.calls.append(
             {"prompt": prompt, "session_id": session_id, "timeout": timeout_sec}
         )
         if not self.steps:
             raise AssertionError(f"{self.name}: no scripted step left for this call")
-        return self.steps.pop(0)(prompt, session_id)
+        return self.steps.pop(0)(prompt, session_id, on_event=on_event)
 
 
 class FakeGate:
@@ -117,6 +120,7 @@ def build_orch(
     max_rounds=6,
     side_configs=None,
     require_tasks=False,
+    sink=None,
 ):
     adapters = {name: FakeAdapter(name, steps) for name, steps in sides_steps.items()}
     store = StateStore(tmp_path / ".spar")
@@ -134,6 +138,7 @@ def build_orch(
         log=logs.append,
         side_configs=side_configs,
         require_tasks=require_tasks,
+        sink=sink,
     )
     return orch, adapters, artifact, store, logs
 
@@ -426,6 +431,79 @@ def test_creator_turn_writes_artifact_and_saves(tmp_path):
     # state was persisted
     reloaded = store.load()
     assert reloaded.sides["A"].last_verdict_status == "CONTINUE"
+
+
+def test_sink_wiring_emits_prefixed_line_to_stdout_and_live_log(tmp_path):
+    import io
+
+    from spar.stream import StreamSink
+
+    out = io.StringIO()
+    sink = StreamSink(tmp_path / ".spar", quiet=False, stdout=out)
+    gate = FakeGate()
+    orch, adapters, artifact, store, _ = build_orch(
+        tmp_path, {"claude": [], "codex": []}, ["claude", "codex"], gate, sink=sink
+    )
+    adapters["claude"].steps = [
+        Step(vblock("CONTINUE"), write="v0", artifact=artifact, emit="model says hi")
+    ]
+
+    state = DebateState(sides={"claude": SideState(), "codex": SideState()})
+    orch._take_turn(state, "claude", "creation", "the task", is_round_end=False)
+    sink.close()
+
+    assert "[claude r0] model says hi" in out.getvalue()
+    live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
+    assert "[claude r0] model says hi" in live_log
+
+
+def test_sink_wiring_quiet_suppresses_event_on_stdout(tmp_path):
+    import io
+
+    from spar.stream import StreamSink
+
+    out = io.StringIO()
+    sink = StreamSink(tmp_path / ".spar", quiet=True, stdout=out)
+    gate = FakeGate()
+    orch, adapters, artifact, store, _ = build_orch(
+        tmp_path, {"claude": [], "codex": []}, ["claude", "codex"], gate, sink=sink
+    )
+    adapters["claude"].steps = [
+        Step(vblock("CONTINUE"), write="v0", artifact=artifact, emit="model says hi")
+    ]
+
+    state = DebateState(sides={"claude": SideState(), "codex": SideState()})
+    orch._take_turn(state, "claude", "creation", "the task", is_round_end=False)
+    sink.close()
+
+    assert "model says hi" not in out.getvalue()
+    live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
+    assert "[claude r0] model says hi" in live_log
+
+
+def test_sink_routes_orchestrator_log_through_sink(tmp_path):
+    import io
+
+    from spar.stream import StreamSink
+
+    out = io.StringIO()
+    sink = StreamSink(tmp_path / ".spar", quiet=True, stdout=out)
+    gate = FakeGate()
+    orch, adapters, artifact, store, _ = build_orch(
+        tmp_path, {"claude": [], "codex": []}, ["claude", "codex"], gate, sink=sink
+    )
+    adapters["claude"].steps = [
+        Step(vblock("CONTINUE"), write="v0", artifact=artifact)
+    ]
+
+    state = DebateState(sides={"claude": SideState(), "codex": SideState()})
+    orch._take_turn(state, "claude", "creation", "the task", is_round_end=False)
+    sink.close()
+
+    # log() always reaches stdout even under quiet.
+    assert "turn complete" in out.getvalue()
+    live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
+    assert "turn complete" in live_log
 
 
 # ---------------------------------------------------------------------------
