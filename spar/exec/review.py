@@ -228,16 +228,30 @@ def run_cross_review(
     task = task_state.task
 
     no_change_streak = 0  # consecutive implementer turns that changed no files
+    dispute_in_streak = False  # any turn in the current no-change streak rejected
     rounds_used = 0  # non-terminating reviewer verdicts so far
 
-    def _impl_turn() -> None:
+    def _impl_turn() -> bool:
         # One implementer turn plus the anti-spin accounting. The loop only
         # reaches an implementer turn while there is still blocking work (a
         # non-terminating reviewer verdict). An implementer that changes NO
-        # files for several consecutive turns is not converging — abort loudly
-        # rather than loop forever writing nothing.
-        nonlocal no_change_streak
-        made_changes = _implementer_turn(
+        # files for several consecutive turns is not converging.
+        #
+        # Two shapes of "stuck" are distinguished at the abort threshold:
+        #   * DISPUTE — the streak's turns REJECTED (with justification) a
+        #     reviewer remark. Both sides are defending a position; this is a
+        #     legitimate disagreement, not a protocol failure. Escalate it to
+        #     the SAME user gate as review-round exhaustion (accept / extend /
+        #     abort) rather than dying as a ReviewAbort.
+        #   * TRUE SPIN — the streak changed nothing AND rejected nothing (the
+        #     implementer simply does nothing). There is nothing to arbitrate:
+        #     abort loudly, exactly as before.
+        #
+        # Returns ``True`` iff the dispute gate accepted the task as-is (the
+        # caller must then stop the review loop and proceed to the per-task
+        # test); ``False`` otherwise (continue the loop).
+        nonlocal no_change_streak, dispute_in_streak, max_rounds
+        made_changes, rejected_count = _implementer_turn(
             task_state=task_state,
             impl_adapter=impl_adapter,
             worktree=worktree,
@@ -250,13 +264,48 @@ def run_cross_review(
         )
         if made_changes:
             no_change_streak = 0
-        else:
-            no_change_streak += 1
-            if no_change_streak >= _NO_CHANGE_ABORT_TURNS:
-                raise ReviewAbort(
-                    f"task {task.id}: implementer produced no changes across "
-                    f"{no_change_streak} turns"
+            dispute_in_streak = False
+            return False
+
+        no_change_streak += 1
+        if rejected_count > 0:
+            dispute_in_streak = True
+        if no_change_streak < _NO_CHANGE_ABORT_TURNS:
+            return False
+
+        # Threshold reached. A dispute with a gate escalates to the user; a true
+        # spin (or no gate) aborts exactly as before.
+        if dispute_in_streak and rounds_gate is not None:
+            decision = rounds_gate(task_state, rounds_used)
+            if decision.action == "accept":
+                log(
+                    f"[t={task.id}] review dispute accepted as-is by the user; "
+                    "proceeding to the per-task test."
                 )
+                return True
+            if decision.action == "extend" and decision.extra_rounds > 0:
+                no_change_streak = 0
+                dispute_in_streak = False
+                if max_rounds == 0:
+                    max_rounds = rounds_used + decision.extra_rounds
+                else:
+                    max_rounds += decision.extra_rounds
+                log(
+                    f"[t={task.id}] review dispute extended by "
+                    f"{decision.extra_rounds} round(s)."
+                )
+                return False
+            # ``abort`` is raised inside the gate wrapper (the Executor's
+            # ``_review_rounds_gate`` raises _Abort(5)); any other action is a
+            # protocol error.
+            raise ReviewAbort(
+                f"task {task.id}: unexpected review-dispute gate action "
+                f"{decision.action!r}"
+            )
+        raise ReviewAbort(
+            f"task {task.id}: implementer produced no changes across "
+            f"{no_change_streak} turns"
+        )
 
     # ``start_with="implementer"`` (the review-resume ``extend`` path): the
     # round budget was already exhausted once and the operator granted more, so
@@ -264,7 +313,8 @@ def run_cross_review(
     # re-enters at the reviewer turn. No reviewer verdict and no round are
     # counted for this opening turn.
     if start_with == "implementer":
-        _impl_turn()
+        if _impl_turn():
+            return
 
     while True:
         # -- reviewer turn ------------------------------------------------
@@ -351,7 +401,8 @@ def run_cross_review(
                 )
 
         # -- implementer turn --------------------------------------------
-        _impl_turn()
+        if _impl_turn():
+            return
 
 
 def _implementer_turn(
@@ -366,8 +417,16 @@ def _implementer_turn(
     timeout_sec: int,
     warning: str | None = None,
     on_event=None,
-) -> bool:
-    """Run one implementer turn; return ``True`` iff it committed file changes.
+) -> tuple[bool, int]:
+    """Run one implementer turn.
+
+    Returns ``(made_changes, rejected_count)`` where ``made_changes`` is
+    ``True`` iff the turn committed file changes, and ``rejected_count`` is the
+    number of the turn's verdict resolutions that REJECTED an open remark (a
+    resolution with ``accepted=False`` matching a still-pending remark id). The
+    latter lets the review loop distinguish a legitimate justified-rejection
+    *dispute* (which must escalate to the user gate) from a true no-op spin.
+    Direct callers (``spar/exec/loop.py``) ignore the return value.
 
     ``warning`` seeds the first attempt's prompt with out-of-loop failure
     context (e.g. the per-Task test's captured failing output on a
@@ -482,6 +541,17 @@ def _implementer_turn(
             )
             continue
 
+        # Count the remarks this turn REJECTED (accepted=False) that matched a
+        # still-open remark — computed BEFORE applying resolutions, which moves
+        # them out of ``pending_remarks``. A no-change turn carrying rejections
+        # is a dispute (justified rejection loop), not a spin.
+        rejected_count = sum(
+            1
+            for res in verdict.resolutions
+            if not res.accepted
+            and any(r.remark_id == res.remark_id for r in task_state.pending_remarks)
+        )
+
         # scope OK (and no unaddressed accept-without-edit contradiction to
         # retry): apply only the implementer's resolutions.
         _apply_resolutions(task_state, verdict, log)
@@ -495,14 +565,14 @@ def _implementer_turn(
             _git(worktree, "commit", "-m", f"{task.id}: {short}")
             log(f"[t={task.id}] committed implementer changes.")
             store.save(exec_state)
-            return True
+            return True, rejected_count
         if post_oid != pre_oid:
             log(f"[t={task.id}] implementer committed its changes itself.")
             store.save(exec_state)
-            return True
+            return True, rejected_count
         log(f"[t={task.id}] implementer made no change this turn.")
         store.save(exec_state)
-        return False
+        return False, rejected_count
 
 
 def _apply_resolutions(task_state: TaskState, verdict: Verdict, log) -> None:

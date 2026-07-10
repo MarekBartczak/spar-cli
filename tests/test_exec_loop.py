@@ -1569,6 +1569,39 @@ def test_headless_final_merge_resume_accept(repo, tmp_path):
     assert "work.py" in master_files
 
 
+def test_headless_review_dispute_pends_review_rounds(repo, tmp_path):
+    # A justified rejection loop (reviewer keeps re-raising a [MUST]; the
+    # implementer keeps REJECTING it with a reason and changing nothing) is a
+    # dispute, not a spin. With max_review_rounds=0 (unlimited) the round budget
+    # never fires — the no-change dispute guard escalates to the SAME headless
+    # review_rounds gate (exit 10), proving the GUI path works end to end.
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE", resolved=["#1 rejected: plan says otherwise"])),
+            Step(vblock("CONTINUE", resolved=["#2 rejected: plan says otherwise"])),
+        ],
+        "B": [
+            Step(vblock("CONTINUE", remarks=["[MUST] task text requires X"])),
+            Step(vblock("CONTINUE", remarks=["[MUST] task text still requires X"])),
+        ],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true", max_review_rounds=0),
+    )
+    rc = ex.run()
+    assert rc == 10, f"expected review-dispute pend; logs={logs}"
+    state = store.load()
+    assert state.pending_gate["name"] == "review_rounds"
+    assert state.pending_gate["context"]["task_id"] == "t1"
+    assert state.tasks["t1"].status == "review"
+    assert branch_exists(repo, "spar/t1-A")
+    # Both remarks were rejected (resolved), so the dispute genuinely stalled.
+    assert len(state.tasks["t1"].resolved_remarks) == 2
+
+
 def test_headless_review_rounds_pends_then_extend(repo, tmp_path):
     store, tasks = _pend_review_rounds(repo, tmp_path)
     state = store.load()

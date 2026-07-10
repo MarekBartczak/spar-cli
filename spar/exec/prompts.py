@@ -205,4 +205,8 @@ Protocol for review:
   even though the file matches the foreign list.
 - Use `status: DONE` only if you have NO blocking `[MUST]` remarks remaining.
 - Use `status: CONTINUE` if you have open `[MUST]`/`[NICE]` remarks to raise.
+- If the implementer REJECTED your remark with a justification, do NOT re-raise
+  the same remark verbatim; re-raise ONLY with new evidence. If you still
+  disagree, keep status CONTINUE without repeating it — the round budget
+  escalates the dispute to the user.
 """

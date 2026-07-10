@@ -674,6 +674,104 @@ def test_review_round_cap_zero_means_unlimited(env):
 
 
 # ---------------------------------------------------------------------------
+# Review dispute: a justified rejection loop (reviewer keeps re-raising a
+# [MUST], implementer keeps REJECTING it with a reason and changing no files) is
+# a legitimate disagreement — it must escalate to the SAME user gate as
+# review-round exhaustion, NOT die as a no-change ReviewAbort.
+# ---------------------------------------------------------------------------
+
+
+def test_dispute_rejection_loop_escalates_to_gate_accept(env):
+    from spar.orchestrator import GateDecision
+
+    task = _task(files=("work.py",))
+    # Each impl turn rejects the standing remark with a reason and edits nothing.
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 rejected: plan Decision 4 says otherwise"])),
+        Step(vblock("CONTINUE", resolved=["#2 rejected: plan Decision 4 says otherwise"])),
+    ]
+    # Reviewer defends the task text, re-raising the same concern each round.
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] the task text requires X"])),
+        Step(vblock("CONTINUE", remarks=["[MUST] the task text still requires X"])),
+    ]
+    gate = FakeRoundsGate([GateDecision(action="accept")])
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps, rounds_gate=gate
+    )
+    # The dispute reached the gate (not a ReviewAbort) after two no-change
+    # rejection turns; accept returned normally.
+    assert len(gate.calls) == 1
+    assert gate.calls[0][0] == "t1"
+    assert len(impl.calls) == 2
+    assert len(review.calls) == 2
+    # Both rejected remarks were recorded as resolved (rejected), none pending.
+    assert len(task_state.resolved_remarks) == 2
+    assert all(rr.resolution == "rejected" for rr in task_state.resolved_remarks)
+    assert task_state.pending_remarks == []
+
+
+def test_dispute_rejection_loop_gate_extend_continues(env):
+    from spar.orchestrator import GateDecision
+
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 rejected: disagree"])),
+        Step(vblock("CONTINUE", resolved=["#2 rejected: disagree"])),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] concern"])),  # r1 -> reject
+        Step(vblock("CONTINUE", remarks=["[MUST] same concern"])),  # r2 -> reject -> gate
+        Step(vblock("DONE")),  # r3 (granted by extend): no open blocking -> done
+    ]
+    gate = FakeRoundsGate([GateDecision(action="extend", extra_rounds=1)])
+    impl, review, task_state, exec_state, logs = _run(
+        env, task, impl_steps, review_steps, rounds_gate=gate
+    )
+    # Gate consulted once; extend reset the streak and the reviewer got another
+    # turn, which DONEd (both remarks already resolved-as-rejected -> no block).
+    assert len(gate.calls) == 1
+    assert len(review.calls) == 3
+    assert len(impl.calls) == 2
+    assert len(task_state.resolved_remarks) == 2
+
+
+def test_dispute_rejection_loop_without_gate_aborts(env):
+    task = _task(files=("work.py",))
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 rejected: disagree"])),
+        Step(vblock("CONTINUE", resolved=["#2 rejected: disagree"])),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] concern"])),
+        Step(vblock("CONTINUE", remarks=["[MUST] same concern"])),
+    ]
+    # No rounds_gate: a dispute with nowhere to escalate keeps today's abort.
+    with pytest.raises(ReviewAbort) as excinfo:
+        _run(env, task, impl_steps, review_steps)
+    assert "no changes" in str(excinfo.value)
+
+
+def test_true_spin_with_gate_still_aborts(env):
+    from spar.orchestrator import GateDecision
+
+    task = _task(files=("work.py",))
+    # The implementer does NOTHING: no resolutions, no edits. There is no
+    # dispute to arbitrate, so even WITH a gate this stays a hard ReviewAbort.
+    impl_steps = [Step(vblock("CONTINUE")), Step(vblock("CONTINUE"))]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] implement it"])),
+        Step(vblock("CONTINUE", remarks=["[MUST] still nothing"])),
+    ]
+    gate = FakeRoundsGate([GateDecision(action="accept")])
+    with pytest.raises(ReviewAbort) as excinfo:
+        _run(env, task, impl_steps, review_steps, rounds_gate=gate)
+    assert "no changes" in str(excinfo.value)
+    # The gate was never consulted — nothing to arbitrate.
+    assert gate.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Agent self-commit: an implementer that runs ``git commit`` itself inside the
 # worktree must still (a) count as having made changes (no false anti-spin
 # abort) and (b) have its committed paths scope-checked and rolled back on a

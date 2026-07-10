@@ -162,3 +162,15 @@ def test_review_protocol_hedges_foreign_section_reference():
 def test_impl_protocol_forbids_invented_remark_ids():
     p = build_impl_prompt(T, Path("/abs/plan.md"), [])
     assert "ONLY ids listed" in p
+
+
+def test_review_protocol_forbids_reraising_rejected_remark_verbatim():
+    # A justified rejection loop must not spin forever: the reviewer is told not
+    # to re-raise a rejected remark verbatim, and that the round budget
+    # escalates a standing dispute to the user.
+    p = build_review_prompt(T, "diff --git a/x ...", [])
+    low = " ".join(p.lower().split())  # collapse the prompt's line wrapping
+    assert "rejected your remark" in low
+    assert "do not re-raise the same remark verbatim" in low
+    assert "re-raise only with new evidence" in low
+    assert "escalates the dispute to the user" in low
