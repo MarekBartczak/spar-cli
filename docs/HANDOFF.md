@@ -220,3 +220,21 @@ rewriting `python `→`python3 ` in `.spar/exec.json` task tests + artifact.md.
 Backlog minor: headless resume-accept on THIS stall pends via task status
 `review`, so accept re-runs the (still failing) test instead of merging on
 override — full override needs a small ExecState flag.
+
+## Broken-test-command resilience (2026-07-11, `651d2b9..5f51a72`)
+Follow-up to the python/python3 incident — three layers, all user-approved:
+(1) `spar/envprobe.py` probes local tooling (shutil.which + versions) and the
+report is injected into the debate `## Tasks` contract with an explicit "only
+use available tools" instruction (`651d2b9`); (2) mid-run: test exit 126/127
+escalates IMMEDIATELY to the user gate (no wasted implementer turns) and the
+gate family gained a `fix:<command>` decision — console, `--gate fix:...`
+(first-colon split), and a GUI "Popraw komendę…" QInputDialog button
+(`24d063c`); (3) fresh-start preflight validates the first token of every
+task `test=` via shutil.which before ANY git side effect, exit 2, with a
+python→python3 suggestion; skips `$(`/backtick/`$` commands rather than guess
+(`c68a1a5`). Opus cross-review of the three commits found 2 CONFIRMED
+defects, both fixed: headless resume `accept` on a test escalation re-ran the
+failing test and re-pended forever — pend reason now persisted in the
+pending-gate context, resume-accept merges on override, extend:N re-enters
+the test loop (`f77410d`); preflight false-positived on POSIX builtins like
+`. venv/bin/activate && …` — allowlist widened (`5f51a72`). Suite 750 passed.
