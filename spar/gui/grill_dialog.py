@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -122,8 +123,12 @@ class GrillDialog(QDialog):
 
         self.options_row = QWidget(self)
         self.options_row.setObjectName("optionsRow")
-        self.options_layout = QHBoxLayout(self.options_row)
+        # Options stack VERTICALLY (live finding: a horizontal row of long
+        # option labels blew the window width apart) — one full-width,
+        # left-aligned button per option.
+        self.options_layout = QVBoxLayout(self.options_row)
         self.options_layout.setContentsMargins(0, 0, 0, 0)
+        self.options_layout.setSpacing(4)
         layout.addWidget(self.options_row)
 
         input_row = QHBoxLayout()
@@ -234,9 +239,11 @@ class GrillDialog(QDialog):
     def _render_options(self, options: list[Option]) -> None:
         self._clear_options()
         for opt in options:
-            btn = QPushButton(_truncate(opt.label), self.options_row)
+            btn = QPushButton(f"{opt.letter}.  {_truncate(opt.label)}", self.options_row)
             btn.setObjectName(f"option_{opt.letter}")
             btn.setToolTip(opt.label)
+            btn.setStyleSheet("text-align: left; padding: 6px 10px;")
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _checked=False, letter=opt.letter: self._on_option_clicked(letter))
             self.options_layout.addWidget(btn)
 
