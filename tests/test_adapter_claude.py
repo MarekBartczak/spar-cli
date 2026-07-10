@@ -184,12 +184,16 @@ def test_events_file_naming(tmp_path):
 
 def test_on_event_streams_display_lines_and_extracts_result(tmp_path, monkeypatch):
     # Drive the fake into stream-json mode: a tool_use content_block_start,
-    # a text_delta chunk, and a terminal result event with duration_ms.
+    # buffered input_json_delta fragments, a content_block_stop, a text_delta
+    # chunk, and a terminal result event with duration_ms.
     monkeypatch.setenv(
         "FAKE_CLAUDE_STDOUT",
         json.dumps({"session_id": "sid-9", "result": "hello world"}),
     )
     monkeypatch.setenv("FAKE_CLAUDE_STREAM_TOOL", "Edit")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STREAM_TOOL_INPUT", json.dumps({"file_path": "src/main.cpp"})
+    )
     monkeypatch.setenv("FAKE_CLAUDE_DURATION_MS", "1234")
 
     events: list[str] = []
@@ -198,9 +202,52 @@ def test_on_event_streams_display_lines_and_extracts_result(tmp_path, monkeypatc
         "hello", session_id=None, timeout_sec=5, on_event=events.append
     )
 
-    assert events == ["tool: Edit", "hello world", "done (1.2s)"]
+    assert events == ["tool: Edit src/main.cpp", "hello world", "done (1.2s)"]
+    # No bare "tool: Edit" duplicate line.
+    assert "tool: Edit" not in events
     assert result.session_id == "sid-9"
     assert result.reply_text == "hello world"
+
+
+def test_on_event_tool_with_unparseable_input_falls_back_to_bare_name(
+    tmp_path, monkeypatch
+):
+    # No FAKE_CLAUDE_STREAM_TOOL_INPUT set: the tool block opens and closes
+    # with an empty input buffer, which fails to parse as JSON.
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STDOUT",
+        json.dumps({"session_id": "sid-10", "result": "no input reply"}),
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_STREAM_TOOL", "Bash")
+
+    events: list[str] = []
+    adapter = make_adapter(tmp_path)
+    adapter.run_turn("hello", session_id=None, timeout_sec=5, on_event=events.append)
+
+    assert events[0] == "tool: Bash"
+
+
+def test_on_event_missing_stop_is_flushed_by_terminal_result(tmp_path, monkeypatch):
+    # The tool's content_block_stop never arrives; the terminal result event
+    # must still flush the buffered tool line rather than swallowing it.
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STDOUT",
+        json.dumps({"session_id": "sid-11", "result": "flushed by result"}),
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_STREAM_TOOL", "Read")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STREAM_TOOL_INPUT", json.dumps({"file_path": "src/lib.cpp"})
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_STREAM_TOOL_NO_STOP", "1")
+
+    events: list[str] = []
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn(
+        "hello", session_id=None, timeout_sec=5, on_event=events.append
+    )
+
+    assert "tool: Read src/lib.cpp" in events
+    assert result.reply_text == "flushed by result"
 
 
 def test_on_event_none_is_behaviorally_identical(tmp_path, monkeypatch):

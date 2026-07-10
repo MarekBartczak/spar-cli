@@ -13,47 +13,126 @@ from typing import Callable
 from spar.adapters.base import AdapterError, SessionLost, TurnResult, run_cli
 
 
-def _display_line(obj: object) -> str | None:
-    """Map one parsed stream-json event to a human-readable display line.
+_ARG_KEYS = ("file_path", "path", "command", "pattern", "url")
+_MAX_ARG_LEN = 100
 
-    Returns ``None`` for events that produce no display output (unknown or
-    intermediate shapes). Keyed on the REAL SDK streaming shapes:
 
-    - ``{"type":"stream_event","event":{"type":"content_block_delta",
-      "delta":{"type":"text_delta","text": ...}}}`` → the text (non-empty);
-    - ``{"type":"stream_event","event":{"type":"content_block_start",
-      "content_block":{"type":"tool_use","name": ...}}}`` → ``tool: <name>``
-      (tool INPUT arrives later as ``input_json_delta`` and is not shown);
-    - terminal ``{"type":"result", ...}`` → ``done (<duration_ms/1000>s)``.
+def _result_display_line(obj: dict) -> str:
+    """Format the terminal ``result`` event's display line."""
+    duration_ms = obj.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+        return f"done ({duration_ms / 1000:.1f}s)"
+    return "done"
+
+
+def _truncate(text: str, limit: int = _MAX_ARG_LEN) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _tool_line(name: object, raw_json: str) -> str:
+    """Render ``tool: <name> <arg>`` from the buffered raw JSON fragments.
+
+    Unparseable JSON (or an empty buffer) falls back to bare ``tool: <name>``.
+    Otherwise prefers the first present key of ``_ARG_KEYS``; failing that,
+    a compacted dump of the whole parsed value. The argument is truncated to
+    ``_MAX_ARG_LEN`` characters.
     """
-    if not isinstance(obj, dict):
-        return None
-    kind = obj.get("type")
-    if kind == "stream_event":
-        event = obj.get("event")
-        if not isinstance(event, dict):
-            return None
-        etype = event.get("type")
-        if etype == "content_block_delta":
-            delta = event.get("delta")
-            if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                text = delta.get("text")
-                if isinstance(text, str) and text:
-                    return text
-            return None
-        if etype == "content_block_start":
-            block = event.get("content_block")
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name")
-                return f"tool: {name}"
-            return None
-        return None
-    if kind == "result":
-        duration_ms = obj.get("duration_ms")
-        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
-            return f"done ({duration_ms / 1000:.1f}s)"
-        return "done"
-    return None
+    try:
+        parsed = json.loads(raw_json)
+    except (json.JSONDecodeError, ValueError):
+        return f"tool: {name}"
+
+    arg: str | None = None
+    if isinstance(parsed, dict):
+        for key in _ARG_KEYS:
+            if key in parsed:
+                arg = str(parsed[key])
+                break
+        if arg is None:
+            arg = json.dumps(parsed, separators=(",", ":"))
+    else:
+        arg = json.dumps(parsed, separators=(",", ":"))
+
+    return f"tool: {name} {_truncate(arg)}"
+
+
+class _DisplayMapper:
+    """Stateful per-turn mapper from parsed stream-json events to display lines.
+
+    A ``content_block_start`` for a ``tool_use`` block does not emit
+    immediately: the tool's INPUT arrives afterward as ``input_json_delta``
+    fragments (``delta.partial_json`` string chunks), keyed by the shared
+    ``event.index``, and terminated by ``content_block_stop``. This mapper
+    buffers those fragments per index and emits a single ``tool: <name> <arg>``
+    line once the block closes (see ``_tool_line``).
+
+    Safety net: if a ``result`` event or a NEW ``content_block_start`` for the
+    SAME index arrives while a tool is still buffered (a missing stop), the
+    buffered tool is flushed first — a tool must never be silently swallowed.
+
+    ``map`` returns a list of zero or more display lines for one parsed
+    event, since the safety net can produce a flush line in addition to the
+    event's own line (e.g. a flushed tool plus the terminal ``done`` line).
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[object, dict] = {}
+
+    def _flush(self, index: object) -> str:
+        entry = self._pending.pop(index)
+        return _tool_line(entry["name"], "".join(entry["buffer"]))
+
+    def _flush_all(self) -> list[str]:
+        lines = [self._flush(index) for index in list(self._pending.keys())]
+        return lines
+
+    def map(self, obj: object) -> list[str]:
+        if not isinstance(obj, dict):
+            return []
+        kind = obj.get("type")
+        if kind == "stream_event":
+            event = obj.get("event")
+            if not isinstance(event, dict):
+                return []
+            etype = event.get("type")
+            index = event.get("index")
+            if etype == "content_block_delta":
+                delta = event.get("delta")
+                if not isinstance(delta, dict):
+                    return []
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        return [text]
+                    return []
+                if dtype == "input_json_delta" and index in self._pending:
+                    partial = delta.get("partial_json")
+                    if isinstance(partial, str):
+                        self._pending[index]["buffer"].append(partial)
+                    return []
+                return []
+            if etype == "content_block_start":
+                block = event.get("content_block")
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    lines: list[str] = []
+                    if index in self._pending:
+                        lines.append(self._flush(index))
+                    self._pending[index] = {"name": block.get("name"), "buffer": []}
+                    return lines
+                return []
+            if etype == "content_block_stop":
+                if index in self._pending:
+                    return [self._flush(index)]
+                return []
+            return []
+        if kind == "result":
+            lines = self._flush_all()
+            lines.append(_result_display_line(obj))
+            return lines
+        return []
 
 
 def _extract_result(stdout: str) -> tuple[bool, str | None, str | None]:
@@ -203,10 +282,12 @@ class ClaudeAdapter:
     ) -> Callable[[str], None]:
         """Wrap ``on_event`` as a raw-line handler for ``run_cli``.
 
-        Each JSONL line is parsed and mapped to a display line; unparseable or
-        display-less lines are dropped. ``run_cli`` already guards against
+        Each JSONL line is parsed and mapped, via a fresh per-turn
+        ``_DisplayMapper``, to zero or more display lines; unparseable or
+        display-less lines produce none. ``run_cli`` already guards against
         callback exceptions, so a raising ``on_event`` never kills the turn.
         """
+        mapper = _DisplayMapper()
 
         def on_line(line: str) -> None:
             line = line.strip()
@@ -216,8 +297,7 @@ class ClaudeAdapter:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 return
-            display = _display_line(obj)
-            if display is not None:
+            for display in mapper.map(obj):
                 on_event(display)
 
         return on_line

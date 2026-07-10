@@ -36,7 +36,19 @@ still sees no terminal ``result`` event. When the argv does not request
 stream-json, the reply document is emitted verbatim (legacy ``json`` mode).
 
 - ``FAKE_CLAUDE_STREAM_TOOL``: if set, emit a ``tool_use`` content_block_start
-  with this name before the text delta (stream-json mode only).
+  (at index 1) with this name before the text delta (stream-json mode only).
+- ``FAKE_CLAUDE_STREAM_TOOL_INPUT``: if set alongside ``FAKE_CLAUDE_STREAM_TOOL``,
+  a raw JSON string (e.g. ``{"file_path":"src/main.cpp"}``) that is split into
+  a couple of ``input_json_delta`` ``partial_json`` fragments (sharing the
+  tool block's index) emitted between the ``content_block_start`` and its
+  matching ``content_block_stop`` — this mimics the real SDK, which streams
+  the tool's input incrementally rather than in one shot. If unset, the tool
+  block is opened and immediately closed with no input fragments (mimics a
+  tool call with no/unparseable input).
+- ``FAKE_CLAUDE_STREAM_TOOL_NO_STOP``: if set (alongside ``FAKE_CLAUDE_STREAM_TOOL``),
+  omit the tool block's ``content_block_stop`` event entirely, simulating a
+  missing stop so the terminal ``result`` event's safety-net flush can be
+  exercised.
 - ``FAKE_CLAUDE_DURATION_MS``: if set, put this ``duration_ms`` on the
   terminal result event (stream-json mode only).
 
@@ -143,17 +155,47 @@ def _emit_stream(doc: dict) -> str:
 
     tool = os.environ.get("FAKE_CLAUDE_STREAM_TOOL")
     if tool:
+        tool_index = 1
         lines.append(
             json.dumps(
                 {
                     "type": "stream_event",
                     "event": {
                         "type": "content_block_start",
+                        "index": tool_index,
                         "content_block": {"type": "tool_use", "name": tool},
                     },
                 }
             )
         )
+        tool_input = os.environ.get("FAKE_CLAUDE_STREAM_TOOL_INPUT")
+        if tool_input:
+            midpoint = len(tool_input) // 2
+            for fragment in (tool_input[:midpoint], tool_input[midpoint:]):
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "stream_event",
+                            "event": {
+                                "type": "content_block_delta",
+                                "index": tool_index,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": fragment,
+                                },
+                            },
+                        }
+                    )
+                )
+        if not os.environ.get("FAKE_CLAUDE_STREAM_TOOL_NO_STOP"):
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "stream_event",
+                        "event": {"type": "content_block_stop", "index": tool_index},
+                    }
+                )
+            )
 
     result_text = doc.get("result")
     if isinstance(result_text, str) and result_text:
