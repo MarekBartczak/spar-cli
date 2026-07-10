@@ -134,6 +134,19 @@ board tracking each task's merged/review/pending status.*
 *Starting a run: task description, configured sides as checkboxes, first
 speaker, and the `## Tasks` requirement toggle.*
 
+The new-debate dialog also lets you sharpen a rough task draft with the
+model before starting the run: a **"Grilluj z modelem…"** button opens a
+chat dialog that drives a real `claude` session running the user's
+grill-with-docs skill — questions arrive one at a time with lettered
+options rendered as buttons (free-text answers also work); the session
+ends when the model writes `.spar/requirements.md`, and its content
+pre-fills the task field back in the new-debate form. Flow: draft task →
+"Grilluj z modelem…" → chat Q&A (option buttons / free text) → model
+writes `.spar/requirements.md` → task field pre-filled → debate.
+Prerequisite: the user's `claude` CLI with a grill-with-docs skill
+installed (`~/.claude/skills`); the grill runs on the claude side's
+`debate_model`.
+
 ## Agent mode (headless)
 
 spar is designed to be **driven by a host agent** (Claude Code / Codex) — see

@@ -6,6 +6,20 @@ SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
 
+## GrillPane implemented (2026-07-10, `ff65e18..f35fb8b`)
+
+Per ADR 0004 and the plan (`docs/superpowers/plans/2026-07-10-grill-pane.md`,
+13 challenge findings over 6 rounds, final round AGREE): `spar/gui/grill.py`
+(`GrillSession` GUI-thread facade + `_GrillWorker` on a persistent `QThread`,
+`OPENING_PROMPT_TEMPLATE`, block-based `parse_options`) and
+`spar/gui/grill_dialog.py` (`GrillDialog` chat window) wired into the
+new-debate dialog via a **"Grilluj z modelem…"** button
+(`spar/gui/toolbar.py`). The grill drives a real `claude` session running
+the user's grill-with-docs skill; finish is detected by a content-hash
+comparison on `.spar/requirements.md`, whose content then pre-fills the
+new-debate task field via "Użyj w debacie". Manual smoke test (live grill
+session end-to-end in the running GUI) still pending.
+
 ## Where things are
 
 - Repo: `github.com/MarekBartczak/spar-cli`, branch **master**, latest `442d5fc`.
