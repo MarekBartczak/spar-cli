@@ -30,8 +30,10 @@ commit) and the asymmetric review loop are reused verbatim from
 ``spar.exec.review`` (``_implementer_turn`` for the initial code-creating turn,
 ``run_cross_review`` for the review loop).
 
-Exit codes mirror v1: 0 ok, 3 lock/state guard, 4 protocol/adapter abort,
-5 user abort at the final-merge gate.
+Exit codes mirror v1: 0 ok, 2 preflight/validation refusal (a fresh start
+whose per-task test command names a tool missing on this machine), 3
+lock/state guard, 4 protocol/adapter abort, 5 user abort at the
+final-merge gate.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from spar.adapters.base import Adapter, AdapterError
 from spar.config import ExecutionConfig, SideConfig
 from spar.exec import gitops
 from spar.exec.gitops import GitError
+from spar.exec.preflight import preflight_test_commands
 from spar.exec.review import ReviewAbort, _implementer_turn, run_cross_review
 from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
@@ -402,6 +405,26 @@ class Executor:
         exclude_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
     def _run_fresh(self) -> int:
+        # Preflight (fresh start only): refuse BEFORE touching any git state
+        # when a task's test command names a tool missing on this machine
+        # (live incident: a plan wrote ``python`` on a python3-only host and
+        # the 127 only surfaced deep into the run). Resume is exempt — a
+        # command corrected mid-run via ``fix:`` is already persisted, and the
+        # 126/127 gate covers anything still broken.
+        problems = preflight_test_commands(self.tasks)
+        if problems:
+            self.log(
+                "spar exec: preflight failed — per-task test command(s) name "
+                "tools missing on this machine:"
+            )
+            for problem in problems:
+                self.log(f"  {problem}")
+            self.log(
+                "Fix the plan's test commands (or install the tools) and "
+                "rerun. Nothing was started."
+            )
+            return 2
+
         self._apply_scope_ignore()
         # §5 collision policy: a fresh run always means these artifacts are
         # orphans (a matching-state resume goes through ``run_continue``), so

@@ -1351,7 +1351,10 @@ def test_stalled_per_task_test_headless_pends_review_rounds(repo, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-_BROKEN_CMD = "spar_definitely_not_a_command_zzz --nope"
+# A per-task test command that passes the fresh-start preflight (``sh`` exists
+# on PATH) but exits 127 at RUN time — these tests exercise the mid-run broken
+# command gate, not the preflight (tests/test_exec_preflight.py covers that).
+_BROKEN_CMD = "sh -c 'spar_definitely_not_a_command_zzz --nope'"
 
 
 def test_broken_command_escalates_immediately_without_reimplementing(repo, tmp_path):

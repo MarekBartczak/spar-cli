@@ -180,12 +180,22 @@ generated for `python` on a `python3`-only host). The value is split on the
 FIRST colon only, so the command may contain spaces and colons:
 `--gate fix:python3 -m py_compile todo.py`.
 
+A fresh `spar exec` additionally **preflights** every task's `test` command
+before any work starts: the first shell token (after skipping `VAR=val`
+assignments) must be a shell builtin or resolvable on `PATH`. Any missing tool
+refuses the whole run with exit `2` — listing each offending task, its
+command, and the missing token (with a `python` → `python3` hint) — before
+the integration branch or any other git state is created. Commands using
+shell substitution (`` $( ) ``, backticks) are skipped rather than guessed at,
+and `--continue` never re-runs the preflight; both stay covered by the mid-run
+126/127 gate above.
+
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success (consensus accepted / execution merged / already done) |
-| 2 | Usage or configuration error (incl. a `--gate` that doesn't match the pending gate) |
+| 2 | Usage or configuration error (incl. a `--gate` that doesn't match the pending gate, or a preflight refusal: a task `test` command names a missing tool) |
 | 3 | State/lock guard (another instance, dirty target, leftover artifacts) |
 | 4 | Protocol abort (guard violation, unusable verdicts, adapter failure) |
 | 5 | User abort at a gate |
