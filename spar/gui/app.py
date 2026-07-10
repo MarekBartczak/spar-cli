@@ -98,10 +98,14 @@ class MainWindow(QMainWindow):
         # human-readable prefix translation for debate rounds (fix 4). Built
         # before the side pane's first refresh(), which fires
         # ``status_changed`` -> ``_on_status_changed`` synchronously.
+        # DEBATE rounds actually run on debate_model (the engine resolves
+        # ``debate_model or model``) — the display must mirror that
+        # resolution, not default_model (live finding: prefixes showed
+        # sonnet while the transcript proved opus).
         try:
             config = load_config(self.project_dir)
             self._side_models = {
-                name: (side.default_model or side.model or "")
+                name: (side.debate_model or side.model or side.default_model or "")
                 for name, side in config.sides.items()
             }
         except Exception:

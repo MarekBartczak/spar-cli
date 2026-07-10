@@ -216,3 +216,32 @@ class TestTheme:
 
         hex_literals = set(re.findall(r"#[0-9a-fA-F]{6}", qss))
         assert hex_literals.issubset(set(theme.TOKENS.values()))
+
+
+def test_side_models_prefer_debate_model(tmp_path, monkeypatch):
+    # The debate actually runs on debate_model (engine: debate_model or
+    # model); the humanized prefix must mirror that, not default_model
+    # (live finding: display said sonnet while the transcript proved opus).
+    from spar.config import SideConfig
+    import spar.gui.app as app_mod
+
+    class _Cfg:
+        sides = {
+            "claude": SideConfig(
+                adapter="claude", command="claude",
+                models=("opus", "sonnet"), default_model="sonnet",
+                debate_model="opus",
+            ),
+            "codex": SideConfig(
+                adapter="codex", command="codex",
+                models=("gpt-5.5",), default_model="gpt-5.5",
+            ),
+        }
+
+    monkeypatch.setattr(app_mod, "load_config", lambda _dir: _Cfg())
+    win = app_mod.MainWindow(tmp_path)
+    try:
+        assert win._side_models["claude"] == "opus"      # debate_model wins
+        assert win._side_models["codex"] == "gpt-5.5"    # fallback chain
+    finally:
+        win.close()
