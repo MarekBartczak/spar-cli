@@ -934,3 +934,35 @@ class TestExecutionConfig:
         cfg = load_config(tmp_path / "p", global_path=gp)
         assert cfg.execution.scope_ignore == ("factorial",)
         assert cfg.execution.test_command == "pytest -q"
+
+
+class TestGuiStarterConfigTemplate:
+    """The GUI's fresh-project starter config (spar.gui.repo._CONFIG_TEMPLATE)
+    must parse through the real loader -- a fresh project without a valid
+    config is broken (empty model catalogs reject every ``--tasks`` plan)."""
+
+    def test_starter_template_parses_and_lands_expected_values(self, tmp_path):
+        from spar.gui.repo import _CONFIG_TEMPLATE
+
+        project_dir = tmp_path / "project"
+        config_path = project_dir / ".spar" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
+
+        config = load_config(project_dir)
+
+        claude = config.sides["claude"]
+        assert claude.debate_model == "opus"
+        assert claude.impl_models == ("opus", "sonnet")
+        assert claude.review_models == ("opus", "sonnet")
+        assert claude.default_model == "sonnet"
+
+        codex = config.sides["codex"]
+        assert codex.debate_model == "gpt-5.6-sol"
+        assert codex.review_models == ("gpt-5.6-sol", "gpt-5.5", "gpt-5.4")
+        assert codex.default_model == "gpt-5.5"
+
+        assert config.debate.max_rounds == 8
+        assert config.execution.max_review_rounds == 3
+        assert config.execution.max_fix_tasks == 2
+        assert config.execution.test_command == ""

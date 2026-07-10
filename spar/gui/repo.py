@@ -14,9 +14,59 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-__all__ = ["repo_state", "create_repo", "create_initial_commit"]
+__all__ = ["repo_state", "create_repo", "create_initial_commit", "ensure_project_config"]
 
 _INITIAL_COMMIT_MESSAGE = "spar: initial state"
+
+_CONFIG_TEMPLATE = """\
+# spar project configuration — adjust models to what your CLIs accept
+# and SET test_command before running `spar exec`.
+
+[sides.claude]
+models = ["opus", "sonnet", "haiku"]
+default_model = "sonnet"
+# planning (debate) runs on the strongest model
+debate_model = "opus"
+# models allowed to IMPLEMENT / REVIEW tasks (floors)
+impl_models = ["opus", "sonnet"]
+review_models = ["opus", "sonnet"]
+
+[sides.codex]
+models = ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]
+default_model = "gpt-5.5"
+debate_model = "gpt-5.6-sol"
+review_models = ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]
+
+[debate]
+max_rounds = 8
+
+[execution]
+# REQUIRED before `spar exec`: the command gating the final merge
+# (and the per-task fallback), e.g. "python3 -m pytest -q tests"
+# or "make test".
+test_command = ""
+max_review_rounds = 3
+max_fix_tasks = 2
+# build artifacts the scope guard must ignore, e.g.:
+# scope_ignore = ["__pycache__/", "*.pyc", "build/"]
+"""
+
+
+def ensure_project_config(project_dir: "str | Path") -> bool:
+    """Create a starter ``.spar/config.toml`` when the project has none.
+
+    A fresh project without a config is broken: empty model catalogs make
+    ``--tasks`` validation reject every plan. Returns ``True`` when the
+    starter file was written, ``False`` when a config already existed (in
+    which case this is a strict no-op -- an existing file is never
+    overwritten).
+    """
+    config_path = Path(project_dir) / ".spar" / "config.toml"
+    if config_path.exists():
+        return False
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
+    return True
 
 
 def _run(project_dir: "str | Path", *args: str) -> subprocess.CompletedProcess:

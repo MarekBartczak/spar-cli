@@ -343,6 +343,48 @@ class TestNewDebateGitGuard:
         assert started == [{"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}]
 
 
+def test_new_debate_creates_starter_config_and_notifies(qtbot, tmp_path, monkeypatch):
+    # Fresh project: no .git and no .spar/config.toml. Accepting the
+    # create-repo offer must be followed by a starter config being written
+    # (before the dialog opens) and a stream notice about it.
+    import spar.gui.app as app_mod
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    window = app_mod.MainWindow(tmp_path)
+    qtbot.addWidget(window)
+    try:
+        class _FakeDialog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def values(self):
+                return {"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}
+
+        monkeypatch.setattr(app_mod.toolbar_mod, "NewDebateDialog", _FakeDialog)
+        monkeypatch.setattr(
+            QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_debate", lambda **kw: started.append(kw))
+
+        window._on_new_debate()
+
+        config_path = tmp_path / ".spar" / "config.toml"
+        assert config_path.is_file()
+        from spar.gui.repo import _CONFIG_TEMPLATE
+
+        assert config_path.read_text(encoding="utf-8") == _CONFIG_TEMPLATE
+        assert started  # the debate still proceeded
+
+        notice = "▶ utworzono .spar/config.toml — dostosuj modele i test_command do projektu"
+        assert notice in window.stream_pane.text.toPlainText()
+    finally:
+        window.close()
+
+
 def test_repo_check_precedes_the_new_debate_dialog(tmp_path, monkeypatch):
     # Declining the create-repo question must prevent the form from even
     # opening (the user must not type a task first).
@@ -387,3 +429,45 @@ def test_create_repo_gitignores_spar_dir(tmp_path):
         capture_output=True, text=True,
     ).stdout.strip()
     assert status == ""  # clean tree despite .spar content
+
+
+class TestEnsureProjectConfig:
+    """A fresh project has no ``.spar/config.toml`` -- and without one every
+    ``--tasks`` plan is rejected (empty model catalogs). The GUI must create
+    a starter config once, and never touch an existing one."""
+
+    def test_creates_starter_config_when_missing(self, tmp_path):
+        from spar.gui import repo as repo_mod
+
+        created = repo_mod.ensure_project_config(tmp_path)
+
+        assert created is True
+        config_path = tmp_path / ".spar" / "config.toml"
+        assert config_path.is_file()
+        assert config_path.read_text(encoding="utf-8") == repo_mod._CONFIG_TEMPLATE
+
+    def test_no_ops_when_config_already_exists(self, tmp_path):
+        from spar.gui import repo as repo_mod
+
+        config_path = tmp_path / ".spar" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        sentinel = "# sentinel — do not touch\n"
+        config_path.write_text(sentinel, encoding="utf-8")
+
+        created = repo_mod.ensure_project_config(tmp_path)
+
+        assert created is False
+        assert config_path.read_text(encoding="utf-8") == sentinel
+
+    def test_second_call_is_a_no_op(self, tmp_path):
+        from spar.gui import repo as repo_mod
+
+        first = repo_mod.ensure_project_config(tmp_path)
+        config_path = tmp_path / ".spar" / "config.toml"
+        config_path.write_text("# mutated after first call\n", encoding="utf-8")
+
+        second = repo_mod.ensure_project_config(tmp_path)
+
+        assert first is True
+        assert second is False
+        assert config_path.read_text(encoding="utf-8") == "# mutated after first call\n"

@@ -240,6 +240,10 @@ class MainWindow(QMainWindow):
         # the form).
         if not self._ensure_git_repo():
             return
+        if repo_mod.ensure_project_config(self.project_dir):
+            self.stream_pane.append_notice(
+                "▶ utworzono .spar/config.toml — dostosuj modele i test_command do projektu"
+            )
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
