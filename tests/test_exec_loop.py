@@ -241,8 +241,9 @@ def test_happy_path_two_tasks(repo, tmp_path):
     # worktrees removed
     assert not (tmp_path / ".spar" / "worktrees" / "A").exists()
     assert not (tmp_path / ".spar" / "worktrees" / "B").exists()
-    # integration merged into master (target)
-    assert git(repo, "cat-file", "-t", "spar/integration").stdout.strip() == "commit"
+    # integration merged into master (target), then cleaned up so a fresh
+    # exec run never trips over a leftover-but-fully-merged branch
+    assert not branch_exists(repo, "spar/integration")
     master_files = git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
     assert "work1.py" in master_files
     assert "work2.py" in master_files
@@ -413,18 +414,18 @@ def test_per_task_test_failure_context_reaches_reimplement_prompt(repo, tmp_path
 
 # ---------------------------------------------------------------------------
 # I2: §5 branch/worktree collision policy. A FRESH `exec` that finds a leftover
-# spar/integration, spar/t* branch, or .spar/worktrees/* dir with no matching
-# state must REFUSE (exit 3) naming the leftover, and clobber nothing.
+# spar/t* branch or .spar/worktrees/* dir with no matching state must REFUSE
+# (exit 3) naming the leftover, and clobber nothing. A leftover
+# spar/integration is special-cased (see the merged/diverged tests below): a
+# FULLY MERGED one is debris from a finished run and is swept rather than
+# refused; a DIVERGED one still hard-refuses.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["integration_branch", "task_branch", "worktree_dir"])
+@pytest.mark.parametrize("kind", ["task_branch", "worktree_dir"])
 def test_fresh_refuses_on_leftover_artifacts(repo, tmp_path, kind):
     spar_dir = tmp_path / ".spar"
-    if kind == "integration_branch":
-        git(repo, "branch", "spar/integration", "master")
-        needle = "spar/integration"
-    elif kind == "task_branch":
+    if kind == "task_branch":
         git(repo, "branch", "spar/t1-claude", "master")
         needle = "spar/t1-claude"
     else:  # worktree_dir
@@ -449,12 +450,64 @@ def test_fresh_refuses_on_leftover_artifacts(repo, tmp_path, kind):
     assert not store.exists()
     assert adapters == {}
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
-    if kind == "integration_branch":
-        assert branch_exists(repo, "spar/integration")
-    elif kind == "task_branch":
+    if kind == "task_branch":
         assert branch_exists(repo, "spar/t1-claude")
     else:
         assert (spar_dir / "worktrees" / "claude" / "stale.txt").exists()
+
+
+def test_fresh_sweeps_fully_merged_leftover_integration_branch(repo, tmp_path):
+    # A prior run FINISHED (integration was merged into master, but for some
+    # reason the branch itself lingered — the bug this change fixes). Since
+    # it is fully merged, a fresh exec must sweep it and proceed rather than
+    # hard-refuse with the leftover-artifacts error.
+    git(repo, "branch", "spar/integration", "master")
+
+    tasks = [make_task("t1", "A", ["work.py"])]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "print(1)\n"})],  # impl t1
+        "B": [Step(vblock("DONE"))],  # review t1
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"expected the merged leftover to be swept, not refused; logs={logs}"
+    assert any(
+        "removed fully-merged leftover spar/integration" in m for m in logs
+    ), f"expected a removal log line; logs={logs}"
+    state = store.load()
+    assert state.phase == "done"
+    assert not branch_exists(repo, "spar/integration")
+
+
+def test_fresh_still_refuses_on_diverged_leftover_integration_branch(repo, tmp_path):
+    # Regression guard: an integration branch with commits NOT merged into the
+    # current branch is a genuine mid-execution orphan (or the operator's own
+    # in-progress work) and must still hard-refuse exactly as before.
+    git(repo, "branch", "spar/integration", "master")
+    git(repo, "checkout", "-q", "spar/integration")
+    (repo / "unmerged.txt").write_text("diverged\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "diverged work on integration")
+    git(repo, "checkout", "-q", "master")
+
+    tasks = [make_task("t1", "A", ["work.py"])]
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []}, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    rc = ex.run()
+    assert rc == 3
+    assert any("spar/integration" in m for m in logs), f"logs={logs}"
+    assert not store.exists()
+    assert adapters == {}
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+    assert branch_exists(repo, "spar/integration")
 
 
 # ---------------------------------------------------------------------------
@@ -695,8 +748,13 @@ def test_recovery_merged_before_save(repo, tmp_path):
     assert reloaded.phase == "done"
     # branch cleaned up
     assert not branch_exists(repo, "spar/t1-A")
-    # integration was NOT re-merged (its tip is unchanged)
-    assert git(repo, "rev-parse", "spar/integration").stdout.strip() == integration_oid
+    # integration was NOT re-merged (its tip, as merged into master, is
+    # unchanged) and the fully-merged integration branch itself is swept so a
+    # fresh exec never trips over it as a leftover
+    assert not branch_exists(repo, "spar/integration")
+    assert (
+        git(repo, "rev-parse", "master^2").stdout.strip() == integration_oid
+    )
     # no adapter turns happened (no adapter was ever even constructed)
     assert adapters == {}
     # master now contains the integration merge
@@ -829,8 +887,10 @@ def test_recovery_merged_before_cleanup_save(repo, tmp_path):
     assert reloaded.tasks["t1"].status == "merged"
     assert reloaded.phase == "done"
     assert not branch_exists(repo, "spar/t1-A")
-    # integration tip unchanged — no double-merge happened
-    assert git(repo, "rev-parse", "spar/integration").stdout.strip() == integration_oid
+    # integration tip unchanged (no double-merge happened) — and the fully
+    # merged integration branch itself was swept as part of finishing
+    assert not branch_exists(repo, "spar/integration")
+    assert git(repo, "rev-parse", "master^2").stdout.strip() == integration_oid
     # zero adapters constructed
     assert adapters == {}
 
@@ -905,17 +965,14 @@ def test_recovery_empty_branch_equal_tip_restarts_not_merged(repo, tmp_path):
     assert reloaded.phase == "done"
     # The task was genuinely restarted → an adapter was constructed and called.
     assert "A" in adapters and adapters["A"].calls, "task must have been restarted"
-    # Integration actually advanced (real merge commit), not left at the empty tip.
-    assert (
-        git(repo, "rev-parse", "spar/integration").stdout.strip()
-        != integration_oid_before
-    )
-    # The task's work is present in integration AND in the merged target.
-    assert "work.py" in git(
-        repo, "ls-tree", "-r", "--name-only", "spar/integration"
-    ).stdout.split()
+    # Integration actually advanced (real merge commit), not left at the empty
+    # tip — checked via the merge commit's second parent on master, since the
+    # fully-merged integration branch is swept once the run finishes.
+    assert git(repo, "rev-parse", "master^2").stdout.strip() != integration_oid_before
+    # The task's work is present in the merged target.
     assert "work.py" in git(repo, "ls-tree", "-r", "--name-only", "master").stdout.split()
     assert not branch_exists(repo, "spar/t1-A")
+    assert not branch_exists(repo, "spar/integration")
 
 
 def test_empty_initial_implementation_retries_then_aborts(repo, tmp_path):

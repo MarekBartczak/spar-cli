@@ -973,6 +973,7 @@ class Executor:
         ):
             state.phase = "done"
             self.store.save(state)
+            self._delete_integration_branch(integration)
             self.log("spar exec: integration already merged into target; done.")
             return 0
 
@@ -1021,6 +1022,7 @@ class Executor:
 
         state.phase = "done"
         self.store.save(state)
+        self._delete_integration_branch(integration)
         self.log(f"spar exec: merged integration into {target}; execution done.")
         return 0
 
@@ -1128,7 +1130,23 @@ class Executor:
             name = line.strip()
             if not name:
                 continue
-            if name == "spar/integration" or re.match(r"spar/t\d+", name):
+            if name == "spar/integration":
+                # A fully-merged integration branch is debris from a prior
+                # finished run, not an orphan mid-execution artifact: sweep
+                # it instead of hard-refusing the fresh run.
+                current = gitops.current_branch(self.repo)
+                if gitops.is_ancestor(self.repo, "spar/integration", current):
+                    try:
+                        gitops.delete_branch(self.repo, "spar/integration")
+                    except GitError:
+                        pass
+                    self.log(
+                        "spar exec: removed fully-merged leftover "
+                        "spar/integration."
+                    )
+                    continue
+                found.append(f"branch {name}")
+            elif re.match(r"spar/t\d+", name):
                 found.append(f"branch {name}")
 
         worktrees_dir = self.spar_dir / "worktrees"
@@ -1136,6 +1154,15 @@ class Executor:
             for child in sorted(worktrees_dir.iterdir()):
                 found.append(f"worktree {child}")
         return found
+
+    def _delete_integration_branch(self, name: str) -> None:
+        """Best-effort cleanup: the integration branch is fully merged by the
+        time this is called, so leave no leftover artifact behind for the
+        next fresh run to trip over."""
+        try:
+            gitops.delete_branch(self.repo, name)
+        except GitError:
+            pass
 
     def _branch_exists(self, name: str) -> bool:
         result = subprocess.run(

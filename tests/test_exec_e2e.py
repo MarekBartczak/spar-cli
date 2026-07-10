@@ -280,10 +280,20 @@ Design prose goes here.
     assert "a.txt" in master_files
     assert "b.txt" in master_files
 
-    # integration is now an ancestor of (merged into) master.
+    # integration was merged into master, then swept: master's merge commit
+    # carries it as second parent, and the branch itself is gone so a fresh
+    # exec never trips over it as a leftover.
     assert (
         subprocess.run(
-            ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", "spar/integration", "master"],
+            ["git", "-C", str(repo_dir), "rev-parse", "--verify", "--quiet",
+             "refs/heads/spar/integration"],
+            capture_output=True,
+        ).returncode
+        == 1
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "master^2"],
             capture_output=True,
         ).returncode
         == 0
