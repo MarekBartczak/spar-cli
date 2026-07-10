@@ -108,6 +108,31 @@ machine (incl. LOCKED read-only on a foreign flock), Plan/Diff viewers
 Engine untouched beyond that additive field. Suite 519 passed (GUI tests
 skip without PySide6). **Manual smoke at the GUI pending (user-driven).**
 
+## GUI-piloted full run PASSED + engine hardening (2026-07-10, `4884677..ae29cc1`)
+
+Third live GUI session drove a complete run (--range feature, 3 tasks,
+final merge, black-box 69/69) after two engine fixes found live:
+- **Review dispute escalation** (`4884677` + `2b82941`): a justified
+  rejection loop (reviewer re-raises, implementer re-rejects, no changes)
+  now escalates to the review_rounds USER gate (accept-as-is/extend/abort)
+  with the disputed remarks surfaced, instead of ReviewAbort exit 4. True
+  no-op spin still aborts. Reviewer prompt: no verbatim re-raising of a
+  rejected remark. (Live trigger: task text vs plan Decision contradiction —
+  cross-review caught a real requirements conflict.)
+- **`[execution] scope_ignore`** (`ae29cc1`): build-artifact patterns written
+  to `.git/info/exclude` (local, uncommitted) so compiled binaries stop
+  tripping the scope guard (live: `make test` → `factorial` binary → double
+  violation → abort loop). Lab config sets factorial/*.o/build/.
+- GUI display fix (`77494a1`): humanized debate prefixes show debate_model.
+
+**Next (user-approved direction, analysis stage):** grill-with-docs INSIDE
+the GUI as a chat pane over the existing claude adapter session loop
+(question rendered, answer box, options as buttons; ends by writing
+`.spar/requirements.md` → pre-fills Nowa debata). Embedded terminal deferred
+(macOS requirement rules out XEmbed; pyte+pty spike only if the chat pane
+proves insufficient). Also queued: token counters per vendor; abandoned-run
+branch cleanup on Nowa debata.
+
 ## GUI smoke rounds 1-2 (2026-07-10, `414bdce..256e74d`)
 
 Live-GUI feedback closed in two batches: engine cleans `spar/integration`
