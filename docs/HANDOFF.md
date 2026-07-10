@@ -94,6 +94,20 @@ and TUI are DROPPED.
    returns 0 (done short-circuit precedes validation).
 2. 2-way concurrency (sequential-first by design; `docs/adr/0002`).
 
+## spar gui (2026-07-10, `26541d7..bb7d379`)
+
+PySide6 dashboard-pilot (mockup variant A; plan
+`docs/superpowers/plans/2026-07-10-spar-gui.md`, 13 challenge findings over
+6 rounds, final review 9/9 invariants PASS): optional `[gui]` extra,
+`spar gui [--dir PATH]` — live stream pane (tailer over live.log, filters,
+follow, search), task board, options-driven gate panel (consensus Accept
+auto-starts exec; final_merge always manual; remarks textarea via
+runner-owned temp file), toolbar lifecycle with a full exit-code state
+machine (incl. LOCKED read-only on a foreign flock), Plan/Diff viewers
+(branches from the new additive `status --json` `branches` field).
+Engine untouched beyond that additive field. Suite 519 passed (GUI tests
+skip without PySide6). **Manual smoke at the GUI pending (user-driven).**
+
 ## Live observability (2026-07-10, `94469a4..9b84ae2`)
 
 Implemented and live-smoke-tested: adapters stream events live (claude
