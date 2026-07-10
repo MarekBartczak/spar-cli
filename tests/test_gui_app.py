@@ -245,3 +245,99 @@ def test_side_models_prefer_debate_model(tmp_path, monkeypatch):
         assert win._side_models["codex"] == "gpt-5.5"    # fallback chain
     finally:
         win.close()
+
+
+class TestNewDebateGitGuard:
+    """A new debate must not start outside a local git repo (task brief):
+    the toolbar's new-debate flow offers to create one on demand."""
+
+    @staticmethod
+    def _accept_dialog(monkeypatch, values):
+        import spar.gui.app as app_mod
+
+        class _FakeDialog:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+
+                return QDialog.DialogCode.Accepted
+
+            def values(self):
+                return values
+
+        monkeypatch.setattr(app_mod.toolbar_mod, "NewDebateDialog", _FakeDialog)
+
+    def test_no_repo_accept_creates_repo_and_starts_debate(self, qtbot, tmp_path, monkeypatch):
+        import spar.gui.app as app_mod
+        from PySide6.QtWidgets import QMessageBox
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        self._accept_dialog(monkeypatch, {"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True})
+        monkeypatch.setattr(
+            QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_debate", lambda **kw: started.append(kw))
+
+        window._on_new_debate()
+
+        assert (tmp_path / ".git").is_dir()
+        log = __import__("subprocess").run(
+            ["git", "-C", str(tmp_path), "log", "--oneline"],
+            check=True, capture_output=True, text=True,
+        )
+        assert len(log.stdout.strip().splitlines()) == 1
+        assert started == [{"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}]
+
+    def test_no_repo_cancel_does_not_spawn_or_create_repo(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        self._accept_dialog(monkeypatch, {"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True})
+        monkeypatch.setattr(
+            QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel)
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_debate", lambda **kw: started.append(kw))
+
+        window._on_new_debate()
+
+        assert not (tmp_path / ".git").exists()
+        assert started == []
+
+    def test_existing_repo_with_commit_proceeds_without_dialog(self, qtbot, tmp_path, monkeypatch):
+        import subprocess
+
+        subprocess.run(["git", "init", "-b", "master"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            cwd=tmp_path, check=True, capture_output=True,
+        )
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        self._accept_dialog(monkeypatch, {"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True})
+
+        from PySide6.QtWidgets import QMessageBox
+
+        asked = []
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: asked.append(1) or QMessageBox.StandardButton.Cancel),
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_debate", lambda **kw: started.append(kw))
+
+        window._on_new_debate()
+
+        assert asked == []
+        assert started == [{"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}]

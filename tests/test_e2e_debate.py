@@ -19,6 +19,7 @@ CLI wiring itself never has a path to a real AI CLI.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -423,6 +424,10 @@ def test_turn_timeout_aborts_with_recoverable_state(tmp_path, monkeypatch):
 def test_cli_end_to_end_through_subprocess(tmp_path, monkeypatch):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
+    # A debate now requires a local git repo (spar drives branches/merges) --
+    # the CLI guard rejects a non-git cwd before this subprocess's debate
+    # would otherwise run (see spar/cli.py's git-repo guard).
+    subprocess.run(["git", "init", "-b", "master"], cwd=project_dir, check=True, capture_output=True)
     spar_dir = project_dir / ".spar"
     spar_dir.mkdir()
 
@@ -465,9 +470,14 @@ turn_timeout_sec = 15
     env = os.environ.copy()
     # bin_dir first (so "claude"/"codex" resolve to the fakes), then the
     # directory holding this interpreter (so the fakes' "#!/usr/bin/env
-    # python3" shebang still resolves) -- nothing else, so a real claude/
-    # codex on the ambient PATH can never be reached.
-    env["PATH"] = os.pathsep.join([str(bin_dir), str(Path(sys.executable).parent)])
+    # python3" shebang still resolves), then the real git's directory (the
+    # CLI's git-repo guard shells out to "git rev-parse") -- nothing else, so
+    # a real claude/codex on the ambient PATH can never be reached.
+    git_bin = shutil.which("git")
+    assert git_bin is not None, "git must be on PATH to run this test"
+    env["PATH"] = os.pathsep.join(
+        [str(bin_dir), str(Path(sys.executable).parent), str(Path(git_bin).parent)]
+    )
     env["PYTHONPATH"] = str(REPO_ROOT)
     env["FAKE_CLAUDE_SCRIPT_DIR"] = str(claude_dir)
     env["FAKE_CLAUDE_ARTIFACT_PATH"] = str(artifact_path)

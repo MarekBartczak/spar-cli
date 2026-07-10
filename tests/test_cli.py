@@ -1,6 +1,7 @@
 """Tests for the spar CLI module."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -643,6 +644,90 @@ class TestStatusSubcommand:
         with pytest.raises(SystemExit) as exc_info:
             main(["status"])
         assert exc_info.value.code == 2
+
+
+class TestGitRepoGuard:
+    """A new debate must not start outside a git work tree (task brief)."""
+
+    def test_new_debate_in_non_git_dir_is_exit_3_and_orchestrator_not_built(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        built = []
+        monkeypatch.setattr(
+            cli, "_build_orchestrator", lambda args, config: built.append(1)
+        )
+
+        result = main(["my prompt"])
+
+        assert result == 3
+        assert built == []
+        err = capsys.readouterr().err
+        assert "not a git repository" in err
+        assert "git init" in err
+
+    def test_new_debate_via_task_file_in_non_git_dir_is_exit_3(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        task_file = tmp_path / "task.txt"
+        task_file.write_text("do the thing", encoding="utf-8")
+        monkeypatch.setattr(
+            cli, "_build_orchestrator", lambda args, config: (_ for _ in ()).throw(
+                AssertionError("orchestrator must not be built")
+            )
+        )
+
+        result = main(["--task-file", str(task_file)])
+
+        assert result == 3
+
+    def test_new_debate_in_git_repo_proceeds(self, tmp_path, monkeypatch, fake_orch):
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        fake_orch["code"] = 0
+
+        result = main(["my prompt"])
+
+        assert result == 0
+        assert fake_orch["orch"].ran_new == "my prompt"
+
+    def test_continue_is_unaffected_by_missing_git_repo(
+        self, tmp_path, monkeypatch, fake_orch
+    ):
+        monkeypatch.chdir(tmp_path)
+        fake_orch["code"] = 0
+
+        result = main(["--continue"])
+
+        assert result == 0
+        assert fake_orch["orch"].ran_continue is True
+
+    def test_exec_is_unaffected_by_missing_git_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
+        monkeypatch.chdir(tmp_path)
+
+        result = main(["exec"])
+
+        # No plan found is the expected failure mode here -- proof the git
+        # guard (which would exit 3) never runs on the exec path.
+        assert result == 2
+
+    def test_status_is_unaffected_by_missing_git_repo(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        result = main(["status", "--json"])
+
+        assert result == 0
+
+    def test_watch_is_unaffected_by_missing_git_repo(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        # main_watch is exercised elsewhere; here we only need proof the
+        # git guard (exit 3) never fires for the watch subcommand.
+        with pytest.raises(SystemExit) as exc_info:
+            main(["watch", "--help"])
+        assert exc_info.value.code == 0
 
 
 class TestGuiRouting:

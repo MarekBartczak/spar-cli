@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +93,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List the resolved CLI command for each configured side and exit",
     )
     return parser
+
+
+_NOT_A_GIT_REPO_MESSAGE = (
+    "spar: this directory is not a git repository — spar drives branches "
+    "and merges, so it needs one. Run 'git init && git commit --allow-empty "
+    "-m init' (or let 'spar gui' create it), then retry."
+)
+
+
+def _is_inside_git_work_tree(cwd: Path) -> bool:
+    """``True`` iff ``cwd`` sits inside a git work tree.
+
+    Shells out to ``git rev-parse --is-inside-work-tree`` and only looks at
+    the return code -- a missing ``git`` binary is treated the same as "not
+    a repo" (``FileNotFoundError`` is not expected in practice, but is not
+    swallowed here beyond letting a non-zero/absent result mean "no repo").
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def _build_orchestrator(args, config) -> Orchestrator:
@@ -389,6 +417,10 @@ def main(argv=None) -> int:
         parser.error("either prompt or --continue is required")
     if args.gate is not None and not (args.cont and args.headless):
         parser.error("--gate requires --continue and --headless")
+
+    if not args.cont and not _is_inside_git_work_tree(Path.cwd()):
+        sys.stderr.write(_NOT_A_GIT_REPO_MESSAGE + "\n")
+        return 3
 
     task_prompt = args.prompt
     if args.task_file is not None:

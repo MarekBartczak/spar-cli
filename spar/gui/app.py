@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QSplitter,
     QStatusBar,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from spar.config import load_config
+from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.runner import RunnerState, SparRunner
 from spar.gui.sidepane import SidePane
@@ -234,8 +236,53 @@ class MainWindow(QMainWindow):
 
     def _on_new_debate(self) -> None:
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.runner.start_debate(**dialog.values())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not self._ensure_git_repo():
+            return
+        self.runner.start_debate(**dialog.values())
+
+    def _ensure_git_repo(self) -> bool:
+        """Confirm (creating on demand) that ``project_dir`` has a git repo
+        with at least one commit before a new debate spawns.
+
+        Returns ``True`` when the debate may proceed, ``False`` when the
+        user declined the offer to create one (in which case the caller
+        must not spawn).
+        """
+        state = repo_mod.repo_state(self.project_dir)
+        if state == "ok":
+            return True
+
+        if state == "none":
+            text = (
+                "Ten katalog nie jest repozytorium git. spar wymaga "
+                "lokalnego repo (gałęzie, merge). Utworzyć je teraz?"
+            )
+        else:  # "no_head"
+            text = (
+                "Repozytorium nie ma żadnego commita — utworzyć commit "
+                "początkowy?"
+            )
+
+        reply = QMessageBox.question(
+            self,
+            "Brak repozytorium git",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        if state == "none":
+            repo_mod.create_repo(self.project_dir)
+        else:
+            repo_mod.create_initial_commit(self.project_dir)
+        self.stream_pane.append_notice(
+            "▶ utworzono repozytorium git (commit początkowy)"
+        )
+        return True
 
     def _restore_splitter_state(self) -> None:
         state = self._settings.value("mainSplitter/state")
