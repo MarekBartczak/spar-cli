@@ -289,6 +289,94 @@ def test_tasks_contract_shows_review_model_restriction():
     )
 
 
+def test_tasks_contract_injects_env_probe_block():
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract(
+        {"claude": ("opus",), "codex": ("gpt-5.5",)},
+        env_report="ENV-PROBE-SENTINEL",
+    )
+    assert "Environment probe" in text
+    assert "ENV-PROBE-SENTINEL" in text
+    assert "MUST only use tools listed as available" in text
+    assert "use `python3`, never `python`" in text
+
+
+def test_tasks_contract_without_env_report_omits_probe_block():
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract({"claude": ("opus",), "codex": ("gpt-5.5",)})
+    assert "Environment probe" not in text
+
+
+def test_build_turn_prompt_require_tasks_includes_env_probe():
+    prompt = build_turn_prompt(
+        side_name="claude",
+        artifact_path=Path("art.md"),
+        artifact_hash="sha256:z",
+        open_remarks=[],
+        task_prompt="t",
+        require_tasks=True,
+        catalogs={"claude": ("opus",), "codex": ("gpt-5.5",)},
+        env_report="ENV-PROBE-SENTINEL",
+    )
+    assert "ENV-PROBE-SENTINEL" in prompt
+    assert "MUST only use tools listed as available" in prompt
+
+
+def test_build_turn_prompt_without_require_tasks_ignores_env_report():
+    prompt = build_turn_prompt(
+        side_name="claude",
+        artifact_path=Path("art.md"),
+        artifact_hash="sha256:z",
+        open_remarks=[],
+        task_prompt="t",
+        require_tasks=False,
+        env_report="ENV-PROBE-SENTINEL",
+    )
+    assert "ENV-PROBE-SENTINEL" not in prompt
+
+
+def test_orchestrator_probes_environment_once_per_run(tmp_path, monkeypatch):
+    import spar.orchestrator as orch_mod
+
+    calls = []
+
+    def fake_probe():
+        calls.append(1)
+        return "ENV-PROBE-SENTINEL"
+
+    monkeypatch.setattr(orch_mod, "probe_environment", fake_probe)
+    gate = FakeGate()
+    orch, _, _, _, _ = build_orch(
+        tmp_path,
+        {"A": [], "B": []},
+        ["A", "B"],
+        gate,
+        side_configs=_BRIDGE_SIDES,
+        require_tasks=True,
+    )
+    assert calls == [1]  # probed exactly once, at construction
+    state = DebateState(artifact_hash="sha256:z")
+    for side in ("A", "B"):  # composing prompts never re-probes
+        prompt = orch._compose_prompt(state, side, "turn", "task", None)
+        assert "ENV-PROBE-SENTINEL" in prompt
+    assert calls == [1]
+
+
+def test_orchestrator_skips_probe_without_require_tasks(tmp_path, monkeypatch):
+    import spar.orchestrator as orch_mod
+
+    monkeypatch.setattr(
+        orch_mod, "probe_environment", lambda: (_ for _ in ()).throw(AssertionError)
+    )
+    gate = FakeGate()
+    orch, _, _, _, _ = build_orch(
+        tmp_path, {"A": [], "B": []}, ["A", "B"], gate, require_tasks=False
+    )
+    assert orch._env_report is None
+
+
 def test_build_turn_prompt_default_omits_tasks_contract():
     prompt = build_turn_prompt(
         side_name="claude",

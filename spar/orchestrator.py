@@ -21,6 +21,7 @@ from typing import Callable, Protocol
 
 from spar.adapters.base import Adapter, AdapterError, SessionLost, TurnResult
 from spar.config import DebateConfig, SideConfig
+from spar.envprobe import probe_environment
 from spar.exec.tasklist import TaskListError, parse_task_list
 from spar.gates import GateChoice, GateParseError, GatePending, validate_choice
 from spar.state import (
@@ -61,14 +62,17 @@ __all__ = [
 class GateDecision:
     """A decision returned by a :class:`UserGate`.
 
-    ``action`` is one of ``"accept"``, ``"remarks"``, ``"extend"`` or
-    ``"abort"``. ``remarks`` is non-empty iff ``action == "remarks"`` and
-    ``extra_rounds`` is ``> 0`` iff ``action == "extend"``.
+    ``action`` is one of ``"accept"``, ``"remarks"``, ``"extend"``,
+    ``"abort"`` or ``"fix"``. ``remarks`` is non-empty iff
+    ``action == "remarks"``, ``extra_rounds`` is ``> 0`` iff
+    ``action == "extend"``, and ``command`` is non-empty iff
+    ``action == "fix"`` (the replacement per-task test command).
     """
 
     action: str
     remarks: tuple[str, ...] = ()
     extra_rounds: int = 0
+    command: str = ""
 
 
 class UserGate(Protocol):
@@ -265,6 +269,7 @@ def _format_tasks_contract(
     catalogs: dict[str, tuple[str, ...]] | None,
     impl_catalogs: dict[str, tuple[str, ...]] | None = None,
     review_catalogs: dict[str, tuple[str, ...]] | None = None,
+    env_report: str | None = None,
 ) -> str:
     """The opt-in `## Tasks` planning contract appended to a turn prompt.
 
@@ -331,6 +336,17 @@ def _format_tasks_contract(
         if review:
             line += f" (review: ONLY {', '.join(review)})"
         lines.append(line)
+    if env_report:
+        lines += [
+            "",
+            "Environment probe (tooling actually present on the execution "
+            "machine):",
+            env_report,
+            "Every test= command (and the global test command) runs verbatim "
+            "on this machine: it MUST only use tools listed as available "
+            "above (e.g. use `python3`, never `python`, when python is not "
+            "available).",
+        ]
     lines.append("")
     lines.append(
         "Consensus is NOT accepted until this `## Tasks` section parses; a "
@@ -351,6 +367,7 @@ def build_turn_prompt(
     impl_catalogs: dict[str, tuple[str, ...]] | None = None,
     review_catalogs: dict[str, tuple[str, ...]] | None = None,
     require_tasks: bool = False,
+    env_report: str | None = None,
 ) -> str:
     """Pure, unit-testable builder for the prompt handed to a side.
 
@@ -408,7 +425,12 @@ def build_turn_prompt(
         "",
     ]
     if require_tasks:
-        parts += [_format_tasks_contract(catalogs, impl_catalogs, review_catalogs), ""]
+        parts += [
+            _format_tasks_contract(
+                catalogs, impl_catalogs, review_catalogs, env_report=env_report
+            ),
+            "",
+        ]
     parts.append(PROTOCOL_BLOCK)
     return "\n".join(parts)
 
@@ -492,6 +514,12 @@ class Orchestrator:
         self.log = sink.log if sink is not None else log
         self.side_configs = side_configs
         self.require_tasks = require_tasks
+        # Probe the local tooling ONCE per debate run (not per turn); the
+        # report is injected into the tasks contract so planners only write
+        # test= commands that exist on this machine.
+        self._env_report: str | None = (
+            probe_environment() if require_tasks else None
+        )
         # The parsed ``--gate`` decision threaded into a resume (headless
         # mode). Set just before ``_run_continue`` runs; ``None`` in
         # interactive mode or a plain resume without ``--gate``.
@@ -1091,6 +1119,7 @@ class Orchestrator:
                 impl_catalogs=impl_catalogs,
                 review_catalogs=review_catalogs,
                 require_tasks=self.require_tasks,
+                env_report=self._env_report,
             )
         else:
             base = build_turn_prompt(
@@ -1104,6 +1133,7 @@ class Orchestrator:
                 impl_catalogs=impl_catalogs,
                 review_catalogs=review_catalogs,
                 require_tasks=self.require_tasks,
+                env_report=self._env_report,
             )
         if warning:
             return f"{warning}\n\n{base}"

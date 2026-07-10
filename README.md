@@ -223,6 +223,10 @@ claude-erli`, inspect with `spar --list-commands`.
   (foreign files) so isolation never produces false "missing file" blockers.
 - **Objective gates**: per-task test commands and the final test command are
   hard exit-code gates, not model opinions.
+- **Environment probe**: with `--tasks`, the debate prompt includes a
+  once-per-run probe of the local tooling (`spar/envprobe.py`: python3, node,
+  gcc, …), so planners only write `test=` commands that actually exist on the
+  machine (e.g. `python3`, never `python`, when python is absent).
 - **State is fully resumable**: `.spar/session.json` (debate) and
   `.spar/exec.json` (execution) with atomic writes, single-instance locks,
   and git-reconciling crash recovery.
