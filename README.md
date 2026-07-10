@@ -71,6 +71,34 @@ spar exec
 Interrupted at any point? `spar --continue` (debate) or
 `spar exec --continue` (execution) resumes from persisted state.
 
+## Live output (watching the models work)
+
+Everything both models say — full text, tool calls, executed commands —
+streams live, prefixed `[side task role]` (e.g. `[claude t1 impl]`,
+`[codex r0]`):
+
+- **Running spar yourself?** The full stream is on stdout by default —
+  nothing to set up.
+- **An agent is driving spar?** The agent passes `--quiet` (only spar's own
+  protocol lines reach its context), while the full stream ALWAYS lands in
+  **`.spar/live.log`**. Watch it from a second terminal/split:
+
+  ```bash
+  spar watch               # colorized live viewer (gate banners, per-side colors)
+  spar watch --from-start  # include what already happened this invocation
+  ```
+
+  Or let spar open the viewer window for you:
+
+  ```bash
+  spar ui   # tmux split / terminal window with `spar watch`; prints the
+            # manual instruction when no known terminal is available
+  ```
+
+Notes: each spar invocation truncates `live.log` (fresh view per command);
+the raw, complete event streams are always persisted per turn in
+`.spar/transcript/` (claude: JSONL stream events; codex: JSONL).
+
 ## Agent mode (headless)
 
 spar is designed to be **driven by a host agent** (Claude Code / Codex) — see
@@ -80,13 +108,14 @@ the gates. A ready-made Claude Code skill lives in
 [skills/spar/SKILL.md](skills/spar/SKILL.md).
 
 ```bash
-spar --task-file requirements.md --tasks --headless   # exit 10 = gate pending
-spar status --json                                    # which gate, what options
-spar --continue --headless --gate remarks:notes.md    # inject remarks into the debate
-spar --continue --headless --gate accept              # accept the consensus
+spar ui                                                       # open the live viewer for the human (once)
+spar --task-file requirements.md --tasks --headless --quiet   # exit 10 = gate pending
+spar status --json                                            # which gate, what options
+spar --continue --headless --quiet --gate remarks:notes.md    # inject remarks into the debate
+spar --continue --headless --quiet --gate accept              # accept the consensus
 
-spar exec --headless                                  # gates pend the same way
-spar exec --continue --headless --gate accept         # e.g. approve the final merge
+spar exec --headless --quiet                                  # gates pend the same way
+spar exec --continue --headless --quiet --gate accept         # e.g. approve the final merge
 ```
 
 Every interactive gate becomes: persist state → exit `10` → decision returns
@@ -159,7 +188,9 @@ SPAR_CONTRACT_TESTS=1 python3 -m pytest tests/test_contract_real_cli.py  # real-
 
 ### Project layout
 
-- `spar/cli.py` — CLI entry point (`spar`, `spar exec`, `spar status`)
+- `spar/cli.py` — CLI entry point (`spar`, `spar exec`, `spar status`, `spar watch`, `spar ui`)
+- `spar/stream.py` — StreamSink: stdout + always-on `.spar/live.log`, `--quiet`
+- `spar/watch.py` / `spar/ui.py` — live viewer + viewer-window spawner
 - `spar/orchestrator.py` — debate loop, consensus, gates, turn prompts
 - `spar/exec/loop.py` — execution FSM: task branches, merges, final test
 - `spar/exec/review.py` — asymmetric cross-review loop, scope guard
