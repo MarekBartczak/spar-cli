@@ -103,6 +103,32 @@ def test_preflight_shell_builtins_count_as_available():
     assert preflight_test_commands(tasks, which=_which_factory(set())) == []
 
 
+def test_preflight_posix_builtins_and_reserved_words_count_as_available():
+    # ``/bin/sh`` (dash/POSIX) resolves these WITHOUT a PATH binary; preflight
+    # must not flag a command that merely opens with one. Live false positive:
+    # ``. venv/bin/activate && pytest`` was refused with exit 2.
+    tasks = [
+        make_task("t1", "A", ["a"], test=". venv/bin/activate && pytest"),
+        make_task("t2", "A", ["b"], test="eval pytest"),
+        make_task("t3", "A", ["c"], test="export FOO=1"),
+        make_task("t4", "A", ["d"], test="set -e; pytest"),
+        make_task("t5", "A", ["e"], test="if true; then pytest; fi"),
+        make_task("t6", "A", ["f"], test="{ pytest; }"),
+        make_task("t7", "A", ["g"], test="exec pytest"),
+        make_task("t8", "A", ["h"], test="read x; pytest"),
+    ]
+    # Nothing is on PATH, yet none of these must be reported: the first token
+    # of each is a shell builtin/reserved word.
+    assert preflight_test_commands(tasks, which=_which_factory(set())) == []
+
+
+def test_preflight_still_refuses_genuinely_missing_binary():
+    # Widening the allowlist must NOT swallow a real missing tool.
+    tasks = [make_task("t1", "A", ["a"], test="frobnicate-zzz --check a")]
+    problems = preflight_test_commands(tasks, which=_which_factory(set()))
+    assert len(problems) == 1 and "'frobnicate-zzz'" in problems[0]
+
+
 def test_preflight_skips_empty_test():
     tasks = [make_task("t1", "A", ["a.py"], test=None)]
     assert preflight_test_commands(tasks, which=_which_factory(set())) == []

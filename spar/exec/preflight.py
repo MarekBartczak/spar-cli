@@ -24,9 +24,27 @@ from spar.exec.tasklist import Task
 
 __all__ = ["first_command_token", "preflight_test_commands"]
 
-# Shell builtins the ``shell=True`` test runner resolves without a binary on
-# PATH — ``shutil.which`` would wrongly flag them as missing.
-_SHELL_BUILTINS = frozenset({"test", "[", "true", "cd", "echo", ":", "command"})
+# Shell keywords/builtins the ``shell=True`` (``/bin/sh``) test runner resolves
+# WITHOUT a binary on PATH — ``shutil.which`` would wrongly flag them as
+# missing and refuse the run. Covers POSIX special built-ins, the common
+# regular built-ins, and reserved words that can begin a command (so a command
+# opening with ``.``/``eval``/``if``/``{``/``(`` is not treated as a missing
+# binary). Live false positive that motivated the widening:
+# ``. venv/bin/activate && pytest`` was refused with exit 2.
+_SHELL_BUILTINS = frozenset(
+    {
+        # POSIX special built-ins
+        ".", ":", "break", "continue", "eval", "exec", "exit", "export",
+        "readonly", "return", "set", "shift", "times", "trap", "unset",
+        # regular built-ins (dash/POSIX resolve these without a PATH binary)
+        "alias", "bg", "cd", "command", "echo", "false", "fc", "fg",
+        "getopts", "hash", "jobs", "kill", "local", "printf", "pwd", "read",
+        "test", "[", "true", "type", "ulimit", "umask", "unalias", "wait",
+        # reserved words that can begin a command
+        "!", "{", "}", "(", ")", "case", "do", "done", "elif", "else",
+        "esac", "fi", "for", "if", "in", "then", "until", "while",
+    }
+)
 
 # Leading ``VAR=value`` environment assignments (``PYTHONPATH=x python3 …``).
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
