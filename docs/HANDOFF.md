@@ -108,6 +108,18 @@ machine (incl. LOCKED read-only on a foreign flock), Plan/Diff viewers
 Engine untouched beyond that additive field. Suite 519 passed (GUI tests
 skip without PySide6). **Manual smoke at the GUI pending (user-driven).**
 
+## External review received (2026-07-10)
+
+`docs/reviews/2026-07-10-external-review.md` — independent assessment
+(foundation ~8.5/10). Key accepted takeaways, in order: (1) formalize the
+product boundary with a new ADR 0004 (GUI = dashboard-pilot; grill as an
+optional module; amend ADR 0003) + doc-drift cleanup (PLAN.md historical,
+roadmap split); (2) recovery tranche: interruption matrix (fault injection),
+state↔git invariant validator, known HANDOFF minors; (3) review/test↔commit
+fingerprint audit; (4) SECURITY_MODEL.md before any public alpha. Deferred
+by design: CI (user decision), refactor of large modules (only opportunistic
+extraction), token counters, concurrency.
+
 ## GUI-piloted full run PASSED + engine hardening (2026-07-10, `4884677..ae29cc1`)
 
 Third live GUI session drove a complete run (--range feature, 3 tasks,
