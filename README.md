@@ -125,6 +125,14 @@ concurrently with an agent-driven headless run races against the agent's
 the GUI on a directory another process already holds the run lock for, it
 shows a read-only "locked" banner instead of live controls.
 
+![spar gui — execution](docs/img/gui-exec.png)
+*Mid-execution: live transcript (colored per side/round/task) and the task
+board tracking each task's merged/review/pending status.*
+
+![spar gui — gate](docs/img/gui-gate.png)
+*A `final_merge` gate pending: test results and diffstat in context, with
+the Accept/Abort buttons the gate offers.*
+
 ## Agent mode (headless)
 
 spar is designed to be **driven by a host agent** (Claude Code / Codex) — see
