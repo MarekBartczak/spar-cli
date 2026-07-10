@@ -289,10 +289,10 @@ def test_sink_wiring_emits_impl_and_review_prefixed_lines(repo, tmp_path):
 
     stdout_text = out.getvalue()
     assert "[A t1 impl] implementer says hi" in stdout_text
-    assert "[A t1 review] reviewer says hi" in stdout_text
+    assert "[B t1 review] reviewer says hi" in stdout_text
     live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
     assert "[A t1 impl] implementer says hi" in live_log
-    assert "[A t1 review] reviewer says hi" in live_log
+    assert "[B t1 review] reviewer says hi" in live_log
 
 
 def test_sink_wiring_quiet_suppresses_event_but_not_log(repo, tmp_path):
@@ -329,7 +329,7 @@ def test_sink_wiring_quiet_suppresses_event_but_not_log(repo, tmp_path):
     assert "spar exec:" in stdout_text
     live_log = (tmp_path / ".spar" / "live.log").read_text(encoding="utf-8")
     assert "[A t1 impl] implementer says hi" in live_log
-    assert "[A t1 review] reviewer says hi" in live_log
+    assert "[B t1 review] reviewer says hi" in live_log
 
 
 # ---------------------------------------------------------------------------

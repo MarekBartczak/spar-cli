@@ -527,8 +527,12 @@ class Executor:
         if self.sink is None:
             return None, None
         side = task.side
+        # The reviewer is always the OTHER side — the prefix must name who is
+        # actually speaking, not the task's owner (live-smoke finding: opus
+        # review turns were mislabeled with the implementer's side).
+        reviewer = self._other_side(side)
         on_event_impl = lambda ln: self.sink.event(f"{side} {task.id} impl", ln)
-        on_event_review = lambda ln: self.sink.event(f"{side} {task.id} review", ln)
+        on_event_review = lambda ln: self.sink.event(f"{reviewer} {task.id} review", ln)
         return on_event_impl, on_event_review
 
     def _run_task(self, state: ExecState, ts: TaskState) -> None:
