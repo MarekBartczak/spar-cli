@@ -51,11 +51,17 @@ from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
 from spar.gates import GateChoice, GateParseError, GatePending, validate_choice
 from spar.orchestrator import GateDecision
-from spar.state import LockHeld, StateError
+from spar.state import LockHeld, StateError, StateRemark
 from spar.stream import StreamSink
 from spar.verdict import Severity
 
 __all__ = ["Executor", "ExecGate", "ConsoleExecGate"]
+
+# Anti-spin for the per-task TEST loop: after this many CONSECUTIVE failing
+# test iterations that change NOTHING on the task branch (neither the
+# re-implement turn nor the ensuing review), the loop is not converging —
+# escalate to the user rounds-gate instead of re-implementing forever.
+_TEST_FAIL_STALL_ITERS = 2
 
 
 def _task_id_order(tid: str) -> tuple:
@@ -731,6 +737,16 @@ class Executor:
         task = ts.task
         reviewer = self._other_side(task.side)
         on_event_impl, on_event_review = self._event_callbacks(task)
+        # Anti-spin for the per-task TEST loop (mirrors run_cross_review's
+        # no-change guard). A failing test re-triggers implement→review, but if
+        # neither the re-implement turn NOR the ensuing review changes anything
+        # on the task branch, the loop makes no progress and would re-implement
+        # forever (live bug: a test command naming a missing interpreter fails
+        # 127 while the implementer keeps replying "Unchanged"). After
+        # ``_TEST_FAIL_STALL_ITERS`` consecutive no-change failing iterations,
+        # escalate to the SAME user rounds-gate that review disputes use.
+        no_change_iters = 0
+        stall_budget = _TEST_FAIL_STALL_ITERS
         while True:
             ts.status = "testing"
             self.store.save(state)
@@ -754,7 +770,8 @@ class Executor:
             review_adapter = self.make_adapter(
                 reviewer, self.repo, task.review_model, readonly=True
             )
-            _implementer_turn(
+            branch_before = gitops.rev_parse(self.repo, branch)
+            made_changes, _ = _implementer_turn(
                 task_state=ts,
                 impl_adapter=impl_adapter,
                 worktree=worktree,
@@ -788,6 +805,38 @@ class Executor:
                 ),
                 on_event_impl=on_event_impl,
                 on_event_review=on_event_review,
+            )
+
+            # Progress check: an iteration that changed the task branch (either
+            # via the re-implement turn or a review-loop edit) is progress —
+            # reset the stall counter. ``_TEST_FAIL_STALL_ITERS`` consecutive
+            # iterations that change NOTHING while the test still fails is a
+            # stall: escalate to the user gate rather than loop forever.
+            if made_changes or gitops.rev_parse(self.repo, branch) != branch_before:
+                no_change_iters = 0
+                continue
+            no_change_iters += 1
+            if no_change_iters < stall_budget:
+                continue
+            # Stalled. Escalate to the SAME rounds-gate wrapper as review
+            # disputes, carrying the failing output so the user sees WHY.
+            # ``abort`` is raised as _Abort(5) inside the wrapper; headless
+            # pends (GatePending → exit 10) from ``review_rounds_exhausted_gate``.
+            decision = self._review_rounds_gate(state, test_output=output)(
+                ts, no_change_iters
+            )
+            if decision.action == "accept":
+                self.log(
+                    f"spar exec: [{task.id}] user ACCEPTED the task with a "
+                    "FAILING per-task test; merging on the user's override."
+                )
+                break
+            # extend: grant a FRESH budget of N more no-change iterations.
+            stall_budget = decision.extra_rounds
+            no_change_iters = 0
+            self.log(
+                f"spar exec: [{task.id}] per-task-test stall extended by "
+                f"{decision.extra_rounds} iteration(s) on the user's request."
             )
 
         # Merge the task branch into integration.
@@ -892,11 +941,16 @@ class Executor:
 
         self._test_and_merge_task(state, ts, branch, worktree)
 
-    def _review_rounds_gate(self, state: ExecState):
+    def _review_rounds_gate(self, state: ExecState, test_output: str | None = None):
         """Adapter between ``run_cross_review``'s ``rounds_gate`` callback and
         the user-facing :class:`ExecGate`. An ``abort`` decision raises the
         user-abort exit (5) directly — the review loop only ever sees
-        accept/extend."""
+        accept/extend.
+
+        ``test_output`` (set only by the stalled per-task-test escalation) is
+        surfaced to the gate as a synthetic USER remark so the console prompt
+        and the headless ``review_rounds`` pending-gate context both carry the
+        failing output — the user must see WHY the test fails to decide."""
 
         def gate(task_state: TaskState, rounds: int) -> GateDecision:
             # A DISPUTE escalation arrives with the contested remarks already
@@ -910,6 +964,21 @@ class Executor:
                     for rr in task_state.resolved_remarks[-4:]
                     if rr.resolution == "rejected"
                 ]
+            if test_output is not None:
+                # Per-task-test stall: the user is arbitrating a test that will
+                # not pass, not a review dispute. Prepend a synthetic remark
+                # carrying the (truncated) failing output.
+                synthetic = StateRemark(
+                    remark_id=0,
+                    severity=Severity.USER,
+                    author="per-task-test",
+                    text=(
+                        "per-task test still FAILING and the implementer is "
+                        "making no progress. Last captured output (truncated):\n"
+                        + (test_output or "")[:2000]
+                    ),
+                )
+                remarks = [synthetic, *remarks]
             decision = self.gate.review_rounds_exhausted_gate(
                 task_state.task.id, rounds, remarks
             )

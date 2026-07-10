@@ -1197,6 +1197,150 @@ def test_review_rounds_gate_accept_proceeds_to_test_and_merge(repo, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Stalled per-task-test loop: a failing per-task test whose re-implement makes
+# NO change would loop testing→implementing forever. After 2 consecutive
+# no-change failing iterations the loop escalates to the review-rounds USER
+# gate (the live infinite-loop fix): accept -> merge despite the failing test;
+# extend:N -> N more iterations (converge); abort -> exit 5. Headless pends.
+# ---------------------------------------------------------------------------
+
+
+def test_stalled_per_task_test_accept_merges_despite_failure(repo, tmp_path):
+    # Per-task test ALWAYS fails; the re-implement turns change nothing. After
+    # 2 no-change iterations the gate is hit; accept -> merge on user override.
+    tasks = [make_task("t1", "A", ["work.py"], test="false")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review after initial impl
+            Step(vblock("DONE")),  # review iter1
+            Step(vblock("DONE")),  # review iter2
+        ],
+    }
+    gate = FakeGate(
+        [GateDecision("accept")], review_decisions=[GateDecision("accept")]
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),  # final test passes
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    state = store.load()
+    assert state.tasks["t1"].status == "merged"
+    # the gate fired exactly once, on the stalled per-task test loop
+    assert len(gate.review_calls) == 1 and gate.review_calls[0][0] == "t1"
+    # loud override log emitted
+    assert any(
+        "ACCEPTED the task with a" in ln and "FAILING per-task test" in ln
+        for ln in logs
+    ), f"missing loud override log; logs={logs}"
+
+
+def test_stalled_per_task_test_extend_then_converges(repo, tmp_path):
+    # Per-task test fails on runs 1-3, passes on run 4 (counter sentinel).
+    # 2 no-change iters -> gate -> extend:1 -> iter3 makes a real change ->
+    # iter4 test passes -> merge.
+    cnt = tmp_path / "cnt_stall"
+    per_task = (
+        f'n=$(($(cat {cnt} 2>/dev/null || echo 0)+1)); echo $n > {cnt}; '
+        f'[ $n -ge 4 ]'
+    )
+    tasks = [make_task("t1", "A", ["work.py"], test=per_task)]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+            Step(vblock("CONTINUE"), edits={"work.py": "v2\n"}),  # iter3 — CHANGE
+        ],
+        "B": [
+            Step(vblock("DONE")),  # review initial
+            Step(vblock("DONE")),  # review iter1
+            Step(vblock("DONE")),  # review iter2
+            Step(vblock("DONE")),  # review iter3
+        ],
+    }
+    gate = FakeGate(
+        [GateDecision("accept")],
+        review_decisions=[GateDecision("extend", extra_rounds=1)],
+    )
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    state = store.load()
+    assert state.phase == "done"
+    assert state.tasks["t1"].status == "merged"
+    assert len(gate.review_calls) == 1  # gated once, then converged
+
+
+def test_stalled_per_task_test_abort_exits_5(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"], test="false")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [
+            Step(vblock("DONE")),
+            Step(vblock("DONE")),
+            Step(vblock("DONE")),
+        ],
+    }
+    gate = FakeGate([], review_decisions=[GateDecision("abort")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 5, f"logs={logs}"
+
+
+def test_stalled_per_task_test_headless_pends_review_rounds(repo, tmp_path):
+    # Headless: the same stall pends the review_rounds gate (exit 10); the
+    # pending-gate context must carry the FAILING TEST OUTPUT so the operator
+    # sees why it fails.
+    marker = "STALL_TEST_FAILURE_MARKER_QRS"
+    per_task = f"echo {marker}; false"
+    tasks = [make_task("t1", "A", ["work.py"], test=per_task)]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [
+            Step(vblock("DONE")),
+            Step(vblock("DONE")),
+            Step(vblock("DONE")),
+        ],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 10, f"expected per-task-test stall pend; logs={logs}"
+    state = store.load()
+    assert state.pending_gate is not None
+    assert state.pending_gate["name"] == "review_rounds"
+    assert state.pending_gate["context"]["task_id"] == "t1"
+    # the failing output rode into the gate context via the synthetic remark
+    assert any(
+        marker in r["text"]
+        for r in state.pending_gate["context"]["open_remarks"]
+    ), f"failing output not surfaced in gate context; ctx={state.pending_gate['context']}"
+
+
+# ---------------------------------------------------------------------------
 # Fix-task cap: a final test that keeps failing opens at most max_fix_tasks
 # integration-fix tasks, then aborts loudly instead of churning forever.
 # ---------------------------------------------------------------------------
