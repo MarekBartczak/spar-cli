@@ -1499,6 +1499,127 @@ def test_headless_broken_command_resume_fix_converges(repo, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Headless resume of a per-task-TEST escalation: ``accept`` must MERGE the task
+# WITHOUT re-running the still-failing test (re-running would re-escalate and
+# pend forever — the reported bug); ``extend:N`` re-enters the per-task test
+# loop with that budget. The pended gate carries ``reason=test_escalation``.
+# ---------------------------------------------------------------------------
+
+
+def test_headless_broken_command_resume_accept_merges_without_rerun(repo, tmp_path):
+    # 127 → headless pend (reason=test_escalation). Resume --gate accept must
+    # MERGE the task without re-running the (still broken) command, then the run
+    # advances to the final-merge pend — NOT back to the same review_rounds gate.
+    tasks = [make_task("t1", "A", ["work.py"], test=_BROKEN_CMD)]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work.py": "v1\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    assert ex.run() == 10
+    pg = store.load().pending_gate
+    assert pg["name"] == "review_rounds"
+    assert pg["context"]["reason"] == "test_escalation"
+
+    # Resume: accept. No adapter turns and no test re-run are needed.
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="accept"))
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.pending_gate["name"] == "final_merge"  # advanced, not re-pended
+    assert adapters2.get("A") is None or adapters2["A"].calls == []
+    assert any(
+        "merging on the user's override" in ln and "NOT re-running" in ln
+        for ln in logs2
+    ), f"missing loud override log; logs={logs2}"
+
+
+def test_headless_stalled_test_resume_accept_merges_without_rerun(repo, tmp_path):
+    # Same honoring for a STALLED (exit 1) test escalation: accept merges a task
+    # whose test ALWAYS fails, without re-running it (a re-run would re-escalate).
+    tasks = [make_task("t1", "A", ["work.py"], test="false")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [Step(vblock("DONE")), Step(vblock("DONE")), Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    assert ex.run() == 10
+    assert store.load().pending_gate["context"]["reason"] == "test_escalation"
+
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="accept"))
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.pending_gate["name"] == "final_merge"
+
+
+def test_headless_stalled_test_resume_extend_then_converges(repo, tmp_path):
+    # Stalled test (counter) fails while the escalation pends; resume extend:1
+    # re-enters the per-task TEST loop with that budget and the now-passing test
+    # merges the task — converging rather than pending forever.
+    cnt = tmp_path / "cnt_resume_extend"
+    per_task = (
+        f'n=$(($(cat {cnt} 2>/dev/null || echo 0)+1)); echo $n > {cnt}; '
+        f'[ $n -ge 3 ]'
+    )
+    tasks = [make_task("t1", "A", ["work.py"], test=per_task)]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE")),  # reimpl iter1 — NO change
+            Step(vblock("CONTINUE")),  # reimpl iter2 — NO change
+        ],
+        "B": [Step(vblock("DONE")), Step(vblock("DONE")), Step(vblock("DONE"))],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    assert ex.run() == 10
+    assert store.load().pending_gate["context"]["reason"] == "test_escalation"
+
+    # Resume extend:1 — the next test run (n=3) passes, so the task merges with
+    # no further adapter turns and the run advances to the final-merge pend.
+    ex2, adapters2, store2, logs2 = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={"A": [], "B": []},
+        gate=HeadlessExecGate(), execution=ExecutionConfig(test_command="true"),
+    )
+    rc2 = ex2.run_continue(gate_choice=GateChoice(action="extend", extra_rounds=1))
+    assert rc2 == 10, f"logs={logs2}"
+    state2 = store2.load()
+    assert state2.tasks["t1"].status == "merged"
+    assert state2.pending_gate["name"] == "final_merge"
+
+
+def test_headless_review_dispute_reason_is_review_dispute(repo, tmp_path):
+    # Regression guard: an ordinary review dispute pends with reason
+    # ``review_dispute`` (NOT test_escalation), so its resume keeps the existing
+    # accept-then-test semantics.
+    store, tasks = _pend_review_rounds(repo, tmp_path)
+    pg = store.load().pending_gate
+    assert pg["context"]["reason"] == "review_dispute"
+    assert "fix" not in pg["options"]
+
+
+# ---------------------------------------------------------------------------
 # Fix-task cap: a final test that keeps failing opens at most max_fix_tasks
 # integration-fix tasks, then aborts loudly instead of churning forever.
 # ---------------------------------------------------------------------------

@@ -774,7 +774,12 @@ class Executor:
         )
 
     def _test_and_merge_task(
-        self, state: ExecState, ts: TaskState, branch: str, worktree: Path
+        self,
+        state: ExecState,
+        ts: TaskState,
+        branch: str,
+        worktree: Path,
+        stall_budget: int = _TEST_FAIL_STALL_ITERS,
     ) -> None:
         """Per-task test loop → merge into integration → cleanup.
 
@@ -783,6 +788,11 @@ class Executor:
         is merged no-ff into integration and its artifacts are swept. Shared by
         the normal task path (:meth:`_run_task`) and the review-resume path
         (:meth:`_resume_review_task`) so the two cannot drift.
+
+        ``stall_budget`` seeds how many consecutive no-change failing iterations
+        are tolerated before escalating: the default matches a fresh entry, and
+        a headless ``extend:N`` resume of a test escalation re-enters with the
+        operator's granted budget.
         """
         task = ts.task
         reviewer = self._other_side(task.side)
@@ -793,10 +803,9 @@ class Executor:
         # on the task branch, the loop makes no progress and would re-implement
         # forever (live bug: a test command naming a missing interpreter fails
         # 127 while the implementer keeps replying "Unchanged"). After
-        # ``_TEST_FAIL_STALL_ITERS`` consecutive no-change failing iterations,
+        # ``stall_budget`` consecutive no-change failing iterations,
         # escalate to the SAME user rounds-gate that review disputes use.
         no_change_iters = 0
-        stall_budget = _TEST_FAIL_STALL_ITERS
         while True:
             ts.status = "testing"
             self.store.save(state)
@@ -944,6 +953,19 @@ class Executor:
                 f"{decision.extra_rounds} iteration(s) on the user's request."
             )
 
+        self._merge_task(state, ts, branch, worktree)
+
+    def _merge_task(
+        self, state: ExecState, ts: TaskState, branch: str, worktree: Path
+    ) -> None:
+        """Merge the task branch into integration, record ``merged``, sweep.
+
+        The merge tail of :meth:`_test_and_merge_task`, factored out so a
+        headless ``accept`` override of a *test escalation* can merge the task
+        WITHOUT re-running the still-failing per-task test (re-running would
+        re-escalate and pend forever).
+        """
+        task = ts.task
         # Merge the task branch into integration.
         gitops.checkout(self.repo, state.integration_branch)
         gitops.merge_no_ff(
@@ -963,9 +985,16 @@ class Executor:
         """Executor-owned consumption point for a ``review_rounds`` decision.
 
         Applies ``self._resume_decision`` to a task left in ``review`` by a
-        pending gate: ``accept`` skips review and proceeds to the per-task
-        test/merge tail; ``extend`` re-enters the review loop with a FRESH
-        budget starting at an implementer turn (``start_with="implementer"``);
+        pending gate. Behavior forks on WHY the gate pended (``context.reason``):
+
+        - review dispute: ``accept`` skips review and proceeds to the per-task
+          test/merge tail; ``extend`` re-enters the review loop with a FRESH
+          budget starting at an implementer turn (``start_with="implementer"``).
+        - test escalation (broken/failing per-task test): ``accept`` MERGES the
+          task WITHOUT re-running the test (re-running would re-escalate and
+          pend forever); ``extend:N`` re-enters the per-task test loop with an
+          N-iteration stall budget; ``fix:`` swaps the command and re-runs.
+
         ``abort`` aborts (exit 5). Resumed WITHOUT ``--gate`` (no decision)
         re-pends the same gate (exit 10, idempotent). ``pending_gate`` is
         cleared here — at consumption — never before.
@@ -987,6 +1016,12 @@ class Executor:
                 record.get("options", ["accept", "extend", "abort"]),
                 record.get("context", {}),
             )
+
+        # WHY the gate pended — read BEFORE ``pending_gate`` is cleared below.
+        # A ``test_escalation`` (broken/failing per-task test) must NOT re-run
+        # the test on ``accept`` (it would re-escalate and pend forever); a
+        # missing/legacy reason defaults to review-dispute semantics.
+        reason = ((state.pending_gate or {}).get("context") or {}).get("reason")
 
         # Re-create the worktree from the surviving branch if it is gone.
         if not worktree.exists():
@@ -1012,6 +1047,27 @@ class Executor:
             # per-task test/merge tail, which re-runs the (now fixed) command.
             self._apply_fix_command(state, ts, decision.command)
             self._test_and_merge_task(state, ts, branch, worktree)
+            return
+
+        # A per-task TEST escalation is resolved through the per-task test loop,
+        # NOT the review loop: the task was already reviewed before its test ran.
+        if reason == "test_escalation":
+            if decision.action == "accept":
+                self.log(
+                    f"spar exec: [{task.id}] merging on the user's override — "
+                    "per-task test still failing (accepted on headless resume "
+                    "of a test escalation); NOT re-running the test."
+                )
+                self._merge_task(state, ts, branch, worktree)
+                return
+            # extend: grant N more per-task-test-loop iterations and re-enter
+            # the test/merge tail with that budget (re-implement→re-test).
+            n = decision.extra_rounds
+            self.log(
+                f"spar exec: [{task.id}] per-task-test escalation extended by "
+                f"{n} iteration(s) on resume."
+            )
+            self._test_and_merge_task(state, ts, branch, worktree, stall_budget=n)
             return
 
         if decision.action == "extend":

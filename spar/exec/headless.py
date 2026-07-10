@@ -72,6 +72,12 @@ class HeadlessExecGate:
         context = {
             "task_id": task_id,
             "rounds": rounds,
+            # WHY the gate pended, persisted so a headless resume can honor the
+            # operator's decision correctly. ``test_escalation`` (a broken/
+            # failing per-task test command) must NOT re-run the test on an
+            # ``accept`` — re-running re-escalates and pends forever. A
+            # ``review_dispute`` keeps its existing accept-then-test semantics.
+            "reason": "test_escalation" if allow_fix else "review_dispute",
             "open_remarks": [
                 {
                     "id": r.remark_id,

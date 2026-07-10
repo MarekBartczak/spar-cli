@@ -163,3 +163,41 @@ def test_pending_gate_missing_key_defaults_to_none(tmp_path):
     data.pop("pending_gate", None)
     store.exec_path.write_text(json.dumps(data))
     assert store.load().pending_gate is None
+
+
+def test_pending_gate_reason_roundtrips(tmp_path):
+    # The gate-reason flag (why the gate pended) rides in the pending_gate
+    # context and must survive save/load so a headless resume can honor
+    # accept/extend on a per-task-test escalation.
+    st = ExecState(
+        target_branch="master",
+        target_base_oid="abc",
+        tasks={"t1": TaskState(_t("t1"))},
+        pending_gate={
+            "name": "review_rounds",
+            "options": ["accept", "extend", "fix", "abort"],
+            "context": {"task_id": "t1", "reason": "test_escalation"},
+        },
+    )
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    assert store.load().pending_gate["context"]["reason"] == "test_escalation"
+
+
+def test_pending_gate_context_without_reason_still_loads(tmp_path):
+    # A gate persisted by an older spar (no ``reason`` in context) must still
+    # load; the executor reads it with ``.get("reason")`` → review-dispute path.
+    st = ExecState(
+        target_branch="master",
+        target_base_oid="abc",
+        tasks={"t1": TaskState(_t("t1"))},
+        pending_gate={
+            "name": "review_rounds",
+            "options": ["accept", "extend", "abort"],
+            "context": {"task_id": "t1"},
+        },
+    )
+    store = ExecStateStore(tmp_path / ".spar")
+    store.save(st)
+    ctx = store.load().pending_gate["context"]
+    assert ctx.get("reason") is None
