@@ -102,6 +102,52 @@ class TestMainWindow:
         assert marker.read_text() == "sigint"
 
 
+class TestStartupIndicator:
+    """Task brief, fix 3: an indeterminate progress bar + label shown between
+    a start and the process's first output line (or its finish)."""
+
+    def test_hidden_initially(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert window._startup_progress.isVisible() is False
+        assert window._startup_label.isVisible() is False
+
+    def test_shown_on_started(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.show()
+
+        window._on_started("spar --continue")
+
+        assert window._startup_progress.isVisible() is True
+        assert window._startup_label.isVisible() is True
+        assert window._startup_progress.minimum() == 0
+        assert window._startup_progress.maximum() == 0  # indeterminate
+
+    def test_hidden_on_first_stream_lines(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.show()
+
+        window._on_started("spar --continue")
+        window._on_first_stream_lines(["[claude r0] hello"])
+
+        assert window._startup_progress.isVisible() is False
+        assert window._startup_label.isVisible() is False
+
+    def test_hidden_on_finished(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.show()
+
+        window._on_started("spar --continue")
+        window._on_finished(0)
+
+        assert window._startup_progress.isVisible() is False
+        assert window._startup_label.isVisible() is False
+
+
 class TestTheme:
     def test_tokens_dict_has_required_keys(self):
         required = {

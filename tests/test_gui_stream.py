@@ -23,7 +23,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QFont
 
-from spar.gui.stream import LiveLogTailer, StreamPane
+from spar.gui.stream import LiveLogTailer, StreamPane, humanize_prefix
 
 
 # ----------------------------------------------------------------------
@@ -107,9 +107,11 @@ class TestStreamPane:
 
         pane.feed_lines(["[claude r0] hello", "[codex r0] world"])
 
+        # Rendered text shows the humanized prefix (fix 4); the raw prefix
+        # lives on in the ring buffer / filter chips, checked elsewhere.
         text = pane.text.toPlainText()
-        assert "[claude r0] hello" in text
-        assert "[codex r0] world" in text
+        assert "[claude · runda 1] hello" in text
+        assert "[codex · runda 1] world" in text
 
     def test_filter_by_side_leaves_only_that_sides_lines(self, qtbot):
         pane = StreamPane()
@@ -253,3 +255,67 @@ class TestStreamPane:
         assert "codex" in pane._known_sides
         assert "A" in pane._known_sides
         assert "t1" in pane._known_tasks
+
+    def test_set_models_rerenders_with_translated_prefixes(self, qtbot):
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+
+        pane.feed_lines(["[claude r0] hello", "[codex t1 impl] working"])
+        pane.set_models(
+            {
+                "sides": {"claude": "sonnet"},
+                "tasks": {"t1": {"model": "gpt-5.5", "review_model": "sonnet"}},
+            }
+        )
+
+        text = pane.text.toPlainText()
+        assert "[claude · sonnet · runda 1] hello" in text
+        assert "[codex · gpt-5.5 · t1 · implementacja] working" in text
+
+    def test_filter_still_matches_raw_side_after_translation(self, qtbot):
+        # Filter chips must key on the RAW side/task, not the translated
+        # label (fix 4) -- the chip for "claude" must still isolate its
+        # lines even once they render with a model segment.
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+
+        pane.feed_lines(["[claude r0] alpha", "[codex r0] beta"])
+        pane.set_models({"sides": {"claude": "sonnet", "codex": "gpt-5.5"}, "tasks": {}})
+        pane.set_filter("side", "claude")
+
+        text = pane.text.toPlainText()
+        assert "alpha" in text
+        assert "beta" not in text
+
+
+# ----------------------------------------------------------------------
+# humanize_prefix -- pure
+# ----------------------------------------------------------------------
+class TestHumanizePrefix:
+    def test_debate_round_without_model(self):
+        assert humanize_prefix("claude r0") == "claude · runda 1"
+
+    def test_debate_round_with_model_and_round_offset(self):
+        models = {"sides": {"claude": "sonnet"}}
+        assert humanize_prefix("claude r0", models) == "claude · sonnet · runda 1"
+        assert humanize_prefix("claude r2", models) == "claude · sonnet · runda 3"
+
+    def test_exec_impl_with_model(self):
+        models = {"tasks": {"t1": {"model": "gpt-5.5", "review_model": "sonnet"}}}
+        assert humanize_prefix("codex t1 impl", models) == "codex · gpt-5.5 · t1 · implementacja"
+
+    def test_exec_review_uses_review_model_not_model(self):
+        models = {"tasks": {"t1": {"model": "gpt-5.5", "review_model": "sonnet"}}}
+        assert humanize_prefix("claude t1 review", models) == "claude · sonnet · t1 · recenzja"
+
+    def test_missing_model_omits_segment(self):
+        assert humanize_prefix("codex t1 impl", {}) == "codex · t1 · implementacja"
+        assert humanize_prefix("claude t1 review", {}) == "claude · t1 · recenzja"
+
+    def test_unrecognized_shape_returned_unchanged(self):
+        assert humanize_prefix("A", {}) == "A"
+        assert humanize_prefix("spar-log", {}) == "spar-log"
+        assert humanize_prefix("claude weirdtoken", {}) == "claude weirdtoken"
+
+    def test_none_models_defaults_to_empty(self):
+        assert humanize_prefix("claude r0", None) == "claude · runda 1"

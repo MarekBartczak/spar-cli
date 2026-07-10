@@ -595,7 +595,14 @@ class TestStatusSubcommand:
         assert result == 0
         out = json.loads(capsys.readouterr().out)
         assert out["phase"] == "execution"
-        assert out["tasks"] == {"t1": {"status": "merged", "side": "claude", "model": "sonnet"}}
+        assert out["tasks"] == {
+            "t1": {
+                "status": "merged",
+                "side": "claude",
+                "model": "sonnet",
+                "review_model": "gpt-5.4",
+            }
+        }
         assert out["pending_gate"]["name"] == "final_merge"
         assert out["artifact"] == str(Path(".spar") / "artifact.md")
         # Sanctioned additive field (task 4): exec branch names for the diff

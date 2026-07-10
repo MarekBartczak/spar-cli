@@ -40,13 +40,16 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from spar.config import load_config
 from spar.gui.theme import TOKENS
 from spar.gui.viewers import show_diff_dialog, show_plan_dialog
 from spar.state import StateError
@@ -57,6 +60,7 @@ __all__ = [
     "gate_buttons",
     "task_rows",
     "TaskBoard",
+    "TaskPanel",
     "GatePanel",
     "SidePane",
 ]
@@ -101,11 +105,33 @@ def _reviewer_for(side: str | None, all_sides: set[str]) -> str:
     return "?"
 
 
-def task_rows(status: dict) -> list[dict]:
+def _reviewer_for_configured(side: str | None, side_order: "list[str] | tuple[str, ...]") -> str:
+    """The other side in the project's CONFIGURED side order.
+
+    Fix 6b: the previous ``_reviewer_for`` inferred the reviewer from sides
+    *seen across tasks so far*, so the very first task from a side always
+    showed ``"codex → ?"`` until some other task revealed the other side.
+    With the config's side order on hand there is no need to wait -- the
+    reviewer is simply "the other configured side" from the start.
+    """
+    if not side or not side_order:
+        return "?"
+    others = [s for s in side_order if s != side]
+    if len(others) == 1:
+        return others[0]
+    return "?"
+
+
+def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = None) -> list[dict]:
     """Pure projection of ``status['tasks']`` to displayable row dicts.
 
     Each row: ``task_id``, ``status``, ``pill`` (ok/warn/muted), ``side``,
     ``reviewer``, ``label`` (the ``side -> reviewer`` right-hand string).
+
+    ``side_order`` (when given) is the project's configured side names
+    (``spar.config.load_config(project_dir).sides`` keys, in order); the
+    reviewer is then resolved as "the other configured side" (fix 6b)
+    rather than inferred from the sides seen across tasks so far.
     """
     tasks = status.get("tasks") or {}
     all_sides = {t["side"] for t in tasks.values() if t.get("side")}
@@ -113,7 +139,10 @@ def task_rows(status: dict) -> list[dict]:
     for task_id in sorted(tasks, key=_task_id_order):
         task = tasks[task_id]
         side = task.get("side")
-        reviewer = _reviewer_for(side, all_sides)
+        if side_order:
+            reviewer = _reviewer_for_configured(side, side_order)
+        else:
+            reviewer = _reviewer_for(side, all_sides)
         label = f"{side or '?'} → {reviewer}"
         rows.append(
             {
@@ -231,9 +260,9 @@ class TaskBoard(QWidget):
 
         self._rows: list[dict] = []
 
-    def set_status(self, status: dict) -> None:
+    def set_status(self, status: dict, side_order: "list[str] | None" = None) -> None:
         """Rebuild rows from a fresh status dict (numeric task-id order)."""
-        self._rows = task_rows(status)
+        self._rows = task_rows(status, side_order)
         self.table.setRowCount(len(self._rows))
         for i, row in enumerate(self._rows):
             self.table.setItem(i, 0, QTableWidgetItem(row["task_id"]))
@@ -258,6 +287,75 @@ class TaskBoard(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# TaskPanel -- collapsible "Zadanie" section showing .spar/task.md (fix 5)
+# ---------------------------------------------------------------------------
+
+
+class TaskPanel(QWidget):
+    """Collapsible section showing the debate's ``.spar/task.md`` content.
+
+    Collapsed by default (arrow toggle button); the scroll area caps at
+    ~160px expanded so a long task doesn't dominate the side pane. Hidden
+    entirely when there is no task file (:meth:`set_text` called with
+    ``None``).
+    """
+
+    _MAX_EXPANDED_HEIGHT = 160
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("taskPanel")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setObjectName("taskToggle")
+        self.toggle_button.setText("Zadanie")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+        self.toggle_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle_button.toggled.connect(self._on_toggled)
+        layout.addWidget(self.toggle_button)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("taskScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setMaximumHeight(self._MAX_EXPANDED_HEIGHT)
+        self.scroll.setVisible(False)  # collapsed by default
+
+        self.label = QLabel(self.scroll)
+        self.label.setObjectName("taskLabel")
+        self.label.setWordWrap(True)
+        self.scroll.setWidget(self.label)
+        layout.addWidget(self.scroll)
+
+        self._text: str | None = None
+        self.setVisible(False)  # hidden until set_text sees a task file
+
+    def _on_toggled(self, checked: bool) -> None:
+        self.toggle_button.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+        self.scroll.setVisible(checked)
+
+    def set_text(self, text: str | None) -> None:
+        """Update the panel's content; hides the whole section on ``None``
+        (no ``task.md`` present -- e.g. before a debate has started)."""
+        self._text = text
+        if text is None:
+            self.setVisible(False)
+            return
+        self.setVisible(True)
+        self.label.setText(text)
+
+    @property
+    def text(self) -> str | None:
+        return self._text
+
+
+# ---------------------------------------------------------------------------
 # GatePanel
 # ---------------------------------------------------------------------------
 
@@ -279,6 +377,9 @@ class GatePanel(QWidget):
         self._runner = runner
         self._pending_gate: dict | None = None
 
+        # Clean top-to-bottom stack (fix 6a): header row, context block,
+        # full-width remarks editor (only when the gate offers 'remarks'),
+        # then ONE button row.
         self._layout = QVBoxLayout(self)
         self._header = QLabel(self)
         self._header.setObjectName("gateHeader")
@@ -290,6 +391,28 @@ class GatePanel(QWidget):
         self._context_label.setTextFormat(Qt.TextFormat.RichText)
         self._layout.addWidget(self._context_label)
 
+        # Remarks editor + its own "Wyślij remarks" button, directly under
+        # the editor -- kept OUT of the main button row (fix 6a) and its own
+        # persistent container so toggling visibility doesn't rebuild it.
+        self._remarks_container = QWidget(self)
+        remarks_layout = QVBoxLayout(self._remarks_container)
+        remarks_layout.setContentsMargins(0, 0, 0, 0)
+        self._remarks_text = QPlainTextEdit(self._remarks_container)
+        self._remarks_text.setObjectName("remarksText")
+        self._remarks_text.setPlaceholderText("Uwagi, jedna na linijkę…")
+        remarks_layout.addWidget(self._remarks_text)
+        self._remarks_send_button = QPushButton("Wyślij remarks", self._remarks_container)
+        self._remarks_send_button.setObjectName("remarksSendButton")
+        self._remarks_send_button.clicked.connect(
+            lambda: self._on_remarks(self._remarks_text)
+        )
+        remarks_layout.addWidget(self._remarks_send_button)
+        self._remarks_container.setVisible(False)
+        self._layout.addWidget(self._remarks_container)
+
+        # The one button row: Accept variant(s) left, extend spinner+button
+        # middle, Abort right-aligned (stretches added around extend/abort
+        # in set_pending_gate).
         self._buttons_row = QWidget(self)
         self._buttons_layout = QHBoxLayout(self._buttons_row)
         self._buttons_layout.setContentsMargins(0, 0, 0, 0)
@@ -316,10 +439,31 @@ class GatePanel(QWidget):
         self.setVisible(True)
         name = pending_gate.get("name")
         context = pending_gate.get("context") or {}
+        options = pending_gate.get("options") or []
         self._header.setText(f"Gate: {name}")
         self._context_label.setText(self._render_context(name, context))
 
-        for spec in gate_buttons(pending_gate):
+        has_remarks = "remarks" in options
+        self._remarks_text.clear()
+        self._remarks_container.setVisible(has_remarks)
+        if has_remarks:
+            self._remarks_text.setEnabled(True)
+            self._remarks_send_button.setEnabled(True)
+            self._interactive_widgets += [self._remarks_text, self._remarks_send_button]
+
+        specs = [s for s in gate_buttons(pending_gate) if s.option != "remarks"]
+        accept_specs = [s for s in specs if s.option == "accept"]
+        extend_specs = [s for s in specs if s.option == "extend"]
+        abort_specs = [s for s in specs if s.option == "abort"]
+
+        for spec in accept_specs:
+            self._add_button(spec)
+        if extend_specs:
+            self._buttons_layout.addStretch(1)
+            for spec in extend_specs:
+                self._add_button(spec)
+        self._buttons_layout.addStretch(1)
+        for spec in abort_specs:
             self._add_button(spec)
 
     # -- context rendering --------------------------------------------------
@@ -383,21 +527,10 @@ class GatePanel(QWidget):
             self._buttons_layout.addWidget(button)
             self._interactive_widgets.extend([spin, button])
 
-        elif spec.option == "remarks":
-            container = QWidget(self._buttons_row)
-            v = QVBoxLayout(container)
-            v.setContentsMargins(0, 0, 0, 0)
-            text_edit = QPlainTextEdit(container)
-            text_edit.setObjectName("remarksText")
-            text_edit.setPlaceholderText("Uwagi, jedna na linijkę…")
-            v.addWidget(text_edit)
-
-            button = QPushButton(spec.label, container)
-            button.clicked.connect(lambda _=False, t=text_edit: self._on_remarks(t))
-            v.addWidget(button)
-
-            self._buttons_layout.addWidget(container)
-            self._interactive_widgets.extend([text_edit, button])
+        # 'remarks' is handled by the dedicated editor+button built in
+        # __init__/set_pending_gate, never by this per-spec button row
+        # (fix 6a) -- gate_buttons' remarks spec is filtered out before
+        # reaching here.
 
     def _clear_buttons(self) -> None:
         while self._buttons_layout.count():
@@ -464,7 +597,18 @@ class SidePane(QWidget):
             "branches": None,
         }
 
+        # Configured side order (fix 6b's reviewer resolution) -- resolved
+        # once; falls back to the historical claude/codex pair when the
+        # project has no readable config.
+        try:
+            self._side_order = list(load_config(self.project_dir).sides.keys())
+        except Exception:
+            self._side_order = ["claude", "codex"]
+
         layout = QVBoxLayout(self)
+
+        self.task_panel = TaskPanel(self)
+        layout.addWidget(self.task_panel)
 
         self.task_board = TaskBoard(self)
         layout.addWidget(self.task_board)
@@ -492,9 +636,20 @@ class SidePane(QWidget):
         else:
             self._last_good_status = status
 
-        self.task_board.set_status(status)
+        self.task_board.set_status(status, self._side_order)
         self.gate_panel.set_pending_gate(status.get("pending_gate"))
+        self.task_panel.set_text(self._read_task_text())
         self.status_changed.emit(status)
+
+    def _read_task_text(self) -> "str | None":
+        """The engine-written ``.spar/task.md`` content, or ``None`` when
+        absent (fix 5) -- re-read on every poll so the panel picks up a task
+        written after the pane was constructed."""
+        task_path = self.project_dir / ".spar" / "task.md"
+        try:
+            return task_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
 
     def show_plan(self) -> None:
         artifact = self._last_good_status.get("artifact")

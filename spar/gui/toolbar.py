@@ -12,17 +12,27 @@ in a later task and stay disabled.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QLineEdit,
+    QHBoxLayout,
     QPlainTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
+from spar.config import load_config
 from spar.gui.runner import RunnerState
+
+# Sides shown/ordered by default when no project config is readable, or when
+# the configured sides don't include these -- keeps the historical
+# claude-then-codex ordering (task brief, fix 1).
+_DEFAULT_SIDE_ORDER = ("claude", "codex")
 
 __all__ = [
     "NEW_DEBATE",
@@ -90,18 +100,44 @@ def apply_state(toolbar, state: RunnerState, status: dict | None = None) -> None
             action.setEnabled(is_enabled)
 
 
+def _configured_side_order(project_dir: "str | Path | None") -> list[str]:
+    """The project's configured side names, ``claude``/``codex`` first.
+
+    Falls back to the historical ``["claude", "codex"]`` when the project has
+    no readable config (fresh dir, malformed config.toml, etc.) -- the dialog
+    must never fail to open over a config problem.
+    """
+    configured: list[str] = list(_DEFAULT_SIDE_ORDER)
+    if project_dir is not None:
+        try:
+            config = load_config(Path(project_dir))
+            configured = list(config.sides.keys())
+        except Exception:
+            configured = list(_DEFAULT_SIDE_ORDER)
+    ordered = [s for s in _DEFAULT_SIDE_ORDER if s in configured]
+    ordered += [s for s in configured if s not in ordered]
+    return ordered
+
+
 class NewDebateDialog(QDialog):
     """Collect the parameters for a fresh debate.
 
-    Fields: multiline task text, comma-separated ``sides`` (default
-    ``claude,codex``), ``first`` side (default ``claude``) and a ``tasks``
-    checkbox (default ON — require a machine-parsable ``## Tasks`` section so
-    the plan can bridge into ``spar exec``).
+    Fields: multiline task text, one checkbox per side configured in the
+    project (``spar.config.load_config(project_dir).sides``, default ALL
+    checked, ``claude``/``codex`` ordered first -- fix 1), a ``first`` combo
+    populated from the currently-CHECKED sides (updates live as checkboxes
+    toggle) and a ``tasks`` checkbox (default ON — require a machine-parsable
+    ``## Tasks`` section so the plan can bridge into ``spar exec``).
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, project_dir: "str | Path | None" = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Nowa debata")
+        # The live session's dialog was resized to roughly this by hand --
+        # the previous Qt-picked default was cramped (task brief, fix 2).
+        self.resize(760, 560)
+
+        self._side_order = _configured_side_order(project_dir)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -111,13 +147,24 @@ class NewDebateDialog(QDialog):
         self.task_edit.setPlaceholderText("Opis zadania dla debaty…")
         form.addRow("Zadanie", self.task_edit)
 
-        self.sides_edit = QLineEdit("claude,codex", self)
-        self.sides_edit.setObjectName("sides")
-        form.addRow("Strony", self.sides_edit)
+        sides_widget = QWidget(self)
+        sides_layout = QHBoxLayout(sides_widget)
+        sides_layout.setContentsMargins(0, 0, 0, 0)
+        self.side_checks: dict[str, QCheckBox] = {}
+        for side in self._side_order:
+            check = QCheckBox(side, sides_widget)
+            check.setObjectName(f"side_{side}")
+            check.setChecked(True)
+            check.toggled.connect(self._refresh_first_combo)
+            sides_layout.addWidget(check)
+            self.side_checks[side] = check
+        sides_layout.addStretch(1)
+        form.addRow("Strony", sides_widget)
 
-        self.first_edit = QLineEdit("claude", self)
-        self.first_edit.setObjectName("first")
-        form.addRow("Pierwszy", self.first_edit)
+        self.first_combo = QComboBox(self)
+        self.first_combo.setObjectName("first")
+        form.addRow("Pierwszy", self.first_combo)
+        self._refresh_first_combo()
 
         self.tasks_check = QCheckBox("Wymagaj sekcji ## Tasks", self)
         self.tasks_check.setObjectName("tasks")
@@ -134,11 +181,26 @@ class NewDebateDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _checked_sides(self) -> list[str]:
+        return [side for side in self._side_order if self.side_checks[side].isChecked()]
+
+    def _refresh_first_combo(self, *_args) -> None:
+        """Repopulate ``first_combo`` from the checked sides, preserving the
+        current pick when it's still checked."""
+        current = self.first_combo.currentText()
+        checked = self._checked_sides()
+        self.first_combo.blockSignals(True)
+        self.first_combo.clear()
+        self.first_combo.addItems(checked)
+        if current in checked:
+            self.first_combo.setCurrentText(current)
+        self.first_combo.blockSignals(False)
+
     def values(self) -> dict:
         """Return the dialog's fields as kwargs for ``SparRunner.start_debate``."""
         return {
             "task_text": self.task_edit.toPlainText(),
-            "sides": self.sides_edit.text().strip(),
-            "first": self.first_edit.text().strip(),
+            "sides": ",".join(self._checked_sides()),
+            "first": self.first_combo.currentText(),
             "tasks": self.tasks_check.isChecked(),
         }

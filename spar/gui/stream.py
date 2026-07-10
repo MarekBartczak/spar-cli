@@ -46,12 +46,70 @@ from PySide6.QtWidgets import (
 
 from spar.gui.theme import TOKENS
 
-__all__ = ["LiveLogTailer", "StreamPane"]
+__all__ = ["LiveLogTailer", "StreamPane", "humanize_prefix"]
 
 # Ported from spar/watch.py (colorize / follow) -- kept in sync by hand since
 # that module must stay Qt-free (task brief).
 _PREFIX_RE = re.compile(r"^\[([^\]]+)\](.*)$")
 _GATE_PENDING_RE = re.compile(r"gate '[^']*' pending")
+_ROUND_RE = re.compile(r"^r(\d+)$")
+
+
+def humanize_prefix(prefix: str, models: dict | None = None) -> str:
+    """Translate a raw engine ``[prefix]`` (without the brackets) to a
+    human-readable label -- GUI-side only, the engine's wire prefix protocol
+    is untouched (task brief, fix 4).
+
+    Recognized shapes:
+
+    * ``"<side> rN"``          (debate round)   -> ``"<side> · <model> · runda N+1"``
+    * ``"<side> <tid> impl"``  (exec impl)      -> ``"<side> · <model> · <tid> · implementacja"``
+    * ``"<side> <tid> review"`` (exec review)   -> ``"<side> · <model> · <tid> · recenzja"``
+
+    ``models`` (default ``{}``) supplies the model lookups:
+    ``models["sides"][side]`` for debate rounds, ``models["tasks"][tid]["model"]``
+    for impl and ``models["tasks"][tid]["review_model"]`` for review. A missing
+    model is simply omitted from the label (no placeholder). Any other shape
+    (unknown action, malformed prefix, ...) is returned unchanged so it still
+    renders/filters exactly as it did before this translation existed.
+    """
+    models = models or {}
+    parts = prefix.split()
+    if not parts:
+        return prefix
+    side = parts[0]
+
+    if len(parts) == 2:
+        match = _ROUND_RE.match(parts[1])
+        if match:
+            segments = [side]
+            model = (models.get("sides") or {}).get(side)
+            if model:
+                segments.append(model)
+            segments.append(f"runda {int(match.group(1)) + 1}")
+            return " · ".join(segments)
+        return prefix
+
+    if len(parts) >= 3:
+        task_id, action = parts[1], parts[2]
+        task_models = (models.get("tasks") or {}).get(task_id) or {}
+        if action == "impl":
+            segments = [side]
+            model = task_models.get("model")
+            if model:
+                segments.append(model)
+            segments += [task_id, "implementacja"]
+            return " · ".join(segments)
+        if action == "review":
+            segments = [side]
+            model = task_models.get("review_model")
+            if model:
+                segments.append(model)
+            segments += [task_id, "recenzja"]
+            return " · ".join(segments)
+        return prefix
+
+    return prefix
 
 # Role colors pulled from TOKENS for the deterministic per-prefix hash below
 # (never hardcode hex here -- everything must trace back to a TOKENS value).
@@ -167,6 +225,7 @@ class StreamPane(QWidget):
         self.setObjectName("streamPane")
 
         self._ring: deque[str] = deque(maxlen=_RING_MAX)
+        self._models: dict = {"sides": {}, "tasks": {}}
         self._active_filter: tuple[str, str | None] = (_FILTER_ALL, None)
         self._known_sides: list[str] = []
         self._known_tasks: list[str] = []
@@ -255,6 +314,16 @@ class StreamPane(QWidget):
                 self._add_chip("task", task, task)
 
     # ------------------------------------------------------------------
+    # Model resolution (fix 4 -- humanize_prefix's ``models`` argument)
+    # ------------------------------------------------------------------
+    def set_models(self, models: dict) -> None:
+        """Update the side/task model lookup used to humanize prefixes and
+        re-render the ring buffer so already-shown lines pick up any model
+        that only became known after they were first displayed."""
+        self._models = models or {"sides": {}, "tasks": {}}
+        self._rerender_all()
+
+    # ------------------------------------------------------------------
     # Filtering
     # ------------------------------------------------------------------
     def set_filter(self, kind: str, value: str | None = None) -> None:
@@ -334,7 +403,8 @@ class StreamPane(QWidget):
                 prefix, rest = match.groups()
                 fmt = QTextCharFormat()
                 fmt.setForeground(QColor(_color_for_prefix(prefix)))
-                cursor.insertText(f"[{prefix}]", fmt)
+                display = humanize_prefix(prefix, self._models)
+                cursor.insertText(f"[{display}]", fmt)
                 cursor.insertText(rest, default_fmt)
             elif line.startswith("spar exec:") or line.startswith("spar:"):
                 fmt = QTextCharFormat()

@@ -36,6 +36,7 @@ def build_status(spar_dir: Path) -> dict:
                 "status": task_state.status,
                 "side": task_state.task.side,
                 "model": task_state.task.model,
+                "review_model": task_state.task.review_model,
             }
             for task_id, task_state in state.tasks.items()
         }

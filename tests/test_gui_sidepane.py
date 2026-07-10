@@ -22,8 +22,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout
 
-from spar.gui.sidepane import gate_buttons, task_rows, GatePanel, TaskBoard
+from spar.gui.sidepane import gate_buttons, task_rows, GatePanel, SidePane, TaskBoard, TaskPanel
 
 _LEFT = Qt.MouseButton.LeftButton
 
@@ -166,6 +167,28 @@ class TestTaskRows:
         assert task_rows({"tasks": {}}) == []
         assert task_rows({}) == []
 
+    def test_reviewer_resolved_from_configured_side_order_even_with_one_side_seen(self):
+        # Fix 6b: with only "codex" tasks seen so far, the reviewer must
+        # still resolve from the project's configured side order (the other
+        # configured side) instead of falling back to "?" until a "claude"
+        # task happens to show up too.
+        status = {"tasks": {"t1": {"status": "pending", "side": "codex"}}}
+        rows = task_rows(status, side_order=["claude", "codex"])
+        assert rows[0]["reviewer"] == "claude"
+        assert rows[0]["label"] == "codex → claude"
+
+    def test_reviewer_with_side_order_and_more_than_two_sides_is_unknown(self):
+        status = {"tasks": {"t1": {"status": "pending", "side": "codex"}}}
+        rows = task_rows(status, side_order=["claude", "codex", "gemini"])
+        assert rows[0]["reviewer"] == "?"
+
+    def test_reviewer_without_side_order_falls_back_to_seen_sides(self):
+        # Backward-compatible default: no side_order given behaves exactly
+        # like before (inferred from tasks seen so far).
+        status = {"tasks": {"t1": {"status": "pending", "side": "codex"}}}
+        rows = task_rows(status)
+        assert rows[0]["reviewer"] == "?"
+
 
 # ---------------------------------------------------------------------------
 # TaskBoard -- Qt widget smoke test (ordering/pills flow through)
@@ -184,6 +207,56 @@ class TestTaskBoard:
         assert board.table.rowCount() == 2
         assert board.table.item(0, 0).text() == "t2"
         assert board.table.item(1, 0).text() == "t10"
+
+    def test_set_status_with_side_order_resolves_reviewer_from_config(self, qtbot):
+        board = TaskBoard()
+        qtbot.addWidget(board)
+        status = {"tasks": {"t1": {"status": "pending", "side": "codex"}}}
+        board.set_status(status, side_order=["claude", "codex"])
+        assert board.rows[0]["reviewer"] == "claude"
+        # Side column item (index 2) shows the "side -> reviewer" label.
+        assert board.table.item(0, 2).text() == "codex → claude"
+
+
+# ---------------------------------------------------------------------------
+# TaskPanel -- collapsible "Zadanie" section (fix 5)
+# ---------------------------------------------------------------------------
+class TestTaskPanel:
+    def test_hidden_when_no_task_text(self, qtbot):
+        panel = TaskPanel()
+        qtbot.addWidget(panel)
+        panel.set_text(None)
+        assert panel.isVisible() is False
+
+    def test_visible_and_shows_text_when_set(self, qtbot):
+        panel = TaskPanel()
+        qtbot.addWidget(panel)
+        panel.set_text("Build a widget that does X.")
+        assert panel.isVisible() is True
+        assert panel.label.text() == "Build a widget that does X."
+
+    def test_collapsed_by_default(self, qtbot):
+        panel = TaskPanel()
+        qtbot.addWidget(panel)
+        panel.set_text("some task")
+        assert panel.toggle_button.isChecked() is False
+        assert panel.scroll.isVisible() is False
+
+    def test_toggle_expands_and_collapses(self, qtbot):
+        panel = TaskPanel()
+        qtbot.addWidget(panel)
+        panel.set_text("some task")
+
+        panel.toggle_button.setChecked(True)
+        assert panel.scroll.isVisible() is True
+
+        panel.toggle_button.setChecked(False)
+        assert panel.scroll.isVisible() is False
+
+    def test_max_expanded_height_is_capped(self, qtbot):
+        panel = TaskPanel()
+        qtbot.addWidget(panel)
+        assert panel.scroll.maximumHeight() <= 160
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +426,145 @@ class TestGatePanel:
             if isinstance(w, QPushButton) and w.text().lower() == "accept"
         )
         assert new_accept_button.isEnabled() is True
+
+
+# ---------------------------------------------------------------------------
+# GatePanel layout (fix 6a) -- widget hierarchy, not pixels
+# ---------------------------------------------------------------------------
+class TestGatePanelLayout:
+    def test_remarks_editor_hidden_when_gate_has_no_remarks_option(self, qtbot):
+        runner = MagicMock()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate(
+            {"name": "final_merge", "options": ["accept", "abort"], "context": {}}
+        )
+        assert panel._remarks_container.isVisible() is False
+
+    def test_remarks_editor_visible_full_width_when_option_present(self, qtbot):
+        runner = MagicMock()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate(
+            {
+                "name": "consensus",
+                "options": ["accept", "remarks", "abort"],
+                "context": {},
+            }
+        )
+        assert panel._remarks_container.isVisible() is True
+        # The remarks editor + its send button live in the SAME container,
+        # not inside the single button row.
+        assert panel._remarks_text.parent() is panel._remarks_container
+        assert panel._remarks_send_button.parent() is panel._remarks_container
+
+    def test_single_button_row_holds_accept_extend_and_abort(self, qtbot):
+        runner = MagicMock()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate(
+            {
+                "name": "review_rounds",
+                "options": ["accept", "extend", "abort"],
+                "context": {"task_id": "t1", "rounds": 2},
+            }
+        )
+        # Exactly one QHBoxLayout button row; every accept/extend/abort
+        # widget lives inside it (never scattered across a grid).
+        assert isinstance(panel._buttons_layout, QHBoxLayout)
+        row_widgets = [
+            panel._buttons_layout.itemAt(i).widget()
+            for i in range(panel._buttons_layout.count())
+            if panel._buttons_layout.itemAt(i).widget() is not None
+        ]
+        assert len(row_widgets) >= 3  # accept, spinbox, extend button, abort
+
+    def test_remarks_send_button_not_duplicated_in_button_row(self, qtbot):
+        from PySide6.QtWidgets import QPushButton
+
+        runner = MagicMock()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate(
+            {
+                "name": "consensus",
+                "options": ["accept", "remarks", "abort"],
+                "context": {},
+            }
+        )
+        row_widgets = [
+            panel._buttons_layout.itemAt(i).widget()
+            for i in range(panel._buttons_layout.count())
+            if panel._buttons_layout.itemAt(i).widget() is not None
+        ]
+        remarks_buttons_in_row = [
+            w for w in row_widgets
+            if isinstance(w, QPushButton) and "remarks" in w.text().lower()
+        ]
+        assert remarks_buttons_in_row == []
+
+
+# ---------------------------------------------------------------------------
+# SidePane -- task panel wiring (fix 5) + reviewer resolution (fix 6b)
+# ---------------------------------------------------------------------------
+class TestSidePaneTaskPanel:
+    def test_task_panel_hidden_when_no_task_md(self, qtbot, tmp_path):
+        (tmp_path / ".spar").mkdir()
+        pane = SidePane(tmp_path, MagicMock())
+        qtbot.addWidget(pane)
+
+        assert pane.task_panel.isVisible() is False
+
+    def test_task_panel_shows_task_md_content(self, qtbot, tmp_path):
+        spar_dir = tmp_path / ".spar"
+        spar_dir.mkdir()
+        (spar_dir / "task.md").write_text("Build the widget.", encoding="utf-8")
+
+        pane = SidePane(tmp_path, MagicMock())
+        qtbot.addWidget(pane)
+        pane.show()
+
+        assert pane.task_panel.isVisible() is True
+        assert pane.task_panel.label.text() == "Build the widget."
+
+    def test_task_panel_updates_on_refresh(self, qtbot, tmp_path):
+        spar_dir = tmp_path / ".spar"
+        spar_dir.mkdir()
+        pane = SidePane(tmp_path, MagicMock())
+        qtbot.addWidget(pane)
+        pane.show()
+        assert pane.task_panel.isVisible() is False
+
+        (spar_dir / "task.md").write_text("Now it exists.", encoding="utf-8")
+        pane.refresh()
+
+        assert pane.task_panel.isVisible() is True
+        assert pane.task_panel.label.text() == "Now it exists."
+
+    def test_task_board_reviewer_uses_configured_side_order(self, qtbot, tmp_path):
+        # End-to-end: only a "codex" task is visible, but the project's
+        # config declares both claude and codex -- the Side column must
+        # show "codex -> claude", not "codex -> ?" (fix 6b).
+        from spar.exec.state import ExecState, ExecStateStore, TaskState
+        from spar.exec.tasklist import Task
+
+        spar_dir = tmp_path / ".spar"
+        spar_dir.mkdir()
+        task = Task(
+            id="t1", description="x", side="codex", model="gpt-5.5",
+            review_model="sonnet", deps=(), files=(), test=None,
+        )
+        exec_state = ExecState(
+            phase="execution",
+            tasks={"t1": TaskState(task=task, status="pending")},
+            pending_gate=None,
+        )
+        ExecStateStore(spar_dir).save(exec_state)
+
+        pane = SidePane(tmp_path, MagicMock())
+        qtbot.addWidget(pane)
+        pane.refresh()
+
+        rows = {r["task_id"]: r for r in pane.task_board.rows}
+        assert rows["t1"]["reviewer"] == "claude"
+        assert rows["t1"]["label"] == "codex → claude"

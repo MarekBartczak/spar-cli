@@ -18,12 +18,15 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QLabel,
     QMainWindow,
+    QProgressBar,
     QSplitter,
     QStatusBar,
     QToolBar,
 )
 
+from spar.config import load_config
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.runner import RunnerState, SparRunner
 from spar.gui.sidepane import SidePane
@@ -69,6 +72,19 @@ class MainWindow(QMainWindow):
         self.toolbar = Toolbar(self)
         self.addToolBar(self.toolbar)
 
+        # Side's config model, resolved once per session, feeds StreamPane's
+        # human-readable prefix translation for debate rounds (fix 4). Built
+        # before the side pane's first refresh(), which fires
+        # ``status_changed`` -> ``_on_status_changed`` synchronously.
+        try:
+            config = load_config(self.project_dir)
+            self._side_models = {
+                name: (side.default_model or side.model or "")
+                for name, side in config.sides.items()
+            }
+        except Exception:
+            self._side_models = {}
+
         # Process pilot: owns the spar QProcess for this project_dir. Built
         # before the side pane, which needs it to wire the gate buttons.
         self.runner = SparRunner(self.project_dir, self)
@@ -98,6 +114,21 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar(self))
 
+        # Startup indicator: shown between "OK"/"Start exec"/"Wznów" and the
+        # process's first output line so the gui doesn't look frozen while
+        # the child spins up (task brief, fix 3). Hidden on the first tailer
+        # batch after a start, or on finish -- whichever comes first.
+        self._startup_label = QLabel("uruchamiam spar…", self)
+        self._startup_label.setObjectName("startupLabel")
+        self._startup_label.hide()
+        self._startup_progress = QProgressBar(self)
+        self._startup_progress.setObjectName("startupProgress")
+        self._startup_progress.setRange(0, 0)  # indeterminate
+        self._startup_progress.setMaximumWidth(120)
+        self._startup_progress.hide()
+        self.statusBar().addPermanentWidget(self._startup_label)
+        self.statusBar().addPermanentWidget(self._startup_progress)
+
         self._settings = QSettings("spar", "gui")
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
@@ -112,6 +143,7 @@ class MainWindow(QMainWindow):
         # (review #9 -- the gui may run with cwd != project_dir).
         self.tailer = LiveLogTailer(self.project_dir / ".spar" / "live.log", self)
         self.tailer.lines.connect(self.stream_pane.feed_lines)
+        self.tailer.lines.connect(self._on_first_stream_lines)
         self.tailer.start()
 
     # ------------------------------------------------------------------
@@ -131,6 +163,13 @@ class MainWindow(QMainWindow):
         actions["Plan"].setEnabled(bool(status.get("artifact")))
         actions["Diff"].setEnabled(bool(status.get("branches")))
 
+        tasks = status.get("tasks") or {}
+        task_models = {
+            task_id: {"model": task.get("model"), "review_model": task.get("review_model")}
+            for task_id, task in tasks.items()
+        }
+        self.stream_pane.set_models({"sides": self._side_models, "tasks": task_models})
+
     def _current_status(self) -> dict:
         try:
             return build_status(self.project_dir / ".spar")
@@ -145,12 +184,22 @@ class MainWindow(QMainWindow):
 
     def _on_started(self, cmd: str) -> None:
         self.statusBar().showMessage(f"uruchomiono: {cmd}")
+        self._startup_label.show()
+        self._startup_progress.show()
 
     def _on_finished(self, exit_code: int) -> None:
         self.statusBar().showMessage(f"zakończono (exit {exit_code})")
+        self._hide_startup_indicator()
+
+    def _on_first_stream_lines(self, _lines: list) -> None:
+        self._hide_startup_indicator()
+
+    def _hide_startup_indicator(self) -> None:
+        self._startup_label.hide()
+        self._startup_progress.hide()
 
     def _on_new_debate(self) -> None:
-        dialog = toolbar_mod.NewDebateDialog(self)
+        dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.runner.start_debate(**dialog.values())
 
