@@ -172,6 +172,14 @@ class StreamPane(QWidget):
         self._known_tasks: list[str] = []
         self._chip_buttons: dict[tuple[str, str | None], QPushButton] = {}
         self._following = True
+        # Guard set around every programmatic append/clear so ``_on_scroll``
+        # ignores the transient ``valueChanged`` emissions Qt fires while
+        # ``setMaximumBlockCount`` trims blocks off the top of the 20k-line
+        # ring (the trim briefly shifts the viewport before the final
+        # scroll-to-bottom lands), which would otherwise be misread as the
+        # user manually scrolling away and flip ``_following`` off (final
+        # review, minor #3).
+        self._programmatic_scroll = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -217,13 +225,17 @@ class StreamPane(QWidget):
     # ------------------------------------------------------------------
     def feed_lines(self, lines: list[str]) -> None:
         """Append raw lines to the ring buffer and render the ones now visible."""
-        for line in lines:
-            self._ring.append(line)
-            self._register_prefix(line)
-            if self._line_matches(line):
-                self._append_line(line)
-        if lines and self._following:
-            self._scroll_to_bottom()
+        self._programmatic_scroll = True
+        try:
+            for line in lines:
+                self._ring.append(line)
+                self._register_prefix(line)
+                if self._line_matches(line):
+                    self._append_line(line)
+            if lines and self._following:
+                self._scroll_to_bottom()
+        finally:
+            self._programmatic_scroll = False
 
     def _register_prefix(self, line: str) -> None:
         match = _PREFIX_RE.match(line)
@@ -270,12 +282,16 @@ class StreamPane(QWidget):
         return True
 
     def _rerender_all(self) -> None:
-        self.text.clear()
-        for line in self._ring:
-            if self._line_matches(line):
-                self._append_line(line)
-        if self._following:
-            self._scroll_to_bottom()
+        self._programmatic_scroll = True
+        try:
+            self.text.clear()
+            for line in self._ring:
+                if self._line_matches(line):
+                    self._append_line(line)
+            if self._following:
+                self._scroll_to_bottom()
+        finally:
+            self._programmatic_scroll = False
 
     # ------------------------------------------------------------------
     # Chips
@@ -337,6 +353,8 @@ class StreamPane(QWidget):
         bar.setValue(bar.maximum())
 
     def _on_scroll(self, value: int) -> None:
+        if self._programmatic_scroll:
+            return
         bar = self.text.verticalScrollBar()
         at_bottom = value >= bar.maximum() - 2
         if not at_bottom and self._following:

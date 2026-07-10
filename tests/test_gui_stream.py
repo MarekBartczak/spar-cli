@@ -219,6 +219,24 @@ class TestStreamPane:
         assert pane._ring[0] == "[claude r0] line-500"
         assert pane._ring[-1] == "[claude r0] line-20499"
 
+    def test_following_survives_20k_cap_trim(self, qtbot):
+        # Final review minor #3: appending past the 20k-line
+        # ``setMaximumBlockCount`` cap makes Qt trim blocks off the top,
+        # which can fire transient ``valueChanged`` signals on the vertical
+        # scrollbar before the final scroll-to-bottom lands. Those must be
+        # ignored (``_programmatic_scroll`` guard) rather than misread as
+        # the user manually scrolling away.
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+        pane.show()
+
+        assert pane._following is True
+        pane.feed_lines([f"[claude r0] line-{i}" for i in range(20500)])
+
+        assert pane._following is True
+        assert pane.follow_button.isChecked() is True
+        assert pane.jump_button.isVisible() is False
+
     def test_filter_chips_auto_populated_from_seen_prefixes(self, qtbot):
         pane = StreamPane()
         qtbot.addWidget(pane)

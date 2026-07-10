@@ -239,7 +239,6 @@ class TaskBoard(QWidget):
             self.table.setItem(i, 0, QTableWidgetItem(row["task_id"]))
 
             pill_item = QTableWidgetItem(row["status"] or "")
-            pill_item.setForeground(Qt.GlobalColor.white)
             pill_item.setData(Qt.ItemDataRole.UserRole, row["pill"])
             color = {
                 "ok": TOKENS["ok"],

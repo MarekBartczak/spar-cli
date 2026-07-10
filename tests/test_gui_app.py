@@ -65,6 +65,42 @@ class TestMainWindow:
 
         assert window2._settings.value("mainSplitter/state") is not None
 
+    def test_close_event_stops_runner_and_sidepane_poll_timers(self, qtbot, tmp_path):
+        # Final review minor #1: closing the window used to stop only the
+        # tailer, leaking the runner's 750ms poll and the side pane's 2s
+        # poll -- fatal for an embedded/reused MainWindow.
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert window.runner._poll.isActive() is True
+        assert window.side_pane._poll.isActive() is True
+
+        window.close()
+
+        assert window.runner._poll.isActive() is False
+        assert window.side_pane._poll.isActive() is False
+
+    def test_close_event_sigints_a_still_running_child(self, qtbot, tmp_path):
+        # A window closed while a child spar process is alive must not
+        # orphan it holding the .spar lock: closeEvent takes the same
+        # SIGINT path as Stop.
+        from tests.test_gui_runner import _make_fake, _use_fake
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        record = tmp_path / "rec.jsonl"
+        marker = tmp_path / "sigint.marker"
+        _use_fake(window.runner, _make_fake(tmp_path, record, sleep=True, sigint_marker=marker))
+
+        window.runner.start_debate("x", "claude,codex", "claude", True)
+        qtbot.waitUntil(lambda: record.exists(), timeout=10000)
+
+        window.close()
+
+        assert marker.exists()
+        assert marker.read_text() == "sigint"
+
 
 class TestTheme:
     def test_tokens_dict_has_required_keys(self):

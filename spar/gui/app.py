@@ -165,6 +165,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._save_splitter_state()
         self.tailer.stop()
+        # Stop the runner's process poll and the side pane's status poll so
+        # an embedded/reused MainWindow doesn't leak timers, and interrupt a
+        # still-running child the same way Stop does (SIGINT) so it isn't
+        # orphaned holding the .spar lock (final review, minor #1).
+        self.runner._poll.stop()
+        self.side_pane._poll.stop()
+        self.runner.stop()
         super().closeEvent(event)
 
 
