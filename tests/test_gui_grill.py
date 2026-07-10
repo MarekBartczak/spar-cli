@@ -87,7 +87,8 @@ class TestGrillDialog:
         btn_b = dialog.findChild(QPushButton, "option_B")
         assert btn_a is not None and btn_b is not None
         assert btn_b.text() != long_label  # truncated for display
-        assert len(btn_b.text()) <= 80
+        assert btn_b.text().startswith("B.")  # letter prefix (vertical layout)
+        assert len(btn_b.text()) <= 80 + len("B.  ")
         assert btn_b.toolTip() == long_label  # full text preserved
 
         btn_b.click()
