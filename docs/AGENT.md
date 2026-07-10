@@ -53,6 +53,21 @@ run; `live.log`/`spar watch` are a convenience live view only, not durable
 (each CLI invocation, including a `--continue` resume, truncates
 `live.log` fresh — see `spar/stream.py`).
 
+There is also `spar gui` — a PySide6 dashboard-pilot for a human to drive
+spar interactively instead of from a terminal (stream pane, task board, a
+gate panel, Plan/Diff viewers). It is a **solo pilot**: one operator at a
+time. An agent MUST NOT drive spar (headless, via this protocol) while a
+human is piloting the same `.spar/` directory through the GUI at the same
+time, and vice versa — both would try to resolve the same pending gate
+independently, and whichever `--gate`/button click lands second either
+errors against a gate that already moved on or silently overwrites the
+first decision; the run lock (`.spar/lock`) only prevents two *processes*
+from running spar concurrently, it does not arbitrate *which operator's
+decision* wins when a gate is pending. If the GUI is open on a directory,
+confirm with the human whether they are piloting it before starting a
+headless-driven run there; if they are, wait for them to hand off (close
+the GUI or let it hit the read-only "locked" state) before proceeding.
+
 ## The two phases
 
 1. **Debate** (`spar`, no subcommand) — two Sides argue over and edit
@@ -141,6 +156,12 @@ field `None`/empty — not an error). Fields:
 - `tasks` — `{}` during debate; once execution starts, one entry per task
   id: `{"status": ..., "side": ..., "model": ...}`.
 - `artifact` — path to `.spar/artifact.md` if it exists, else `null`.
+- `branches` — additive field, `{"target": ..., "integration": ...}` once
+  `spar exec` has started (the caller's branch and the exec integration
+  branch, for building a `git diff`); `null` during debate-only state or
+  before any run. Absence of this key should not be assumed — always read
+  it defensively (`status.get("branches")`) since older spar versions did
+  not emit it.
 
 Always call `spar status --json` immediately after any exit-10 run to read
 `pending_gate` before deciding.

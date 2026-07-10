@@ -99,6 +99,32 @@ Notes: each spar invocation truncates `live.log` (fresh view per command);
 the raw, complete event streams are always persisted per turn in
 `.spar/transcript/` (claude: JSONL stream events; codex: JSONL).
 
+### `spar gui` (dashboard-pilot)
+
+For driving spar yourself with a GUI instead of a terminal:
+
+```bash
+pip install -e ".[gui]"   # or: pip install "spar-cli[gui]"
+spar gui                  # operates on the current directory
+spar gui --dir PATH       # operate on a different project directory
+```
+
+It shows a live stream pane (the same feed as `spar watch`), a task board,
+a gate panel that lights up with the right buttons for whichever gate is
+pending (consensus `Accept` auto-starts execution; `final_merge` always
+requires an explicit manual confirmation), a toolbar for the run lifecycle
+(New debate / Start exec / Resume / Stop), and Plan/Diff viewers. It is a
+**solo pilot**: one person clicks through gates for one run, same as
+running spar interactively in a terminal — it does not add multi-user or
+remote-control capability.
+
+**When an agent is driving spar, use the GUI for observation only** —
+leave gate decisions to the agent. Running the GUI's own gate buttons
+concurrently with an agent-driven headless run races against the agent's
+`--gate` resumes and corrupts whose decision actually lands; if you open
+the GUI on a directory another process already holds the run lock for, it
+shows a read-only "locked" banner instead of live controls.
+
 ## Agent mode (headless)
 
 spar is designed to be **driven by a host agent** (Claude Code / Codex) — see
