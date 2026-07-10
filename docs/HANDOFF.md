@@ -108,6 +108,24 @@ machine (incl. LOCKED read-only on a foreign flock), Plan/Diff viewers
 Engine untouched beyond that additive field. Suite 519 passed (GUI tests
 skip without PySide6). **Manual smoke at the GUI pending (user-driven).**
 
+## GUI smoke rounds 1-2 (2026-07-10, `414bdce..256e74d`)
+
+Live-GUI feedback closed in two batches: engine cleans `spar/integration`
+after done (unblocks Accept→auto-exec), dialog side-checkboxes + first-combo,
+start notices in the stream + double-start guard, humanized prefixes with
+models (`claude · sonnet · runda 1`), collapsible task.md panel, gate-panel
+layout rework, strict filter-chip derivation, stream line-wrap + side-pane
+min width, Side column with models, debate placeholder in the task board,
+claude tool lines carry the target (`tool: Read src/main.cpp`), per-side
+`debate_model` (planning on top models) + `review_models` floor (haiku banned
+from reviewing in the lab config), README screenshots (offscreen script).
+
+**Roadmap next (user-confirmed):** embedded terminal in the GUI (mockup
+variant B exists) — then the grill_with_docs flow can run INSIDE spar gui:
+grill the task in the embedded agent terminal → hand off to debate.
+Also queued: token-usage counters per vendor (data present in both CLIs'
+event streams; needs engine collection + status field + GUI tile).
+
 ## Live observability (2026-07-10, `94469a4..9b84ae2`)
 
 Implemented and live-smoke-tested: adapters stream events live (claude
