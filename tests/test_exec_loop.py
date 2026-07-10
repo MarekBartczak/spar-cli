@@ -1686,3 +1686,34 @@ def test_headless_resume_without_gate_repends(repo, tmp_path):
     assert branch_exists(repo, "spar/t1-A")
     # Idempotent re-pend: the record is unchanged.
     assert state2.pending_gate == before
+
+
+def test_dispute_gate_context_carries_rejected_remarks(repo, tmp_path):
+    # A dispute escalation has no PENDING remarks (they were rejected into
+    # resolved) — the gate context must fall back to the recent rejections so
+    # the user can actually see what is being arbitrated.
+    from spar.exec.headless import HeadlessExecGate
+
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [
+            Step(vblock("CONTINUE"), edits={"work.py": "v1\n"}),  # initial impl
+            Step(vblock("CONTINUE", resolved=["#1 rejected: plan says otherwise"])),
+            Step(vblock("CONTINUE", resolved=["#2 rejected: same dispute"])),
+        ],
+        "B": [
+            Step(vblock("CONTINUE", remarks=["[MUST] stderr must be exact"])),
+            Step(vblock("CONTINUE", remarks=["[MUST] stderr must be exact"])),
+        ],
+    }
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps,
+        gate=HeadlessExecGate(),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 10
+    pg = store.load().pending_gate
+    assert pg["name"] == "review_rounds"
+    texts = [r["text"] for r in pg["context"]["open_remarks"]]
+    assert any("stderr must be exact" in t for t in texts)

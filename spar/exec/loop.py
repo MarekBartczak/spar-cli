@@ -848,8 +848,19 @@ class Executor:
         accept/extend."""
 
         def gate(task_state: TaskState, rounds: int) -> GateDecision:
+            # A DISPUTE escalation arrives with the contested remarks already
+            # moved to resolved (rejected) — surface them so the user is not
+            # arbitrating blind: fall back to the most recent rejections when
+            # nothing is pending.
+            remarks = list(task_state.pending_remarks)
+            if not remarks:
+                remarks = [
+                    rr.remark
+                    for rr in task_state.resolved_remarks[-4:]
+                    if rr.resolution == "rejected"
+                ]
             decision = self.gate.review_rounds_exhausted_gate(
-                task_state.task.id, rounds, list(task_state.pending_remarks)
+                task_state.task.id, rounds, remarks
             )
             if decision.action == "abort":
                 self.store.save(state)
