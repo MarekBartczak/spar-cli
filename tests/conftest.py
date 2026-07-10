@@ -1,6 +1,10 @@
 """Pytest configuration and fixtures for spar-cli tests."""
 
 import os
+
+# Must be set before any Qt import (offscreen platform for headless gui tests).
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 
 

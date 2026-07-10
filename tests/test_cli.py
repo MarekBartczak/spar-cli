@@ -1,6 +1,7 @@
 """Tests for the spar CLI module."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -598,3 +599,32 @@ class TestStatusSubcommand:
         with pytest.raises(SystemExit) as exc_info:
             main(["status"])
         assert exc_info.value.code == 2
+
+
+class TestGuiRouting:
+    def test_gui_routes_to_main_gui(self, monkeypatch):
+        pytest.importorskip("PySide6")
+        import spar.gui.app as gui_app
+
+        calls = []
+        monkeypatch.setattr(
+            gui_app, "main_gui", lambda argv: calls.append(argv) or 0
+        )
+
+        result = main(["gui", "--dir", "/tmp/some-project"])
+
+        assert result == 0
+        assert calls == [["--dir", "/tmp/some-project"]]
+
+    def test_gui_without_pyside6_prints_hint_and_exits_2(self, monkeypatch, capsys):
+        # Force the routing's import of spar.gui.app to fail regardless of
+        # whether PySide6 is actually installed in this environment: a
+        # module cached as None in sys.modules makes ``import`` raise
+        # ImportError immediately.
+        monkeypatch.setitem(sys.modules, "spar.gui.app", None)
+
+        result = main(["gui"])
+
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "pip install 'spar-cli[gui]'" in captured.err

@@ -310,6 +310,18 @@ def _run_status(argv) -> int:
     return 0
 
 
+def _run_gui(argv) -> int:
+    """Handler for the ``spar gui`` subcommand."""
+    try:
+        import spar.gui.app as gui_app
+    except ImportError:
+        sys.stderr.write(
+            "spar: the gui extra is not installed; run: pip install 'spar-cli[gui]'\n"
+        )
+        return 2
+    return gui_app.main_gui(argv)
+
+
 def _run_list_commands() -> int:
     """Print the resolved CLI command for each configured side."""
     try:
@@ -343,6 +355,8 @@ def main(argv=None) -> int:
         return main_watch(argv[1:])
     if argv and argv[0] == "ui":
         return main_ui(argv[1:])
+    if argv and argv[0] == "gui":
+        return _run_gui(argv[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)
