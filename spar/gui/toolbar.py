@@ -22,11 +22,13 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from spar.config import load_config
+from spar.config import ConfigError, load_config
+from spar.gui.grill_dialog import GrillDialog
 from spar.gui.runner import RunnerState
 
 # Sides shown/ordered by default when no project config is readable, or when
@@ -119,6 +121,30 @@ def _configured_side_order(project_dir: "str | Path | None") -> list[str]:
     return ordered
 
 
+def _grill_availability(
+    project_dir: "str | Path | None",
+) -> tuple["object | None", int, "str | None"]:
+    """Resolve the claude ``SideConfig``/timeout for grilling, or a disable reason.
+
+    Returns ``(side_cfg, timeout_sec, disabled_reason)`` -- ``disabled_reason``
+    is ``None`` when grilling is available. The button is disabled (with a
+    tooltip explaining why) when the project's config fails to load or the
+    ``claude`` side is missing/not backed by the ``claude`` adapter (review
+    #7 -- a missing side is unreachable with the current defaults, which
+    always seed claude/codex).
+    """
+    if project_dir is None:
+        return None, 900, "Brak katalogu projektu"
+    try:
+        config = load_config(Path(project_dir))
+    except ConfigError as exc:
+        return None, 900, f"Nie można wczytać konfiguracji: {exc}"
+    side = config.sides.get("claude")
+    if side is None or side.adapter != "claude":
+        return None, 900, "Strona „claude” nie jest skonfigurowana z adapterem claude"
+    return side, config.debate.turn_timeout_sec, None
+
+
 class NewDebateDialog(QDialog):
     """Collect the parameters for a fresh debate.
 
@@ -138,14 +164,32 @@ class NewDebateDialog(QDialog):
         self.resize(760, 560)
 
         self._side_order = _configured_side_order(project_dir)
+        self._project_dir = Path(project_dir) if project_dir is not None else None
+        self._grill_side_cfg, self._grill_timeout_sec, grill_disabled_reason = (
+            _grill_availability(project_dir)
+        )
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
+        task_widget = QWidget(self)
+        task_layout = QVBoxLayout(task_widget)
+        task_layout.setContentsMargins(0, 0, 0, 0)
+
         self.task_edit = QPlainTextEdit(self)
         self.task_edit.setObjectName("taskText")
         self.task_edit.setPlaceholderText("Opis zadania dla debaty…")
-        form.addRow("Zadanie", self.task_edit)
+        task_layout.addWidget(self.task_edit)
+
+        self.grill_button = QPushButton("Grilluj z modelem…", task_widget)
+        self.grill_button.setObjectName("grillButton")
+        self.grill_button.clicked.connect(self._on_grill)
+        if grill_disabled_reason is not None:
+            self.grill_button.setEnabled(False)
+            self.grill_button.setToolTip(grill_disabled_reason)
+        task_layout.addWidget(self.grill_button)
+
+        form.addRow("Zadanie", task_widget)
 
         sides_widget = QWidget(self)
         sides_layout = QHBoxLayout(sides_widget)
@@ -180,6 +224,21 @@ class NewDebateDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_grill(self) -> None:
+        """Open ``GrillDialog`` seeded with the current task draft.
+
+        On accept, the requirements content REPLACES the task field.
+        """
+        dialog = GrillDialog(
+            self._project_dir,
+            self._grill_side_cfg,
+            self._grill_timeout_sec,
+            draft=self.task_edit.toPlainText(),
+            parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_requirements:
+            self.task_edit.setPlainText(dialog.result_requirements)
 
     def _checked_sides(self) -> list[str]:
         return [side for side in self._side_order if self.side_checks[side].isChecked()]

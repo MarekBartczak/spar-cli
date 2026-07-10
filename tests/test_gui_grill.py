@@ -20,6 +20,181 @@ from spar.gui.grill import OPENING_PROMPT_TEMPLATE, Option, parse_options
 
 
 # ----------------------------------------------------------------------
+# Qt: GrillDialog (fake session injected -- no real adapter/thread)
+# ----------------------------------------------------------------------
+try:
+    import PySide6  # noqa: F401
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QDialog, QPushButton
+
+    from spar.gui.grill_dialog import GrillDialog
+
+    _HAS_QT_DIALOG = True
+except ImportError:  # pragma: no cover
+    _HAS_QT_DIALOG = False
+
+
+if _HAS_QT_DIALOG:
+
+    class FakeGrillSession(QObject):
+        """Records start/answer/stop calls; signals fired manually by tests."""
+
+        stream_chunk = Signal(str)
+        turn_finished = Signal(str, list)
+        requirements_ready = Signal(str)
+        turn_failed = Signal(str)
+        session_lost = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.start_calls = []
+            self.answer_calls = []
+            self.stop_calls = 0
+
+        def start(self, draft):
+            self.start_calls.append(draft)
+
+        def answer(self, text):
+            self.answer_calls.append(text)
+
+        def stop(self):
+            self.stop_calls += 1
+
+
+@pytest.mark.skipif(not _HAS_QT_DIALOG, reason="requires PySide6")
+class TestGrillDialog:
+    def test_first_turn_starts_with_draft(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "Zbuduj X", session=fake)
+        qtbot.addWidget(dialog)
+
+        assert fake.start_calls == ["Zbuduj X"]
+        assert "Zbuduj X" in dialog.transcript.toPlainText()
+
+    def test_option_buttons_render_truncated_with_full_tooltip_and_click_answers(
+        self, qtbot, tmp_path
+    ):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+
+        long_label = "x" * 120
+        options = [Option("A", "short"), Option("B", long_label)]
+        fake.turn_finished.emit("A. short\nB. " + long_label, options)
+
+        btn_a = dialog.findChild(QPushButton, "option_A")
+        btn_b = dialog.findChild(QPushButton, "option_B")
+        assert btn_a is not None and btn_b is not None
+        assert btn_b.text() != long_label  # truncated for display
+        assert len(btn_b.text()) <= 80
+        assert btn_b.toolTip() == long_label  # full text preserved
+
+        btn_b.click()
+        assert fake.answer_calls == ["B"]
+        # Row disables/clears after a click.
+        assert dialog.findChild(QPushButton, "option_B") is None
+
+    def test_free_text_send(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+        fake.turn_finished.emit("pytanie?", [])
+
+        dialog.input_edit.setPlainText("moja odpowiedź")
+        dialog.send_button.click()
+
+        assert fake.answer_calls == ["moja odpowiedź"]
+        assert "moja odpowiedź" in dialog.transcript.toPlainText()
+
+    def test_streaming_chunks_grow_live_bubble(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+
+        before = dialog.transcript.toPlainText()
+        fake.stream_chunk.emit("model myśli")
+        after_one = dialog.transcript.toPlainText()
+        fake.stream_chunk.emit(" i myśli dalej")
+        after_two = dialog.transcript.toPlainText()
+
+        assert len(after_one) > len(before)
+        assert len(after_two) > len(after_one)
+        assert "model myśli i myśli dalej" in after_two
+
+    def test_requirements_ready_use_in_debate_accepts_with_content(
+        self, qtbot, tmp_path
+    ):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+        dialog.show()
+        fake.turn_finished.emit("GOTOWE", [])
+
+        assert not dialog.use_button.isVisible()
+        content = "# Wymagania\n\n## Tasks\n- a\n"
+        fake.requirements_ready.emit(content)
+        assert dialog.use_button.isVisible()
+
+        with qtbot.waitSignal(dialog.accepted, timeout=1000):
+            dialog.use_button.click()
+
+        assert dialog.result_requirements == content
+        assert dialog.result() == QDialog.DialogCode.Accepted
+
+    def test_close_mid_grill_calls_stop_and_rejects(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+
+        with qtbot.waitSignal(dialog.rejected, timeout=1000):
+            dialog.cancel_button.click()
+
+        assert fake.stop_calls == 1
+        assert dialog.result() == QDialog.DialogCode.Rejected
+
+    def test_turn_failed_shows_retry_and_resends_last_answer(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+        dialog.show()
+        fake.turn_finished.emit("pytanie?", [])
+
+        dialog.input_edit.setPlainText("moja odp")
+        dialog.send_button.click()
+        assert fake.answer_calls == ["moja odp"]
+
+        fake.turn_failed.emit("boom")
+        assert dialog.retry_button.isVisible()
+
+        dialog.retry_button.click()
+        assert fake.answer_calls == ["moja odp", "moja odp"]
+        assert not dialog.retry_button.isVisible()
+
+    def test_session_lost_shows_restart_and_calls_start_again(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+        dialog.show()
+        fake.turn_finished.emit("pytanie?", [])
+
+        dialog.input_edit.setPlainText("odp")
+        dialog.send_button.click()
+        fake.session_lost.emit()
+
+        assert dialog.restart_button.isVisible()
+        assert not dialog.send_button.isEnabled()
+
+        dialog.restart_button.click()
+        assert fake.start_calls == ["draft", "draft"]
+        assert not dialog.restart_button.isVisible()
+        # The restart itself dispatches a fresh turn -- controls stay disabled
+        # ("model myśli…") until it completes.
+        assert not dialog.send_button.isEnabled()
+        fake.turn_finished.emit("nowe pytanie?", [])
+        assert dialog.send_button.isEnabled()
+
+
+# ----------------------------------------------------------------------
 # Pure: parse_options (no Qt)
 # ----------------------------------------------------------------------
 class TestParseOptions:

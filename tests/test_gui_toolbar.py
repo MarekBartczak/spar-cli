@@ -128,3 +128,110 @@ class TestNewDebateDialogSize:
 
         assert dialog.size().width() == 760
         assert dialog.size().height() == 560
+
+
+class TestNewDebateDialogGrillButton:
+    def test_grill_accept_replaces_task_text(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+
+        import spar.gui.toolbar as toolbar_mod
+
+        captured = {}
+
+        class FakeGrillDialog:
+            def __init__(self, project_dir, side_cfg, timeout_sec, draft, parent=None):
+                captured["draft"] = draft
+                self.result_requirements = "# Wygrillowane wymagania\n\n## Tasks\n- a\n"
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(toolbar_mod, "GrillDialog", FakeGrillDialog)
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+        dialog.task_edit.setPlainText("mój szkic")
+
+        dialog.grill_button.click()
+
+        assert captured["draft"] == "mój szkic"
+        assert dialog.task_edit.toPlainText() == "# Wygrillowane wymagania\n\n## Tasks\n- a\n"
+
+    def test_grill_rejected_leaves_task_text_untouched(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+
+        import spar.gui.toolbar as toolbar_mod
+
+        class FakeGrillDialog:
+            def __init__(self, project_dir, side_cfg, timeout_sec, draft, parent=None):
+                self.result_requirements = None
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(toolbar_mod, "GrillDialog", FakeGrillDialog)
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+        dialog.task_edit.setPlainText("nietknięty szkic")
+
+        dialog.grill_button.click()
+
+        assert dialog.task_edit.toPlainText() == "nietknięty szkic"
+
+    def test_grill_button_disabled_when_config_load_fails(self, qtbot, tmp_path, monkeypatch):
+        import spar.gui.toolbar as toolbar_mod
+
+        def _boom(project_dir):
+            raise toolbar_mod.ConfigError("bad toml")
+
+        monkeypatch.setattr(toolbar_mod, "load_config", _boom)
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        assert not dialog.grill_button.isEnabled()
+        assert dialog.grill_button.toolTip()
+
+    def test_grill_button_disabled_when_claude_side_not_claude_adapter(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        import spar.gui.toolbar as toolbar_mod
+        from spar.config import Config, DebateConfig, ExecutionConfig, SideConfig
+
+        def _fake_load_config(project_dir):
+            return Config(
+                sides={"claude": SideConfig(adapter="codex", command="codex")},
+                debate=DebateConfig(),
+                execution=ExecutionConfig(),
+            )
+
+        monkeypatch.setattr(toolbar_mod, "load_config", _fake_load_config)
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        assert not dialog.grill_button.isEnabled()
+        assert dialog.grill_button.toolTip()
+
+    def test_grill_button_enabled_with_valid_claude_side(self, qtbot, tmp_path, monkeypatch):
+        import spar.gui.toolbar as toolbar_mod
+        from spar.config import Config, DebateConfig, ExecutionConfig, SideConfig
+
+        def _fake_load_config(project_dir):
+            return Config(
+                sides={
+                    "claude": SideConfig(adapter="claude", command="claude"),
+                    "codex": SideConfig(adapter="codex", command="codex"),
+                },
+                debate=DebateConfig(turn_timeout_sec=123),
+                execution=ExecutionConfig(),
+            )
+
+        monkeypatch.setattr(toolbar_mod, "load_config", _fake_load_config)
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        assert dialog.grill_button.isEnabled()
+        assert dialog._grill_timeout_sec == 123
