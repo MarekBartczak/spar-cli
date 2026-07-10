@@ -319,7 +319,57 @@ class Executor:
 
     # -- fresh run -----------------------------------------------------
 
+    # Markers delimiting the block spar manages inside ``.git/info/exclude``.
+    # Anything outside the markers (pre-existing user content) is preserved
+    # verbatim; the block itself is replaced (not duplicated) on every call.
+    _SCOPE_IGNORE_BEGIN = "# >>> spar scope_ignore (managed)"
+    _SCOPE_IGNORE_END = "# <<< spar scope_ignore"
+
+    def _apply_scope_ignore(self) -> None:
+        """Write ``execution.scope_ignore`` patterns into the repo's LOCAL git
+        exclude file (``<git-common-dir>/info/exclude``).
+
+        Once excluded, ``git status --porcelain`` stops reporting matching
+        paths, so both the scope guard (which reads worktree status) and the
+        turn-commit (``git add -A``) naturally skip them — no scope-guard
+        logic changes needed. No-op when ``scope_ignore`` is empty. Idempotent:
+        a previously written managed block is replaced, not duplicated, and any
+        other content in the file is preserved.
+        """
+        patterns = self.execution.scope_ignore
+        if not patterns:
+            return
+
+        git_dir = gitops.git_common_dir(self.repo)
+        exclude_path = git_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        lines = existing.splitlines()
+
+        kept: list[str] = []
+        in_block = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == self._SCOPE_IGNORE_BEGIN:
+                in_block = True
+                continue
+            if stripped == self._SCOPE_IGNORE_END:
+                in_block = False
+                continue
+            if in_block:
+                continue
+            kept.append(line)
+
+        while kept and kept[-1] == "":
+            kept.pop()
+
+        block = [self._SCOPE_IGNORE_BEGIN, *patterns, self._SCOPE_IGNORE_END]
+        new_lines = (kept + [""] + block) if kept else block
+        exclude_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
     def _run_fresh(self) -> int:
+        self._apply_scope_ignore()
         # §5 collision policy: a fresh run always means these artifacts are
         # orphans (a matching-state resume goes through ``run_continue``), so
         # refuse rather than clobber a leftover integration/task branch or a
@@ -365,6 +415,7 @@ class Executor:
             self.log(f"spar exec: cannot load execution state: {exc}")
             return 3
         self._state = state
+        self._apply_scope_ignore()
 
         if state.phase == "done":
             self.log("spar exec: nothing to resume — execution already done.")

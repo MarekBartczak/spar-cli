@@ -51,6 +51,11 @@ class ExecutionConfig:
     max_review_rounds: int = 0
     max_fix_tasks: int = 0
     turn_timeout_sec: int = 900
+    # Gitignore-style patterns for build artifacts (e.g. compiled binaries)
+    # that per-task tests produce outside the task's file scope. Written into
+    # the repo's local ``.git/info/exclude`` by the Executor so both the scope
+    # guard and the turn-commit (``git add -A``) skip them.
+    scope_ignore: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,7 +132,10 @@ def _validate_debate_config(config: dict) -> None:
 
 def _validate_execution_config(config: dict) -> None:
     """Validate execution configuration."""
-    allowed_keys = {"test_command", "max_review_rounds", "max_fix_tasks", "turn_timeout_sec"}
+    allowed_keys = {
+        "test_command", "max_review_rounds", "max_fix_tasks", "turn_timeout_sec",
+        "scope_ignore",
+    }
     for key in config.keys():
         if key not in allowed_keys:
             raise ConfigError(f"Unknown key in execution config: {key}")
@@ -159,6 +167,18 @@ def _validate_execution_config(config: dict) -> None:
             )
         if value < 1:
             raise ConfigError(f"turn_timeout_sec must be >= 1, got {value}")
+
+    if "scope_ignore" in config:
+        scope_ignore = config["scope_ignore"]
+        if not isinstance(scope_ignore, list):
+            raise ConfigError(
+                f"scope_ignore must be a list, got {type(scope_ignore).__name__}"
+            )
+        for p in scope_ignore:
+            if not isinstance(p, str) or not p.strip():
+                raise ConfigError(
+                    "scope_ignore must be a list of non-empty strings"
+                )
 
 
 def _validate_side_config(side_name: str, config: dict) -> None:
@@ -379,17 +399,24 @@ def _dict_to_config(config_dict: dict) -> Config:
         turn_timeout_sec = execution_dict.get(
             "turn_timeout_sec", defaults.execution.turn_timeout_sec
         )
+        scope_ignore = (
+            tuple(execution_dict.get("scope_ignore", defaults.execution.scope_ignore))
+            if "scope_ignore" in execution_dict
+            else defaults.execution.scope_ignore
+        )
     else:
         test_command = defaults.execution.test_command
         max_review_rounds = defaults.execution.max_review_rounds
         max_fix_tasks = defaults.execution.max_fix_tasks
         turn_timeout_sec = defaults.execution.turn_timeout_sec
+        scope_ignore = defaults.execution.scope_ignore
 
     execution = ExecutionConfig(
         test_command=test_command,
         max_review_rounds=max_review_rounds,
         max_fix_tasks=max_fix_tasks,
         turn_timeout_sec=turn_timeout_sec,
+        scope_ignore=scope_ignore,
     )
 
     return Config(sides=sides, debate=debate, execution=execution)
@@ -444,6 +471,7 @@ def load_config(project_dir: Path, global_path: Optional[Path] = None) -> Config
             "max_review_rounds": defaults.execution.max_review_rounds,
             "max_fix_tasks": defaults.execution.max_fix_tasks,
             "turn_timeout_sec": defaults.execution.turn_timeout_sec,
+            "scope_ignore": list(defaults.execution.scope_ignore),
         },
     }
 
@@ -510,7 +538,12 @@ def _dump_config_toml(raw: dict) -> str:
     if execution:
         lines.append("[execution]")
         for key, val in execution.items():
-            if isinstance(val, bool):
+            if isinstance(val, list):
+                if not val:
+                    continue
+                val_str = "[" + ", ".join(f'"{_escape_toml_str(v)}"' for v in val) + "]"
+                lines.append(f"{key} = {val_str}")
+            elif isinstance(val, bool):
                 lines.append(f"{key} = {'true' if val else 'false'}")
             elif isinstance(val, (int, float)):
                 lines.append(f"{key} = {val}")

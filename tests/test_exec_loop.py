@@ -1717,3 +1717,173 @@ def test_dispute_gate_context_carries_rejected_remarks(repo, tmp_path):
     assert pg["name"] == "review_rounds"
     texts = [r["text"] for r in pg["context"]["open_remarks"]]
     assert any("stderr must be exact" in t for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# execution.scope_ignore: build artifacts excluded via .git/info/exclude, so
+# neither the scope guard nor the turn-commit ("git add -A") ever see them.
+# ---------------------------------------------------------------------------
+
+
+def _exclude_path(repo):
+    return repo / ".git" / "info" / "exclude"
+
+
+def tracked_files(repo, ref):
+    r = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", ref],
+        check=True, capture_output=True, text=True,
+    )
+    return r.stdout.split()
+
+
+def test_apply_scope_ignore_writes_managed_block(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=FakeGate([]),
+        execution=ExecutionConfig(test_command="true", scope_ignore=("factorial", "*.o")),
+    )
+    ex._apply_scope_ignore()
+    text = _exclude_path(repo).read_text(encoding="utf-8")
+    assert "# >>> spar scope_ignore (managed)" in text
+    assert "factorial" in text
+    assert "*.o" in text
+    assert "# <<< spar scope_ignore" in text
+
+
+def test_apply_scope_ignore_is_noop_when_empty(repo, tmp_path):
+    # `git init` pre-populates info/exclude with its own commented-out
+    # template; an empty scope_ignore must leave it untouched (no managed
+    # block added).
+    before = _exclude_path(repo).read_text(encoding="utf-8")
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=FakeGate([]),
+        execution=ExecutionConfig(test_command="true"),
+    )
+    ex._apply_scope_ignore()
+    assert _exclude_path(repo).read_text(encoding="utf-8") == before
+    assert "spar scope_ignore" not in before
+
+
+def test_apply_scope_ignore_replaces_not_duplicates(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=FakeGate([]),
+        execution=ExecutionConfig(test_command="true", scope_ignore=("factorial",)),
+    )
+    ex._apply_scope_ignore()
+    ex._apply_scope_ignore()
+    text = _exclude_path(repo).read_text(encoding="utf-8")
+    assert text.count("# >>> spar scope_ignore (managed)") == 1
+    assert text.count("factorial") == 1
+
+
+def test_apply_scope_ignore_updates_patterns_on_replace(repo, tmp_path):
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=FakeGate([]),
+        execution=ExecutionConfig(test_command="true", scope_ignore=("factorial",)),
+    )
+    ex._apply_scope_ignore()
+    ex.execution = ExecutionConfig(test_command="true", scope_ignore=("other_bin",))
+    ex._apply_scope_ignore()
+    text = _exclude_path(repo).read_text(encoding="utf-8")
+    assert "other_bin" in text
+    assert "factorial" not in text
+    assert text.count("# >>> spar scope_ignore (managed)") == 1
+
+
+def test_apply_scope_ignore_preserves_preexisting_user_content(repo, tmp_path):
+    exclude = _exclude_path(repo)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("*.log\nmy-scratch/\n", encoding="utf-8")
+
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=FakeGate([]),
+        execution=ExecutionConfig(test_command="true", scope_ignore=("factorial",)),
+    )
+    ex._apply_scope_ignore()
+    text = exclude.read_text(encoding="utf-8")
+    assert "*.log" in text
+    assert "my-scratch/" in text
+    assert "factorial" in text
+
+    # A second application still preserves the pre-existing content while
+    # keeping the managed block singular.
+    ex._apply_scope_ignore()
+    text2 = exclude.read_text(encoding="utf-8")
+    assert "*.log" in text2
+    assert "my-scratch/" in text2
+    assert text2.count("# >>> spar scope_ignore (managed)") == 1
+
+
+def test_scope_ignore_end_to_end_avoids_scope_abort(repo, tmp_path):
+    # THE BUG regression: a per-task test that builds a binary (like `make
+    # test` -> `./factorial`) outside the task's file scope must not trip the
+    # scope guard when the artifact is listed in scope_ignore. With the
+    # pattern excluded from `git status`, the guard never sees it and the
+    # turn-commit ("git add -A") never picks it up either.
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [
+            Step(
+                vblock("CONTINUE"),
+                edits={"work.py": "print(1)\n", "factorial": "not a real binary"},
+            ),
+        ],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true", scope_ignore=("factorial",)),
+    )
+    rc = ex.run()
+    assert rc == 0, f"logs={logs}"
+    assert not any("scope violation" in m for m in logs), logs
+
+    state = store.load()
+    assert state.phase == "done"
+    assert state.tasks["t1"].status == "merged"
+
+    # the binary was never committed anywhere along the pipeline
+    assert "factorial" not in tracked_files(repo, "master")
+    assert "work.py" in tracked_files(repo, "master")
+
+    # the managed exclude block landed in the shared git dir
+    text = _exclude_path(repo).read_text(encoding="utf-8")
+    assert "factorial" in text
+
+
+def test_scope_ignore_absent_still_aborts_on_out_of_scope_artifact(repo, tmp_path):
+    # Regression guard for THE BUG itself: without scope_ignore configured,
+    # an implementer that drops a build artifact outside its file scope still
+    # trips the scope guard twice (rollback+retry, then abort) -> exit 4.
+    tasks = [make_task("t1", "A", ["work.py"], test="true")]
+    steps = {
+        "A": [
+            Step(
+                vblock("CONTINUE"),
+                edits={"work.py": "print(1)\n", "factorial": "build 1"},
+            ),  # initial turn: out-of-scope artifact -> rolled back, retried
+            Step(
+                vblock("CONTINUE"),
+                edits={"work.py": "print(1)\n", "factorial": "build 2"},
+            ),  # retry: artifact reappears -> second violation -> abort
+        ],
+        "B": [],  # reviewer must never be reached
+    }
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+    rc = ex.run()
+    assert rc == 4, f"expected scope-guard abort (4); logs={logs}"
+    assert any("scope violation" in m for m in logs), logs
+    assert len(adapters["A"].calls) == 2
+    assert adapters.get("B") is None or adapters["B"].calls == []
+    # no scope_ignore configured -> the managed block was never written
+    assert "spar scope_ignore" not in _exclude_path(repo).read_text(encoding="utf-8")

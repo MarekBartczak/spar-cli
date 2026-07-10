@@ -53,6 +53,13 @@ def test_impl_prompt_warning_absent_when_not_provided():
     assert "Warning:" not in p
 
 
+def test_impl_prompt_instructs_removing_out_of_scope_build_artifacts():
+    p = build_impl_prompt(T, Path(".spar/artifact.md"), [])
+    low = p.lower()
+    assert "remove them before ending the turn" in low
+    assert "outside your file scope" in low or "outside the scope" in low
+
+
 def test_impl_prompt_first_turn_forces_real_file_writes_on_disk():
     # No open remarks -> the initial code-creating turn. It must force real edits
     # on disk with the model's tools, not a prose description, and still forbid

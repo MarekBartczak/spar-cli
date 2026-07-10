@@ -35,6 +35,21 @@ def _run_ok(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return result
 
 
+def git_common_dir(repo: Path) -> Path:
+    """Resolve the actual git directory shared by all worktrees of ``repo``.
+
+    Uses ``git rev-parse --git-common-dir`` (not ``--git-dir``) so a call made
+    from inside a linked worktree still resolves to the ONE git dir shared by
+    the main checkout and every worktree of it — the right place to write
+    ``info/exclude`` so it applies everywhere.
+    """
+    result = _run_ok(repo, "rev-parse", "--git-common-dir")
+    path = Path(result.stdout.strip())
+    if not path.is_absolute():
+        path = (repo / path).resolve()
+    return path
+
+
 def current_branch(repo: Path) -> str:
     result = _run_ok(repo, "rev-parse", "--abbrev-ref", "HEAD")
     return result.stdout.strip()

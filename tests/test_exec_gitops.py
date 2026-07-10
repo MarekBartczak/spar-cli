@@ -8,6 +8,7 @@ from spar.exec.gitops import (
     changed_files,
     create_branch,
     current_branch,
+    git_common_dir,
     is_ancestor,
     is_clean,
     merge_no_ff,
@@ -54,6 +55,19 @@ def test_worktree_add_edit_merge(repo, tmp_path):
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", "spar/integration"], check=True)
     merge_no_ff(repo, "spar/t1-claude", "merge t1")
     assert is_ancestor(repo, "spar/t1-claude", "spar/integration")
+
+
+def test_git_common_dir_normal_repo(repo):
+    assert git_common_dir(repo) == (repo / ".git").resolve()
+
+
+def test_git_common_dir_from_worktree(repo, tmp_path):
+    create_branch(repo, "spar/t1", "master")
+    wt = tmp_path / "wt"
+    add_worktree(repo, wt, "spar/t1")
+    # The common git dir seen from a linked worktree is the MAIN repo's
+    # .git, not the worktree's own private git-dir pointer file.
+    assert git_common_dir(wt) == (repo / ".git").resolve()
 
 
 def test_is_clean(repo):

@@ -901,3 +901,36 @@ class TestExecutionConfig:
         gp.write_text('[execution]\nturn_timeout_sec=0\n')
         with pytest.raises(ConfigError):
             load_config(tmp_path / "p", global_path=gp)
+
+    def test_scope_ignore_parsed(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nscope_ignore=["factorial", "*.o"]\n')
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.execution.scope_ignore == ("factorial", "*.o")
+
+    def test_scope_ignore_default_empty(self, tmp_path):
+        cfg = load_config(tmp_path / "p", global_path=tmp_path / "none.toml")
+        assert cfg.execution.scope_ignore == ()
+
+    def test_scope_ignore_must_be_string_list(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nscope_ignore="factorial"\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_scope_ignore_rejects_empty_string_entries(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text('[execution]\nscope_ignore=["factorial", ""]\n')
+        with pytest.raises(ConfigError):
+            load_config(tmp_path / "p", global_path=gp)
+
+    def test_scope_ignore_roundtrips_through_dump(self, tmp_path):
+        gp = tmp_path / "c.toml"
+        gp.write_text(
+            '[sides.claude]\nadapter="claude"\ncommand="claude"\n'
+            '\n[execution]\nscope_ignore=["factorial"]\ntest_command="pytest -q"\n'
+        )
+        set_global_command("claude", "claude-v2", global_path=gp)
+        cfg = load_config(tmp_path / "p", global_path=gp)
+        assert cfg.execution.scope_ignore == ("factorial",)
+        assert cfg.execution.test_command == "pytest -q"

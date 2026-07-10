@@ -181,6 +181,8 @@ Protocol for the verdict:
 - Resolve ONLY ids listed in the open remarks above — never invent or guess a
   remark id; a resolution for an unlisted id is ignored.
 - Do NOT include a `remarks:` section — you do not raise remarks; only the reviewer does.
+- If your build/tests produce artifacts outside your file scope (binaries, object files),
+  REMOVE them before ending the turn — leftover artifacts outside the scope fail the turn.
 """
 
 _REVIEW_PROTOCOL_BLOCK = """\
