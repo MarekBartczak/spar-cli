@@ -51,7 +51,9 @@ class RunnerState(Enum):
     LOCKED = "locked"
 
 
-def derive_state(alive: bool, exit_code: int | None, status: dict) -> RunnerState:
+def derive_state(
+    alive: bool, exit_code: int | None, status: dict, lock_held: bool = False
+) -> RunnerState:
     """Map process liveness + last exit code + on-disk status to a state.
 
     Pure: no Qt, no filesystem. The full table (review #7):
@@ -74,6 +76,14 @@ def derive_state(alive: bool, exit_code: int | None, status: dict) -> RunnerStat
 
     if alive:
         return RunnerState.GATE_PENDING if pending else RunnerState.RUNNING
+
+    # Exit 3 covers BOTH "another process holds the lock" and plain
+    # state-guard refusals (dirty tree, leftovers, missing plan). Only a
+    # CONFIRMED foreign lock is read-only LOCKED (live finding: a dirty-tree
+    # refusal froze the whole toolbar); otherwise the status-based mapping
+    # below applies, keeping the toolbar actionable.
+    if exit_code == 3:
+        exit_code = None if not lock_held else exit_code
 
     if exit_code is not None:
         if exit_code == 3:
@@ -274,7 +284,9 @@ class SparRunner(QObject):
         alive = self._is_alive()
         if not alive and self.probe_lock():
             return RunnerState.LOCKED
-        return derive_state(alive, self._last_exit, self._read_status())
+        return derive_state(
+            alive, self._last_exit, self._read_status(), lock_held=self.probe_lock()
+        )
 
     # ------------------------------------------------------------------
     # Internals

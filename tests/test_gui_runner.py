@@ -55,7 +55,7 @@ _PENDING = {"pending_gate": {"kind": "consensus"}}
         (False, 0, {"phase": "done"}, RunnerState.DONE),
         (False, 0, {"phase": "debate"}, RunnerState.DONE),
         (False, 2, {}, RunnerState.ERROR),
-        (False, 3, {}, RunnerState.LOCKED),
+        (False, 3, {}, RunnerState.IDLE),  # exit 3 w/o a confirmed lock: status-based (fresh dir)
         # no exit this session — derive from persisted status
         (False, None, {"phase": None}, RunnerState.IDLE),
         (False, None, {"phase": "done"}, RunnerState.DONE),
@@ -485,3 +485,15 @@ def test_current_state_locked_when_lock_held(runner, project_dir, tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_exit3_without_foreign_lock_is_not_locked():
+    # Live finding: a dirty-tree refusal (exit 3) froze the toolbar as
+    # LOCKED. Only a CONFIRMED foreign lock is read-only; otherwise the
+    # status-based mapping applies.
+    from spar.gui.runner import RunnerState, derive_state
+
+    status = {"phase": "debate", "pending_gate": None, "artifact": ".spar/artifact.md"}
+    assert derive_state(False, 3, status, lock_held=True) == RunnerState.LOCKED
+    assert derive_state(False, 3, status, lock_held=False) == RunnerState.RESUMABLE
+    assert derive_state(False, 3, {"phase": None, "pending_gate": None}, lock_held=False) == RunnerState.IDLE

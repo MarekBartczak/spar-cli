@@ -235,3 +235,17 @@ class TestNewDebateDialogGrillButton:
 
         assert dialog.grill_button.isEnabled()
         assert dialog._grill_timeout_sec == 123
+
+
+def test_resumable_debate_with_artifact_bridges_to_start_exec():
+    # Live finding: after an exec refusal (or a gui restart) an accepted
+    # debate's artifact exists but Start exec was unreachable.
+    from spar.gui.runner import RunnerState
+    from spar.gui.toolbar import START_EXEC, enablement_for
+
+    status = {"phase": "debate", "pending_gate": None, "artifact": ".spar/artifact.md"}
+    assert enablement_for(RunnerState.RESUMABLE, status)[START_EXEC] is True
+    # no artifact -> no bridge
+    assert enablement_for(RunnerState.RESUMABLE, {"phase": "debate", "artifact": None})[START_EXEC] is False
+    # exec-phase resumable -> no bridge (resume handles it)
+    assert enablement_for(RunnerState.RESUMABLE, {"phase": "execution", "artifact": "x"})[START_EXEC] is False

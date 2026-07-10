@@ -78,6 +78,16 @@ def enablement_for(state: RunnerState, status: dict | None = None) -> dict[str, 
     elif state in (RunnerState.GATE_PENDING, RunnerState.RESUMABLE, RunnerState.ABORTED):
         enabled[RESUME] = True
         enabled[NEW_DEBATE] = True
+        # Bridge survives interruptions/refusals AND gui restarts: an
+        # accepted debate left an artifact but no exec run yet — Start exec
+        # must stay reachable (live finding: after a dirty-tree refusal the
+        # button was dead with no way back).
+        if (
+            state == RunnerState.RESUMABLE
+            and status.get("phase") in (None, "debate")
+            and status.get("artifact")
+        ):
+            enabled[START_EXEC] = True
     elif state == RunnerState.DONE:
         enabled[NEW_DEBATE] = True
         # A finished debate (still on the debate/fresh phase) can launch exec;
