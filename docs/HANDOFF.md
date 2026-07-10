@@ -93,3 +93,21 @@ and TUI are DROPPED.
    the abort check (stray worktree on abort); `--gate` against a done state
    returns 0 (done short-circuit precedes validation).
 2. 2-way concurrency (sequential-first by design; `docs/adr/0002`).
+
+## Live observability (2026-07-10, `94469a4..9b84ae2`)
+
+Implemented and live-smoke-tested: adapters stream events live (claude
+`stream-json --include-partial-messages`, codex JSONL; Popen + reader threads,
+stderr drain, stdin semantics, timeout parity); `StreamSink` fans display
+lines to stdout (default full; `--quiet` for agents) and an always-on
+`.spar/live.log` with `[side task role]` prefixes; `spar watch` (colorized
+follower + gate banner) and `spar ui` (viewer-window spawn cascade);
+AGENT.md/SKILL.md updated (agent runs `spar ui` once, then `--quiet`).
+Smoke (--version feature, Warp split with watch): full two-vendor stream
+visible live, agent context stayed at spar-log level, claude transcripts now
+raw JSONL, gates relayed normally. Live finding fixed same-day: review-turn
+prefix named the task owner's side instead of the reviewer's (`9b84ae2`).
+Known v1 trade-offs: each CLI invocation truncates live.log; codex `exec:`
+display shapes inferred (display-only); Warp auto-spawn falls back to a
+printed instruction.
+
