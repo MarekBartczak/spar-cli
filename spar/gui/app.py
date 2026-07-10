@@ -235,10 +235,13 @@ class MainWindow(QMainWindow):
         self._startup_progress.hide()
 
     def _on_new_debate(self) -> None:
+        # Repo check comes FIRST — before the user invests time in typing the
+        # task (live feedback: the create-repo question must not appear after
+        # the form).
+        if not self._ensure_git_repo():
+            return
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        if not self._ensure_git_repo():
             return
         self.runner.start_debate(**dialog.values())
 

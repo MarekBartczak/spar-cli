@@ -341,3 +341,26 @@ class TestNewDebateGitGuard:
 
         assert asked == []
         assert started == [{"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}]
+
+
+def test_repo_check_precedes_the_new_debate_dialog(tmp_path, monkeypatch):
+    # Declining the create-repo question must prevent the form from even
+    # opening (the user must not type a task first).
+    import spar.gui.app as app_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    win = app_mod.MainWindow(tmp_path)  # tmp dir: no git repo
+    try:
+        opened = []
+        monkeypatch.setattr(
+            app_mod.toolbar_mod, "NewDebateDialog",
+            lambda *a, **k: opened.append(1) or (_ for _ in ()).throw(AssertionError("dialog opened")),
+        )
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel),
+        )
+        win._on_new_debate()
+        assert opened == []  # form never constructed
+    finally:
+        win.close()
