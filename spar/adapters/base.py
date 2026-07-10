@@ -84,14 +84,20 @@ def run_cli(
 
     events_file = events_path.open("w", encoding="utf-8")
 
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+        )
+    except BaseException:
+        # Popen can raise before any stream exists (e.g. FileNotFoundError for
+        # a missing binary) — don't leak the already-opened events file.
+        events_file.close()
+        raise
 
     def _read_stdout() -> None:
         try:

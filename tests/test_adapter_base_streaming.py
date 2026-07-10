@@ -142,3 +142,17 @@ def test_returns_completed_process_with_stderr(tmp_path):
     assert isinstance(result, subprocess.CompletedProcess)
     assert result.stdout == "out\n"
     assert result.stderr == "err text"
+
+
+def test_missing_binary_raises_and_closes_events_file(tmp_path):
+    # Popen raising (missing executable) must propagate AND not leak the
+    # already-opened events file handle.
+    import gc
+    import warnings
+
+    events = tmp_path / "ev.jsonl"
+    with pytest.raises(FileNotFoundError):
+        run_cli(["/no/such/binary-xyz"], 5, events)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        gc.collect()  # an unclosed file would emit ResourceWarning here
