@@ -108,6 +108,16 @@ machine (incl. LOCKED read-only on a foreign flock), Plan/Diff viewers
 Engine untouched beyond that additive field. Suite 519 passed (GUI tests
 skip without PySide6). **Manual smoke at the GUI pending (user-driven).**
 
+## Fresh-project E2E PASSED (2026-07-10, spar_test_2)
+
+Greenfield run from an EMPTY directory, fully GUI-piloted: create-repo
+dialog (with .spar/ gitignored from the initial commit), starter config
+auto-created, debate on opus + gpt-5.6-sol, exec with a LIVE
+review_rounds gate (user extended +2 → converged), 3 tasks merged,
+stats.py + 12/12 pytest, int/float output formatting byte-exact to spec.
+The whole "project from zero" flow (repo guard → config bootstrap →
+debate → exec → merge) is validated.
+
 ## External review received (2026-07-10)
 
 `docs/reviews/2026-07-10-external-review.md` — independent assessment
