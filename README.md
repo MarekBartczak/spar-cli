@@ -126,12 +126,13 @@ the GUI on a directory another process already holds the run lock for, it
 shows a read-only "locked" banner instead of live controls.
 
 ![spar gui — execution](docs/img/gui-exec.png)
-*Mid-execution: live transcript (colored per side/round/task) and the task
+*A real run: live transcript (colored per side/model/task/role — reviewer
+gpt-5.6-sol cross-checking claude's work, verdicts, gate lines) and the task
 board tracking each task's merged/review/pending status.*
 
-![spar gui — gate](docs/img/gui-gate.png)
-*A `final_merge` gate pending: test results and diffstat in context, with
-the Accept/Abort buttons the gate offers.*
+![spar gui — new debate](docs/img/gui-new-debate.png)
+*Starting a run: task description, configured sides as checkboxes, first
+speaker, and the `## Tasks` requirement toggle.*
 
 ## Agent mode (headless)
 
