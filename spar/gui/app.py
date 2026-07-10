@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.runner import RunnerState, SparRunner
+from spar.gui.stream import LiveLogTailer, StreamPane
 from spar.gui.theme import build_qss
 from spar.status import build_status
 
@@ -37,14 +38,6 @@ _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Di
 
 # QSplitter sizes expressing the required 1.7 : 1 left:right ratio.
 _SPLITTER_SIZES = [1700, 1000]
-
-
-class StreamPane(QWidget):
-    """Left pane placeholder: the transcript/stream view (built in a later task)."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("streamPane")
 
 
 class SidePane(QWidget):
@@ -104,6 +97,12 @@ class MainWindow(QMainWindow):
         self._wire_toolbar()
         self._sync_toolbar()
 
+        # Live stream tailer: path injected (project_dir), never cwd-relative
+        # (review #9 -- the gui may run with cwd != project_dir).
+        self.tailer = LiveLogTailer(self.project_dir / ".spar" / "live.log", self)
+        self.tailer.lines.connect(self.stream_pane.feed_lines)
+        self.tailer.start()
+
     # ------------------------------------------------------------------
     # Runner wiring
     # ------------------------------------------------------------------
@@ -147,6 +146,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._save_splitter_state()
+        self.tailer.stop()
         super().closeEvent(event)
 
 
