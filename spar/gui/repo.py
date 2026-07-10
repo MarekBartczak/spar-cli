@@ -14,7 +14,14 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-__all__ = ["repo_state", "create_repo", "create_initial_commit", "ensure_project_config"]
+__all__ = [
+    "repo_state",
+    "create_repo",
+    "create_initial_commit",
+    "ensure_project_config",
+    "dirty_paths",
+    "commit_all",
+]
 
 _INITIAL_COMMIT_MESSAGE = "spar: initial state"
 
@@ -141,3 +148,41 @@ def create_initial_commit(project_dir: "str | Path") -> None:
     _ensure_spar_gitignored(project_dir)
     _run(project_dir, "add", "-A")
     _run(project_dir, "commit", "--allow-empty", "-m", _INITIAL_COMMIT_MESSAGE)
+
+
+def dirty_paths(project_dir: "str | Path") -> list[str]:
+    """List changed/untracked paths in ``project_dir`` (``git status --porcelain``).
+
+    Used by the "Start exec" pre-flight (a grill session legitimately leaves
+    behind CONTEXT.md/ADR edits; ``spar exec`` otherwise refuses outright with
+    exit 3 "target worktree not clean" and no way forward from the gui).
+    Returns ``[]`` for a clean tree or a non-git directory (this is a
+    display-only probe -- the caller is expected to have already established
+    a git repo exists via :func:`repo_state`).
+    """
+    result = _run(project_dir, "status", "--porcelain", "--untracked-files=all")
+    if result.returncode != 0:
+        return []
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        # Porcelain lines are "XY <path>" (or "XY <path> -> <new path>" for
+        # renames) -- the two-char status code plus a space precede the path.
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path)
+    return paths
+
+
+def commit_all(project_dir: "str | Path", message: str) -> None:
+    """Stage and commit everything in ``project_dir`` under ``message``.
+
+    The "Yes" branch of the "Start exec" pre-flight dialog: turns a dirty
+    tree (grill artifacts, manual edits) into a clean one so ``spar exec``'s
+    worktree-clean check passes.
+    """
+    _ensure_commit_identity(project_dir)
+    _run(project_dir, "add", "-A")
+    _run(project_dir, "commit", "-m", message)

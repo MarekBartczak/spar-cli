@@ -184,7 +184,7 @@ class MainWindow(QMainWindow):
     def _wire_toolbar(self) -> None:
         actions = self.toolbar.actions_by_label
         actions[toolbar_mod.NEW_DEBATE].triggered.connect(self._on_new_debate)
-        actions[toolbar_mod.START_EXEC].triggered.connect(self.runner.start_exec)
+        actions[toolbar_mod.START_EXEC].triggered.connect(self._on_start_exec)
         actions[toolbar_mod.RESUME].triggered.connect(lambda: self.runner.resume(None))
         actions[toolbar_mod.STOP].triggered.connect(self.runner.stop)
         actions["Plan"].triggered.connect(self.side_pane.show_plan)
@@ -248,6 +248,39 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.runner.start_debate(**dialog.values())
+
+    def _on_start_exec(self) -> None:
+        """Pre-flight for the "Start exec" action (shared by the toolbar
+        button in its DONE and RESUMABLE-bridge enablement) -- ``spar exec``
+        refuses outright (exit 3, "target worktree not clean") on any
+        uncommitted change, but a grill session legitimately leaves behind
+        CONTEXT.md/ADR edits with no in-gui way forward (live finding).
+        A dirty tree now gets a confirm-and-commit offer instead of a dead
+        end; a clean tree proceeds exactly as before with no dialog.
+        """
+        dirty = repo_mod.dirty_paths(self.project_dir)
+        if dirty:
+            shown = dirty[:10]
+            listing = "\n".join(shown)
+            remaining = len(dirty) - len(shown)
+            if remaining > 0:
+                listing += f"\n… i {remaining} więcej"
+            reply = QMessageBox.question(
+                self,
+                "Niezacommitowane zmiany",
+                "Repozytorium ma niezacommitowane pliki (np. dokumenty z grilla):\n"
+                f"{listing}\n\nZacommitować je i wystartować exec?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            repo_mod.commit_all(
+                self.project_dir,
+                "docs: pre-exec snapshot (grill artifacts / manual edits)",
+            )
+            self.stream_pane.append_notice("▶ zacommitowano zmiany przed exec")
+        self.runner.start_exec()
 
     def _ensure_git_repo(self) -> bool:
         """Confirm (creating on demand) that ``project_dir`` has a git repo

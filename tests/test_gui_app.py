@@ -343,6 +343,104 @@ class TestNewDebateGitGuard:
         assert started == [{"task_text": "x", "sides": "claude,codex", "first": "claude", "tasks": True}]
 
 
+def _init_repo(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-b", "master"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "init"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+
+
+class TestStartExecDirtyTreeGuard:
+    """A grill session legitimately leaves behind uncommitted docs (live
+    finding): ``spar exec`` refuses outright on a dirty tree, so the Start
+    exec action offers to commit them instead of dead-ending the user."""
+
+    def test_dirty_tree_accept_commits_and_starts_exec(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        _init_repo(tmp_path)
+        (tmp_path / "CONTEXT.md").write_text("grill notes\n", encoding="utf-8")
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        monkeypatch.setattr(
+            QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_exec", lambda: started.append(1))
+
+        window._on_start_exec()
+
+        from spar.gui import repo as repo_mod
+
+        assert repo_mod.dirty_paths(tmp_path) == []
+        import subprocess
+
+        log = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "--oneline"],
+            check=True, capture_output=True, text=True,
+        )
+        lines = log.stdout.strip().splitlines()
+        assert len(lines) == 2
+        assert "docs: pre-exec snapshot" in lines[0]
+        assert started == [1]
+        assert "▶ zacommitowano zmiany przed exec" in window.stream_pane.text.toPlainText()
+
+    def test_dirty_tree_cancel_does_not_commit_or_start(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        _init_repo(tmp_path)
+        (tmp_path / "CONTEXT.md").write_text("grill notes\n", encoding="utf-8")
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        monkeypatch.setattr(
+            QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel)
+        )
+        started = []
+        monkeypatch.setattr(window.runner, "start_exec", lambda: started.append(1))
+
+        window._on_start_exec()
+
+        from spar.gui import repo as repo_mod
+
+        assert repo_mod.dirty_paths(tmp_path) == ["CONTEXT.md"]
+        import subprocess
+
+        log = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "--oneline"],
+            check=True, capture_output=True, text=True,
+        )
+        assert len(log.stdout.strip().splitlines()) == 1
+        assert started == []
+
+    def test_clean_tree_proceeds_without_dialog(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        _init_repo(tmp_path)
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        def _fail_if_asked(*_a, **_k):
+            raise AssertionError("QMessageBox.question must not be called on a clean tree")
+
+        monkeypatch.setattr(QMessageBox, "question", staticmethod(_fail_if_asked))
+        started = []
+        monkeypatch.setattr(window.runner, "start_exec", lambda: started.append(1))
+
+        window._on_start_exec()
+
+        assert started == [1]
+
+
 def test_new_debate_creates_starter_config_and_notifies(qtbot, tmp_path, monkeypatch):
     # Fresh project: no .git and no .spar/config.toml. Accepting the
     # create-repo offer must be followed by a starter config being written
