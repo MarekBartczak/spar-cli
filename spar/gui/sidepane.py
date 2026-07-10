@@ -594,7 +594,14 @@ class GatePanel(QWidget):
         for widget in self._interactive_widgets:
             widget.setEnabled(False)
 
+    # Optional pre-flight for auto-exec accepts (wired by MainWindow): must
+    # return True to proceed. None = no pre-flight (tests, standalone use).
+    preflight_auto_exec = None
+
     def _on_accept(self, spec: ButtonSpec) -> None:
+        if spec.auto_exec and self.preflight_auto_exec is not None:
+            if not self.preflight_auto_exec():
+                return  # user cancelled the pre-flight; gate stays actionable
         self._disable_all()
         self._runner.resume("accept", auto_exec=spec.auto_exec)
 

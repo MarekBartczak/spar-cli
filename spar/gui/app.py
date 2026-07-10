@@ -120,6 +120,9 @@ class MainWindow(QMainWindow):
         self.stream_pane = StreamPane(self)
         self.side_pane = SidePane(self.project_dir, self.runner, self)
         self.side_pane.status_changed.connect(self._on_status_changed)
+        # The consensus "Accept → start exec" auto-chain must run the same
+        # dirty-tree pre-flight as the toolbar button (live finding).
+        self.side_pane.gate_panel.preflight_auto_exec = self._commit_if_dirty
         # SidePane's own constructor already ran one refresh() before this
         # connection existed; re-sync now so Plan/Diff reflect the current
         # status immediately rather than waiting for the next 2s tick.
@@ -258,29 +261,43 @@ class MainWindow(QMainWindow):
         A dirty tree now gets a confirm-and-commit offer instead of a dead
         end; a clean tree proceeds exactly as before with no dialog.
         """
-        dirty = repo_mod.dirty_paths(self.project_dir)
-        if dirty:
-            shown = dirty[:10]
-            listing = "\n".join(shown)
-            remaining = len(dirty) - len(shown)
-            if remaining > 0:
-                listing += f"\n… i {remaining} więcej"
-            reply = QMessageBox.question(
-                self,
-                "Niezacommitowane zmiany",
-                "Repozytorium ma niezacommitowane pliki (np. dokumenty z grilla):\n"
-                f"{listing}\n\nZacommitować je i wystartować exec?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            repo_mod.commit_all(
-                self.project_dir,
-                "docs: pre-exec snapshot (grill artifacts / manual edits)",
-            )
-            self.stream_pane.append_notice("▶ zacommitowano zmiany przed exec")
+        if not self._commit_if_dirty():
+            return
         self.runner.start_exec()
+
+    def _commit_if_dirty(self) -> bool:
+        """Offer to commit a dirty tree before an exec starts.
+
+        Returns True when exec may proceed (tree clean, or the user accepted
+        the commit); False when the user cancelled. Shared by the toolbar's
+        "Start exec" AND the gate panel's "Accept → start exec" auto-chain
+        (live finding: the auto-chain bypassed the toolbar pre-flight and
+        died on exit 3 again).
+        """
+        dirty = repo_mod.dirty_paths(self.project_dir)
+        if not dirty:
+            return True
+        shown = dirty[:10]
+        listing = "\n".join(shown)
+        remaining = len(dirty) - len(shown)
+        if remaining > 0:
+            listing += f"\n… i {remaining} więcej"
+        reply = QMessageBox.question(
+            self,
+            "Niezacommitowane zmiany",
+            "Repozytorium ma niezacommitowane pliki (np. dokumenty z grilla):\n"
+            f"{listing}\n\nZacommitować je i wystartować exec?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+        repo_mod.commit_all(
+            self.project_dir,
+            "docs: pre-exec snapshot (grill artifacts / manual edits)",
+        )
+        self.stream_pane.append_notice("▶ zacommitowano zmiany przed exec")
+        return True
 
     def _ensure_git_repo(self) -> bool:
         """Confirm (creating on demand) that ``project_dir`` has a git repo

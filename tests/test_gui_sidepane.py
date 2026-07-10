@@ -673,3 +673,36 @@ class TestSidePaneTaskPanel:
         # Fix 5: the Side column includes each side's model when the task
         # carries one -- "codex·gpt-5.5 -> claude·sonnet".
         assert rows["t1"]["label"] == "codex·gpt-5.5 → claude·sonnet"
+
+
+class TestAutoExecPreflight:
+    def test_cancelled_preflight_blocks_resume_and_keeps_gate_actionable(self, qtbot, tmp_path):
+        # The consensus "Accept → start exec" auto-chain must run the shared
+        # dirty-tree pre-flight; cancelling it must NOT consume the gate.
+        from spar.gui.sidepane import GatePanel
+
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def resume(self, value, auto_exec=False):
+                self.calls.append((value, auto_exec))
+            def resume_with_remarks(self, text):
+                self.calls.append(("remarks", text))
+
+        runner = FakeRunner()
+        panel = GatePanel(runner)
+        qtbot.addWidget(panel)
+        panel.set_pending_gate({"name": "consensus", "options": ["accept", "abort"], "context": {}})
+
+        panel.preflight_auto_exec = lambda: False
+        from PySide6.QtWidgets import QPushButton
+        primary = next(
+            b for b in panel.findChildren(QPushButton) if "start exec" in b.text().lower()
+        )
+        primary.click()
+        assert runner.calls == []
+        assert primary.isEnabled()  # gate still actionable
+
+        panel.preflight_auto_exec = lambda: True
+        primary.click()
+        assert runner.calls == [("accept", True)]
