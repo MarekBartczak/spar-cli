@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Zero new runtime dependencies.
-- Transcript files in `.spar/transcript/` keep EXACTLY today's content (raw stream per turn) — streaming must not change what is persisted there.
+- Transcript files in `.spar/transcript/` keep holding the FULL RAW stream per turn. **Deliberate format migration for claude**: the per-turn file changes from one JSON document (`--output-format json`) to JSONL (`stream-json`) — nothing in spar/ parses these files after the write (human/debug artifacts). One EXISTING TEST does (`tests/test_adapter_claude.py` parses the events file as a single JSON document) — Task 1 updates that test to the JSONL format as part of the argv/parsing migration. File extension stays as-is. Codex transcripts were already JSONL — unchanged.
 - Timeout semantics unchanged: a turn that exceeds `timeout_sec` still raises `AdapterError(f"timeout after {timeout_sec}s")` with the partial stream saved to the events file.
 - `TurnResult` contract unchanged (session_id, reply_text, events_path, exit_code); all existing adapter/orchestrator/executor tests must stay green (fakes don't stream — `on_event` must be optional everywhere).
 - `--quiet` only silences the stdout sink; live.log and spar's log lines to the agent (turn-complete, gates, exits) are unaffected.
@@ -31,18 +31,27 @@
 **Interfaces:**
 - Consumes: current `run_cli(cmd, timeout_sec, events_path, stdin_text=None, cwd=None)` and both adapters' `run_turn`.
 - Produces:
-  - `run_cli(..., on_line: Callable[[str], None] | None = None)` — same return type (`CompletedProcess[str]` with the FULL stdout in `.stdout`), but implemented with `subprocess.Popen`: a reader thread consumes stdout line-by-line, appends each line to an incrementally-written events file (opened once, `flush()` per line) and invokes `on_line(line)`; the main thread enforces the deadline (`proc.wait(timeout=...)`; on `TimeoutExpired` kill the process, join the reader, raise `AdapterError` — partial stream is already on disk). stderr captured separately as today. `on_line=None` keeps behavior identical for callers that don't stream. Callback exceptions must NEVER kill the turn (wrap in try/except, drop).
+  - `run_cli(..., on_line: Callable[[str], None] | None = None)` — same return type (`CompletedProcess[str]` with the FULL stdout in `.stdout` and stderr in `.stderr`), but implemented with `subprocess.Popen`:
+    - a STDOUT reader thread consumes lines, appends each to an incrementally-written events file (opened once, `flush()` per line) and invokes `on_line(line)`;
+    - a STDERR reader thread drains stderr into a buffer concurrently (an undrained stderr pipe can fill and block the child, producing a FALSE timeout) — joined at the end, its content returned as `.stderr` exactly as today;
+    - `stdin_text` is written to `proc.stdin` and the pipe CLOSED immediately after (or `stdin=DEVNULL` when None) — matching `subprocess.run(input=...)` semantics so commands waiting on stdin can't hang;
+    - the main thread enforces the deadline (`proc.wait(timeout=...)`; on `TimeoutExpired` kill the process, join both readers, raise `AdapterError` — the partial stream is already on disk).
+    `on_line=None` keeps caller-visible behavior identical. Callback exceptions must NEVER kill the turn (wrap in try/except, drop).
   - `Adapter.run_turn(prompt, session_id, timeout_sec, on_event: Callable[[str], None] | None = None)` — protocol gains the optional param. `on_event` receives HUMAN-READABLE display lines (not raw JSON), already newline-free.
-  - claude adapter: non-readonly AND readonly argv switch `--output-format json` → `--output-format stream-json --verbose --include-partial-messages`; `run_turn` collects the stream, extracts `session_id` and the final reply from the terminal `{"type":"result", ...}` event (field `result`), and formats display lines from events: assistant text deltas (`{"type":"stream_event"...}` partial chunks → emit as-is, coalescing is the sink's problem — v1 emits chunk text when non-empty), tool use starts (`tool: <Name> <first 80 chars of input>`), and the result line (`done (<duration>s)` if available). Malformed/unknown JSON lines → skip silently for display, still persisted raw.
+  - claude adapter: non-readonly AND readonly argv switch `--output-format json` → `--output-format stream-json --verbose --include-partial-messages`; `run_turn` collects the stream, extracts `session_id` and the final reply from the terminal `{"type":"result", ...}` event (field `result`). Display lines follow the REAL stream-json shapes (SDK streaming docs): every streamed chunk arrives as `{"type":"stream_event","event":{...}}` where
+    - `event.type == "content_block_delta"` with `delta.type == "text_delta"` → emit `delta.text` (non-empty only);
+    - `event.type == "content_block_start"` with `content_block.type == "tool_use"` → emit `tool: <content_block.name>` (the INPUT is not available at start — it arrives later as `input_json_delta` chunks and is NOT displayed in v1);
+    - terminal `{"type":"result"}` → emit `done (<duration_ms/1000:.1f>s)` when `duration_ms` present, else `done`.
+    Malformed/unknown JSON lines → skip silently for display, still persisted raw.
   - codex adapter: display lines from its JSONL: `item.completed` agent messages (`text`), command/tool events (emit `exec: <cmd>` style), `turn.completed` → `done`. Unknown lines skipped for display.
   - Both adapters call `run_cli(..., on_line=<parse+forward>)` only when `on_event` is not None; otherwise pass `on_line=None` (zero overhead, today's path).
-- Fakes: extend `tests/fakes/fake_claude.py` to support `--output-format stream-json` (emit N JSONL lines: an assistant chunk, a tool_use event, a result event with `session_id`+`result` — driven by the existing script-dir files) and keep the plain `json` mode for old tests. Same idea for `fake_codex.py` (it already emits JSONL — just verify).
+- Fakes: extend `tests/fakes/fake_claude.py` to support `--output-format stream-json` — emit JSONL with the REAL shapes: a `{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Edit"}}}` line, a `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}` line, and a terminal `{"type":"result","result":"<reply>","session_id":"<sid>","duration_ms":1234}` — driven by the existing script-dir files; keep the plain `json` mode for old tests. `fake_codex.py` already emits JSONL — just verify shapes.
 
-- [ ] **Step 1: failing test — `run_cli` streams lines live.** New `tests/test_adapter_base_streaming.py`: run a small inline `python3 -c` producer that prints 3 lines with `sleep 0.1` between them; collect `on_line` calls with timestamps; assert 3 calls arrive, events file contains all 3 lines, and `.stdout` equals the full output. Also: timeout test — producer sleeps 10s, `timeout_sec=1` → `AdapterError`, partial line(s) present in the events file. Also: `on_line` raising must not break the run.
+- [ ] **Step 1: failing test — `run_cli` streams lines live.** New `tests/test_adapter_base_streaming.py`: run a small inline `python3 -c` producer that prints 3 lines with `sleep 0.1` between them; collect `on_line` calls with timestamps; assert 3 calls arrive, events file contains all 3 lines, and `.stdout` equals the full output. Also: timeout test — producer sleeps 10s, `timeout_sec=1` → `AdapterError`, partial line(s) present in the events file. Also: `on_line` raising must not break the run. Also: stderr-flood test — producer writes ≥1 MB to stderr then exits 0 within the timeout; assert no false timeout and `.stderr` holds the full content (pins the stderr-drain thread). Also: `stdin_text` reaches the child (`python3 -c "import sys; print(sys.stdin.read())"`).
 - [ ] **Step 2: run — FAIL** (no `on_line` param).
 - [ ] **Step 3: implement streaming `run_cli`** (Popen + reader thread per the interface). Run new tests + full suite — PASS (old callers unaffected).
-- [ ] **Step 4: failing tests — claude stream argv + parsing.** Update the FOUR argv-contract tests: expected `--output-format stream-json --verbose --include-partial-messages` (in the same position `json` sat). New test: with the streaming fake, `run_turn(..., on_event=collect)` yields display lines including the tool line and text chunk, and `TurnResult.reply_text`/`session_id` come from the result event. Readonly argv test updated the same way.
-- [ ] **Step 5: implement claude adapter + fake; run — PASS.**
+- [ ] **Step 4: failing tests — claude stream argv + parsing.** Update the FOUR argv-contract tests: expected `--output-format stream-json --verbose --include-partial-messages` (in the same position `json` sat). New test: with the streaming fake, `run_turn(..., on_event=collect)` yields `tool: Edit` (from content_block_start) and the text_delta chunk, and `TurnResult.reply_text`/`session_id` come from the result event; `done (1.2s)` line from `duration_ms=1234`. Readonly argv test updated the same way.
+- [ ] **Step 5: implement claude adapter + fake; update the existing events-file test (it parses the file as one JSON document — now JSONL); run — PASS.**
 - [ ] **Step 6: failing tests — codex display parsing.** `run_turn(..., on_event=collect)` over the existing JSONL fake yields the agent-message text line and `done`; reply_text/session_id unchanged (last-message file + thread id logic untouched).
 - [ ] **Step 7: implement codex adapter; run — PASS.**
 - [ ] **Step 8: full suite; commit** — `feat(adapters): stream CLI events live (claude stream-json, codex jsonl) with on_event callback`
@@ -76,7 +85,7 @@
 
   `log()` is what replaces the bare `print` currently passed as `log=`; `event()` is what adapter `on_event` lines go through. Quiet mode: `event` skips stdout, `log` never does (the agent needs spar's protocol lines).
 - Orchestrator: `Orchestrator.__init__` accepts optional `sink: StreamSink | None`; `_invoke` builds `on_event=lambda ln: sink.event(f"{side} r{state.round}", ln)` when a sink is present and passes it to `adapter.run_turn`. `self.log` routed to `sink.log` when sink present (CLI keeps working without a sink — tests pass `log=`).
-- Executor: same pattern; prefix `f"{side} {task.id} {role}"` where role is `impl`/`review` — the call sites live in `spar/exec/review.py::_invoke` (which already receives `role`) — thread the callback down via `run_cross_review(..., on_event=...)`-style plumbing mirroring how `log` travels today (executor builds per-task callbacks; review passes them into `_invoke`'s `adapter.run_turn`).
+- Executor: same pattern; prefix `f"{side} {task.id} {role}"` where role is `impl`/`review`. The callback must reach EVERY adapter turn, and `spar/exec/review.py::_invoke` is not the only entry: `spar/exec/loop.py` calls `_implementer_turn` DIRECTLY for the initial implementation, the empty-implementation retry, the test-failure re-implement loop (`_test_and_merge_task`), and the resume-extend path. Therefore: `_implementer_turn(..., on_event=None)` and `run_cross_review(..., on_event=None)` both grow the param and forward it into `_invoke`, which passes it to `adapter.run_turn`; `_parse_verdict_with_retry` forwards it too (its retry re-invokes the adapter). The Executor builds ONE per-task callback pair (impl-prefixed, review-prefixed) in `_run_task`/`_resume_review_task` and passes them through ALL of these call sites — grep `adapter.run_turn(` and `_implementer_turn(` after wiring; every call site must carry the callback.
 - CLI: `--quiet` flag on main + exec parsers ("suppress live model output on stdout; spar's own logs and .spar/live.log are unaffected"); build `StreamSink(Path('.spar'), quiet=args.quiet)` and hand it to the orchestrator/executor; `spar status`/`watch` unaffected.
 
 - [ ] **Step 1: failing sink tests** (`tests/test_stream.py`): event writes prefixed line to fake stdout + live.log; quiet suppresses stdout for `event` but not `log`; live.log truncated on construction; close flushes.
@@ -134,7 +143,9 @@
                                    # (best-effort; fall through on any doubt)
       3. first of x-terminal-emulator / gnome-terminal / konsole / xterm:
          gnome-terminal -> ["gnome-terminal", "--", "spar", "watch"]
-         others         -> [term, "-e", "spar watch"]
+         others         -> [term, "-e", "spar", "watch"]   # SEPARATE argv items —
+                           # a single "spar watch" string is treated by several
+                           # emulators as a literal executable name
       4. None -> caller prints the manual instruction
       """
   ```
@@ -151,7 +162,7 @@
 
 ### Task 5: live smoke test (manual, user-driven — no model)
 
-- [ ] In `/home/marek/P_PROJ/spar_tests`: human runs `spar watch` in a Warp split; agent (Claude Code) runs the AGENT.md loop with `--quiet` on a small brownfield task. Verify: full model output visible live in the watch pane (both vendors, prefixes), agent context stays lean, gates still relay via status/--gate, transcript files unchanged in format, Ctrl+C in watch harmless. Record outcome in HANDOFF + auto-memory.
+- [ ] In `/home/marek/P_PROJ/spar_tests`: human runs `spar watch` in a Warp split; agent (Claude Code) runs the AGENT.md loop with `--quiet` on a small brownfield task. Verify: full model output visible live in the watch pane (both vendors, prefixes), agent context stays lean, gates still relay via status/--gate, claude transcript files now hold the raw JSONL stream (deliberate migration) and codex transcripts are unchanged, Ctrl+C in watch harmless. Record outcome in HANDOFF + auto-memory.
 
 ---
 
@@ -161,3 +172,30 @@
 - Riskiest piece is Task 1 (Popen + reader thread + timeout semantics + claude stream-json migration) — assigned Opus; the events-file and TurnResult contracts are pinned by existing tests.
 - Fakes must gain stream-json support without breaking the four argv-contract tests being updated in the same task — watch the ordering inside Task 1's steps.
 - `--quiet` deliberately does NOT silence `sink.log` — the agent's whole protocol depends on those lines.
+
+## Review history
+
+- **Round 1** (codex gpt-5.5): Verdict CONTINUE. All seven **accepted**:
+  #1 [MUST] transcript constraint contradicted the stream-json switch —
+  reworded as a DELIBERATE claude transcript migration (JSON → JSONL; nothing
+  parses those files downstream). #2 [MUST] undrained stderr pipe could block
+  the child → false timeout — added a stderr reader thread + a stderr-flood
+  regression test. #3 [MUST] stdin_text handling unspecified in the Popen
+  rewrite — now written+closed explicitly (DEVNULL when None) + test.
+  #4 [MUST] claude tool events documented wrong — display now keyed on
+  content_block_start (tool name only; input arrives later as
+  input_json_delta and is not shown in v1); fake emits the real shapes.
+  #5 [MUST] exec wiring missed direct `_implementer_turn` call sites (initial,
+  empty-retry, test-fail re-implement, resume-extend) — `_implementer_turn`,
+  `run_cross_review` and `_parse_verdict_with_retry` all grow/forward
+  `on_event`; grep-check all `adapter.run_turn(` sites. #6 [NICE] duration
+  field pinned to `duration_ms/1000`. #7 [NICE] terminal argv split into
+  separate items (["xterm","-e","spar","watch"]).
+- **Round 2** (codex gpt-5.5): Verdict CONTINUE. #8 [MUST] **accepted** —
+  the transcript-migration rewrite left two inconsistencies: the smoke test
+  still demanded "unchanged format" (now verifies claude JSONL explicitly)
+  and the "nothing parses these files" claim missed an existing test that
+  parses the claude events file as a single JSON document (Task 1 Step 5 now
+  updates it).
+- **Round 3** (codex gpt-5.5, verification): Verdict **AGREE**. Confirmed #8
+  and #1-#7 addressed and consistent document-wide.
