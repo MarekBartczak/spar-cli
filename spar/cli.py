@@ -19,6 +19,7 @@ from spar.orchestrator import ConsoleGate, Orchestrator
 from spar.state import StateStore
 from spar.status import build_status
 from spar.stream import StreamSink
+from spar.ui import main_ui
 from spar.watch import main_watch
 
 _ADAPTERS = {"claude": ClaudeAdapter, "codex": CodexAdapter}
@@ -340,6 +341,8 @@ def main(argv=None) -> int:
         return _run_exec(argv[1:])
     if argv and argv[0] == "watch":
         return main_watch(argv[1:])
+    if argv and argv[0] == "ui":
+        return main_ui(argv[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)

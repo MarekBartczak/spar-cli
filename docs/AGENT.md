@@ -9,7 +9,8 @@ the human, and reports results. Terminology (Phase, Plan, Session, Side,
 Task, Task List) follows [CONTEXT.md](../CONTEXT.md).
 
 All commands below were verified against `spar --help`, `spar exec --help`,
-and `spar status --json` output on this version of spar-cli.
+`spar watch --help`, `spar ui --help`, and `spar status --json` output on
+this version of spar-cli.
 
 ## Prerequisites
 
@@ -21,6 +22,36 @@ Before driving a run, confirm:
   --list-commands` prints the resolved CLI command per side and exits 0;
   a `ConfigError` there means misconfiguration (exit 2) and must be fixed
   before starting a run.
+
+## Live output
+
+Model chatter is verbose, and a headless-driven agent should not have it
+interleaved with its own reasoning. The pattern:
+
+1. **Run `spar ui` once, at the start of the session**, before starting a
+   debate or execution run. It best-effort spawns a terminal (a tmux split
+   if already inside tmux, otherwise a detected terminal emulator) running
+   `spar watch`, a live colorized tail of `.spar/live.log`. It always exits
+   0 — if no terminal could be spawned it just prints a manual instruction
+   (`Open a split/terminal and run: spar watch`) instead of failing.
+   **Tell the human what the window is** (e.g. "I've opened a live view of
+   spar's output in a new terminal split — you don't need to watch it, but
+   it's there if you want to follow along").
+2. **Always pass `--quiet` to every `spar`/`spar exec` invocation** you
+   drive from here on. `--quiet` suppresses the verbose per-turn model
+   output on *this* session's stdout; spar's own status/gate/error lines
+   still print (you still need those to drive the loop), and
+   `.spar/live.log` still gets everything regardless of `--quiet` — that's
+   what the `spar watch` window is tailing.
+3. `spar watch [--from-start]` can also be run standalone (e.g. by the
+   human directly) — it tolerates `.spar/live.log` not existing yet (waits
+   for it) and being truncated by a fresh run (reopens from 0), and exits
+   cleanly (rc 0) on Ctrl+C.
+
+Transcripts under `.spar/transcript/` remain the authoritative record of a
+run; `live.log`/`spar watch` are a convenience live view only, not durable
+(each CLI invocation, including a `--continue` resume, truncates
+`live.log` fresh — see `spar/stream.py`).
 
 ## The two phases
 
@@ -163,28 +194,31 @@ assigned to build code.
 
 ## The canonical driving loop
 
+0. **Open the live view once, at session start:** `spar ui` (see Live
+   output above) — tell the human what the window is. From here on, always
+   pass `--quiet` to `spar`/`spar exec`.
 1. **Grill requirements with the human.** Use your normal requirements
    process (e.g. a grilling skill) to turn a request into a concrete task
    description. Write it to a file, e.g. `requirements.md`.
 2. **Start the debate:**
    ```bash
-   spar --task-file requirements.md --sides claude,codex --first claude --tasks --headless
+   spar --task-file requirements.md --sides claude,codex --first claude --tasks --headless --quiet
    ```
    This exits **10** at the first gate (`consensus` or `rounds_exhausted`).
    Read `spar status --json`, inspect `pending_gate`, decide or relay the
    decision to the human, then:
    ```bash
-   spar --continue --headless --gate accept   # or remarks:<file> / abort
+   spar --continue --headless --quiet --gate accept   # or remarks:<file> / abort
    ```
    Repeat until the debate phase exits 0 (Plan agreed) or a terminal
    non-zero code (see Failure surfacing).
 3. **Start execution:**
    ```bash
-   spar exec --headless --sides claude,codex --first claude
+   spar exec --headless --sides claude,codex --first claude --quiet
    ```
    On every exit **10**: `spar status --json` → decide/relay → resume:
    ```bash
-   spar exec --continue --headless --gate accept   # or extend:<n> / abort
+   spar exec --continue --headless --quiet --gate accept   # or extend:<n> / abort
    ```
 4. **On exit 0:** report the final-merge summary to the human (the gate's
    `context.summary` field, captured from the `pending_gate` context just
