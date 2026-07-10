@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QMainWindow,
     QSplitter,
     QStatusBar,
@@ -25,7 +26,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from spar.gui import toolbar as toolbar_mod
+from spar.gui.runner import RunnerState, SparRunner
 from spar.gui.theme import build_qss
+from spar.status import build_status
 
 __all__ = ["MainWindow", "Toolbar", "StreamPane", "SidePane", "main_gui"]
 
@@ -91,6 +95,47 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("spar", "gui")
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
+
+        # Process pilot: owns the spar QProcess for this project_dir.
+        self.runner = SparRunner(self.project_dir, self)
+        self.runner.started.connect(self._on_started)
+        self.runner.finished.connect(self._on_finished)
+        self.runner.state_changed.connect(self._on_state_changed)
+        self._wire_toolbar()
+        self._sync_toolbar()
+
+    # ------------------------------------------------------------------
+    # Runner wiring
+    # ------------------------------------------------------------------
+    def _wire_toolbar(self) -> None:
+        actions = self.toolbar.actions_by_label
+        actions[toolbar_mod.NEW_DEBATE].triggered.connect(self._on_new_debate)
+        actions[toolbar_mod.START_EXEC].triggered.connect(self.runner.start_exec)
+        actions[toolbar_mod.RESUME].triggered.connect(lambda: self.runner.resume(None))
+        actions[toolbar_mod.STOP].triggered.connect(self.runner.stop)
+
+    def _current_status(self) -> dict:
+        try:
+            return build_status(self.project_dir / ".spar")
+        except Exception:
+            return {"phase": None, "pending_gate": None, "tasks": {}, "artifact": None}
+
+    def _sync_toolbar(self) -> None:
+        self._on_state_changed(self.runner.current_state())
+
+    def _on_state_changed(self, state: RunnerState) -> None:
+        toolbar_mod.apply_state(self.toolbar, state, self._current_status())
+
+    def _on_started(self, cmd: str) -> None:
+        self.statusBar().showMessage(f"uruchomiono: {cmd}")
+
+    def _on_finished(self, exit_code: int) -> None:
+        self.statusBar().showMessage(f"zakończono (exit {exit_code})")
+
+    def _on_new_debate(self) -> None:
+        dialog = toolbar_mod.NewDebateDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.runner.start_debate(**dialog.values())
 
     def _restore_splitter_state(self) -> None:
         state = self._settings.value("mainSplitter/state")

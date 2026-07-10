@@ -34,13 +34,16 @@ class TestMainWindow:
 
         assert "my-project" in window.windowTitle()
 
-    def test_toolbar_placeholder_buttons_are_disabled(self, qtbot, tmp_path):
+    def test_toolbar_wired_for_idle_dir(self, qtbot, tmp_path):
+        # A fresh dir derives IDLE: only "Nowa debata…" is enabled; the
+        # unwired read-only views ("Plan"/"Diff") stay disabled.
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)
 
-        for label in _TOOLBAR_LABELS:
-            action = window.toolbar.actions_by_label[label]
-            assert action.isEnabled() is False
+        actions = window.toolbar.actions_by_label
+        assert actions["Nowa debata…"].isEnabled() is True
+        for label in ["Start exec", "Wznów", "Stop", "Plan", "Diff"]:
+            assert actions[label].isEnabled() is False
 
     def test_splitter_ratio_is_wider_left_than_right(self, qtbot, tmp_path):
         window = MainWindow(tmp_path)
