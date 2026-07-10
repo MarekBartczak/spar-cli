@@ -10,6 +10,7 @@ Two layers:
 
 from __future__ import annotations
 
+import gc
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -373,7 +374,10 @@ def make_session(qtbot):
 
     for sess in created:
         sess.stop()
-        sess._thread.wait(3000)
+        try:
+            sess._thread.wait(3000)
+        except RuntimeError:
+            pass  # already reaped: stop() saw it finish and deleteLater()'d it
 
 
 @pytest.mark.skipif(not _HAS_QT, reason="requires PySide6")
@@ -555,6 +559,59 @@ class TestGrillSession:
         assert chunks == []
         assert finishes == []
         assert req_ready == []
+
+    def test_stop_then_gc_mid_turn_does_not_kill_the_running_thread(
+        self, tmp_path, qtbot
+    ):
+        """stop() while run_turn is blocked, then drop every Python ref.
+
+        The session (and dialog) can be destroyed the instant stop() returns
+        -- e.g. the user closes the dialog mid-turn. The worker QThread must
+        survive that (retained in ``_ABANDONED_THREADS``) until the blocked
+        ``run_turn`` actually returns; only then may it be torn down. If it
+        were destroyed early, Qt aborts the whole process with a qFatal.
+        """
+        from spar.gui import grill as grill_module
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking(prompt, sid, on_event):
+            started.set()
+            release.wait(5)
+            return TurnResult(
+                session_id="s1",
+                reply_text="A. foo\nB. bar",
+                events_path=Path("events.json"),
+                exit_code=0,
+            )
+
+        adapter = FakeAdapter([blocking])
+        side_cfg = SideConfig(adapter="claude", command="claude")
+        sess = GrillSession(
+            tmp_path, side_cfg, 60, adapter_factory=lambda: adapter
+        )
+        thread = sess._thread
+
+        sess.start("draft")
+        qtbot.waitUntil(started.is_set, timeout=3000)
+        sess.stop()  # mid-turn: the thread cannot quit() yet
+
+        assert thread in grill_module._ABANDONED_THREADS
+
+        # The dialog/session is gone, but the thread must not be.
+        del sess
+        gc.collect()
+        qtbot.wait(50)  # pump the GUI event loop; must not crash the process
+
+        assert thread.isRunning()
+
+        release.set()  # let the blocked run_turn return
+        # The thread is deleteLater()'d as soon as it finishes, so poll the
+        # retain-set rather than the (possibly-already-deleted) QThread.
+        qtbot.waitUntil(
+            lambda: thread not in grill_module._ABANDONED_THREADS, timeout=3000
+        )
 
     def test_default_adapter_factory_builds_claude_adapter(self, tmp_path, qtbot):
         side_cfg = SideConfig(

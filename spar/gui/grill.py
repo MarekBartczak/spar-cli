@@ -115,6 +115,16 @@ if _HAS_QT:
 
     _REQ_RELPATH = Path(".spar") / "requirements.md"
 
+    # Threads abandoned by GrillSession.stop() while a turn is still blocked
+    # inside run_turn (a claude subprocess). The GrillSession itself may be
+    # destroyed right after stop() returns, but the OS thread cannot be
+    # forced to exit until run_turn returns -- Qt aborts the process
+    # (qFatal) if a QThread is destroyed while still running. Holding a
+    # strong module-level reference here keeps the QThread (and its worker)
+    # alive until it genuinely finishes, at which point a `finished`-
+    # connected callback tears it down and discards it from this set.
+    _ABANDONED_THREADS: set[QThread] = set()
+
     def _content_hash(path: Path) -> Optional[str]:
         """SHA-256 of ``path``'s bytes, or ``None`` when it does not exist."""
         try:
@@ -284,9 +294,37 @@ if _HAS_QT:
             Incrementing the generation on the GUI thread drops any in-flight
             turn's late signals (stream chunks included). The worker thread
             quits after the current turn returns.
+
+            ``quit()`` cannot take effect while the worker is blocked inside
+            ``run_turn`` (a claude subprocess, up to ``turn_timeout_sec``).
+            If ``self`` were garbage-collected in that window, whatever
+            still held ``self._thread`` would go with it -- and Qt aborts
+            the whole process if a running QThread is destroyed. So the
+            thread (and its worker) are handed off to a module-level
+            retain-set that keeps them alive until the in-flight turn
+            actually returns and the thread's own ``finished`` signal fires;
+            only then are they released and discarded.
             """
             self._generation += 1
-            self._thread.quit()
+            thread = self._thread
+            try:
+                if thread.isRunning():
+                    # self._worker's own deleteLater is already wired to
+                    # thread.finished (in __init__); only the thread itself
+                    # and the retain-set entry need cleaning up here.
+                    _ABANDONED_THREADS.add(thread)
+
+                    def _release(thread=thread) -> None:
+                        thread.deleteLater()
+                        _ABANDONED_THREADS.discard(thread)
+
+                    thread.finished.connect(_release)
+                thread.quit()
+            except RuntimeError:
+                # A previous stop() already saw the thread finish and hand
+                # it off for deletion (the underlying C++ QThread is gone);
+                # stop() must stay idempotent/safe to call again.
+                pass
 
         # -- worker → facade (GUI thread; generation-filtered) ------------
         def _on_chunk(self, generation: int, text: str) -> None:
