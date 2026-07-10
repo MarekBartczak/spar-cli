@@ -204,3 +204,19 @@ Known v1 trade-offs: each CLI invocation truncates live.log; codex `exec:`
 display shapes inferred (display-only); Warp auto-spawn falls back to a
 printed instruction.
 
+
+## Stalled per-task-test loop → user gate (2026-07-11, `b001147`)
+Live finding (spar_test_2 t1): plan generated `test=python -m py_compile` but
+system only has `python3` → exit 127 forever; implementer correctly answered
+"Unchanged", reviewer DONE'd, and `_test_and_merge_task` looped test→implement
+with NO cap. Fix: no-progress guard mirroring the review anti-spin — a failing
+iteration counts as progress only if the implementer made changes or the task
+branch tip moved; after 2 consecutive no-change failing iterations the run
+escalates to the existing review_rounds user gate (accept = merge DESPITE the
+failing test, loud log; extend:N = fresh budget; abort = exit 5). Gate context
+carries the failing test output (truncated 2000 chars) interactively and in
+the headless pending-gate. Suite 699 passed. The stuck run was unblocked by
+rewriting `python `→`python3 ` in `.spar/exec.json` task tests + artifact.md.
+Backlog minor: headless resume-accept on THIS stall pends via task status
+`review`, so accept re-runs the (still failing) test instead of merging on
+override — full override needs a small ExecState flag.
