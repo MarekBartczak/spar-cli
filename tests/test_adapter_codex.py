@@ -238,6 +238,67 @@ def test_session_id_absent_yields_none(tmp_path, monkeypatch):
     assert result.session_id is None
 
 
+# --- live streaming (on_event) -------------------------------------------
+
+
+def test_on_event_streams_agent_message_and_done(tmp_path, monkeypatch):
+    # The default codex JSONL fake emits thread.started, turn.started, a noise
+    # line, an item.completed agent_message, and turn.completed. Display lines
+    # come only from the agent message and the terminal turn.completed.
+    events: list[str] = []
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn(
+        "hello", session_id=None, timeout_sec=5, on_event=events.append
+    )
+
+    assert events == ["fake final reply", "done"]
+    # reply/session logic is untouched: reply comes from the last-message file.
+    assert result.reply_text == "fake final reply"
+    assert result.session_id == "fake-codex-session-1"
+
+
+def test_on_event_emits_exec_line_for_command_item(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_CODEX_STDOUT",
+        "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "t-1"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "c0",
+                            "type": "command_execution",
+                            "command": "pytest -q",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "m0", "type": "agent_message", "text": "hi"},
+                    }
+                ),
+                json.dumps({"type": "turn.completed"}),
+            ]
+        )
+        + "\n",
+    )
+
+    events: list[str] = []
+    adapter = make_adapter(tmp_path)
+    adapter.run_turn("go", session_id=None, timeout_sec=5, on_event=events.append)
+
+    assert events == ["exec: pytest -q", "hi", "done"]
+
+
+def test_on_event_none_is_behaviorally_identical(tmp_path, monkeypatch):
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn("hello", session_id=None, timeout_sec=5)
+    assert result.reply_text == "fake final reply"
+    assert result.session_id == "fake-codex-session-1"
+
+
 # --- error handling --------------------------------------------------------
 
 

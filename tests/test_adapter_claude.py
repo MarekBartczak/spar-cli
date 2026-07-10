@@ -45,7 +45,9 @@ def test_new_session_argv_contract(tmp_path, monkeypatch):
         FAKE_CLAUDE,
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--allowedTools",
         "Read,Edit,Write,Bash,Grep,Glob",
         "--permission-mode",
@@ -68,7 +70,9 @@ def test_resume_argv_contract(tmp_path, monkeypatch):
         "--resume",
         "sess-42",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--allowedTools",
         "Read,Edit,Write,Bash,Grep,Glob",
         "--permission-mode",
@@ -89,7 +93,9 @@ def test_model_flag_included_when_set_new_session(tmp_path, monkeypatch):
         FAKE_CLAUDE,
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--allowedTools",
         "Read,Edit,Write,Bash,Grep,Glob",
         "--permission-mode",
@@ -114,7 +120,9 @@ def test_model_flag_included_when_set_resume(tmp_path, monkeypatch):
         "--resume",
         "sess-1",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--allowedTools",
         "Read,Edit,Write,Bash,Grep,Glob",
         "--permission-mode",
@@ -153,10 +161,13 @@ def test_happy_path_extracts_session_and_reply(tmp_path, monkeypatch):
     assert result.reply_text == "the reply text"
     assert result.exit_code == 0
     assert result.events_path.exists()
-    assert json.loads(result.events_path.read_text()) == {
-        "session_id": "abc-123",
-        "result": "the reply text",
-    }
+    # Transcript is now the stream-json JSONL, not a single JSON document.
+    # session_id and reply come from the terminal ``result`` event.
+    lines = [ln for ln in result.events_path.read_text().splitlines() if ln.strip()]
+    terminal = json.loads(lines[-1])
+    assert terminal["type"] == "result"
+    assert terminal["result"] == "the reply text"
+    assert terminal["session_id"] == "abc-123"
 
 
 def test_events_file_naming(tmp_path):
@@ -166,6 +177,55 @@ def test_events_file_naming(tmp_path):
     assert result.events_path.parent == tmp_path / "events"
     assert result.events_path.name.startswith("claude-left-")
     assert result.events_path.name.endswith(".json")
+
+
+# --- live streaming (on_event) -------------------------------------------
+
+
+def test_on_event_streams_display_lines_and_extracts_result(tmp_path, monkeypatch):
+    # Drive the fake into stream-json mode: a tool_use content_block_start,
+    # a text_delta chunk, and a terminal result event with duration_ms.
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STDOUT",
+        json.dumps({"session_id": "sid-9", "result": "hello world"}),
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_STREAM_TOOL", "Edit")
+    monkeypatch.setenv("FAKE_CLAUDE_DURATION_MS", "1234")
+
+    events: list[str] = []
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn(
+        "hello", session_id=None, timeout_sec=5, on_event=events.append
+    )
+
+    assert events == ["tool: Edit", "hello world", "done (1.2s)"]
+    assert result.session_id == "sid-9"
+    assert result.reply_text == "hello world"
+
+
+def test_on_event_none_is_behaviorally_identical(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STDOUT",
+        json.dumps({"session_id": "sid-0", "result": "no callback"}),
+    )
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn("hi", session_id=None, timeout_sec=5)
+    assert result.session_id == "sid-0"
+    assert result.reply_text == "no callback"
+
+
+def test_callback_exception_does_not_kill_turn(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_STDOUT",
+        json.dumps({"session_id": "sid-x", "result": "still works"}),
+    )
+
+    def boom(line: str) -> None:
+        raise RuntimeError("nope")
+
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn("hi", session_id=None, timeout_sec=5, on_event=boom)
+    assert result.reply_text == "still works"
 
 
 # --- error handling --------------------------------------------------------
@@ -246,7 +306,9 @@ def test_readonly_adapter_drops_edit_tools(tmp_path, monkeypatch):
         FAKE_CLAUDE,
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--allowedTools",
         "Read",
         "review this",

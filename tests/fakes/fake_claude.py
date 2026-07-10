@@ -12,6 +12,34 @@ it, driven entirely by environment variables:
 - ``FAKE_CLAUDE_SLEEP``: seconds to sleep before producing output. Used to
   simulate a hang for timeout tests.
 
+Stream-json mode
+----------------
+
+When the argv carries ``--output-format stream-json`` (the real adapter's
+streaming switch), this script emits the real stream-json JSONL shapes
+instead of a single JSON document. It takes the "reply document" (from
+``FAKE_CLAUDE_STDOUT`` or the scripted ``<n>.json`` file), and if it parses
+as a JSON object, re-emits it as:
+
+  - (optional) a ``content_block_start`` event for a ``tool_use`` block when
+    ``FAKE_CLAUDE_STREAM_TOOL`` names a tool;
+  - a ``content_block_delta`` ``text_delta`` carrying the ``result`` text;
+  - a terminal ``{"type":"result", ...}`` event carrying ``result`` and
+    ``session_id`` (and ``duration_ms`` from ``FAKE_CLAUDE_DURATION_MS`` or
+    the reply document, if present).
+
+This lets every existing scripted ``<n>.json`` reply keep working unchanged:
+the adapter reads ``result``/``session_id`` from the terminal event exactly
+as it used to read them from the single JSON document. A reply document that
+is NOT valid JSON (malformed-output tests) is emitted verbatim so the adapter
+still sees no terminal ``result`` event. When the argv does not request
+stream-json, the reply document is emitted verbatim (legacy ``json`` mode).
+
+- ``FAKE_CLAUDE_STREAM_TOOL``: if set, emit a ``tool_use`` content_block_start
+  with this name before the text delta (stream-json mode only).
+- ``FAKE_CLAUDE_DURATION_MS``: if set, put this ``duration_ms`` on the
+  terminal result event (stream-json mode only).
+
 Scripted multi-turn mode (for end-to-end debate tests)
 --------------------------------------------------------
 
@@ -100,6 +128,62 @@ def _run_scripted(script_dir: Path, argv: list[str]) -> str | None:
     return None
 
 
+def _is_stream_json(argv: list[str]) -> bool:
+    """True when the argv requests ``--output-format stream-json``."""
+    try:
+        idx = argv.index("--output-format")
+    except ValueError:
+        return False
+    return idx + 1 < len(argv) and argv[idx + 1] == "stream-json"
+
+
+def _emit_stream(doc: dict) -> str:
+    """Re-emit a reply document as real stream-json JSONL."""
+    lines: list[str] = []
+
+    tool = os.environ.get("FAKE_CLAUDE_STREAM_TOOL")
+    if tool:
+        lines.append(
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_start",
+                        "content_block": {"type": "tool_use", "name": tool},
+                    },
+                }
+            )
+        )
+
+    result_text = doc.get("result")
+    if isinstance(result_text, str) and result_text:
+        lines.append(
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": result_text},
+                    },
+                }
+            )
+        )
+
+    result_event: dict = {"type": "result"}
+    if "result" in doc:
+        result_event["result"] = doc["result"]
+    if "session_id" in doc:
+        result_event["session_id"] = doc["session_id"]
+    duration_ms = os.environ.get("FAKE_CLAUDE_DURATION_MS")
+    if duration_ms:
+        result_event["duration_ms"] = int(duration_ms)
+    elif "duration_ms" in doc:
+        result_event["duration_ms"] = doc["duration_ms"]
+    lines.append(json.dumps(result_event))
+
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     args_file = os.environ.get("FAKE_CLAUDE_ARGS_FILE")
     if args_file:
@@ -117,6 +201,14 @@ def main() -> int:
         scripted_stdout = _run_scripted(Path(script_dir), sys.argv)
         if scripted_stdout is not None:
             stdout = scripted_stdout
+
+    if _is_stream_json(sys.argv):
+        try:
+            doc = json.loads(stdout)
+        except (json.JSONDecodeError, ValueError):
+            doc = None
+        if isinstance(doc, dict):
+            stdout = _emit_stream(doc)
 
     sys.stdout.write(stdout)
 
