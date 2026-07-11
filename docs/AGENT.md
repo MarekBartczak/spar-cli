@@ -183,7 +183,7 @@ Always call `spar status --json` immediately after any exit-10 run to read
 | Code | Meaning |
 |------|---------|
 | 0 | Run completed: debate accepted, or execution merged and reported. |
-| 2 | Config/usage error (bad flags, missing/invalid config, mismatched `--gate` for the pending gate, no plan/tasks found for `spar exec`). |
+| 2 | Config/usage error (bad flags, missing/invalid config, mismatched `--gate` for the pending gate, no plan/tasks found for `spar exec`, or a fresh `spar exec` preflight refusal: a task `test=` command names a tool missing from `PATH` — fix the command in the plan, or the tool on the host, before retrying). |
 | 3 | Lock/state error (another instance running, missing or corrupted `.spar/session.json` or `.spar/exec` state, e.g. `--continue` with no prior run). |
 | 4 | Protocol/adapter abort (guard rejected an out-of-contract change, verdict/task-list parsing failed, adapter/session error, merge conflict). |
 | 5 | User abort (a gate was resolved with `--gate abort`). |

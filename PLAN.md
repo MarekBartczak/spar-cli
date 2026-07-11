@@ -1,3 +1,7 @@
+> **Dokument historyczny** (v2, sprzed pivotu ADR 0003). Aktualne decyzje
+> architektoniczne żyją w `docs/adr/`; aktualny opis narzędzia w `README.md`.
+> Zachowany jako zapis pierwotnego projektu protokołu debaty/egzekucji.
+
 # spar — plan projektu (v2, po rundzie recenzji Codex)
 
 Narzędzie CLI orkiestrujące debatę dwóch agentów AI (Claude Code + Codex CLI) nad wspólnym artefaktem (plan projektu, spec, architektura, review). Agenci naprzemiennie edytują i krytykują artefakt aż do konsensusu; ostatecznym arbitrem jest użytkownik.

@@ -4,7 +4,14 @@ Date: 2026-07-09
 
 ## Status
 
-Accepted
+Accepted.
+
+Implementation: agent mode implemented 2026-07-09 (`1746825..24a6137`:
+`--headless` exit-10 gates, `--gate`, `--task-file`, `spar status --json`,
+`docs/AGENT.md`, `skills/spar/SKILL.md`); live headless smoke test PASSED
+2026-07-09 (see docs/HANDOFF.md). Amended by
+[0004](0004-gui-dashboard-pilot-with-grill-module.md) (this ADR stays in
+force for the engine).
 
 ## Context
 

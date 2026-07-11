@@ -7,6 +7,13 @@ Date: 2026-07-10
 Accepted. Amends [0003](0003-spar-as-agent-operated-engine.md) (which stays
 in force for the ENGINE: spar's core remains agent-operable and UI-free).
 
+Implementation: dashboard-pilot GUI implemented 2026-07-10
+(`26541d7..bb7d379`), grill module (GrillPane) 2026-07-10
+(`ff65e18..f35fb8b`); validated live by the fresh-project E2E and the
+GUI-piloted full runs of 2026-07-10 (see docs/HANDOFF.md). Amended by
+[0005](0005-conversation-modules-and-tool-window-rails.md) (rails +
+orchestrator chat).
+
 ## Context
 
 ADR 0003 dropped the TUI and in-engine grill on the grounds that the host

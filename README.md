@@ -104,7 +104,7 @@ the raw, complete event streams are always persisted per turn in
 For driving spar yourself with a GUI instead of a terminal:
 
 ```bash
-pip install -e ".[gui]"   # or: pip install "spar-cli[gui]"
+pip install -e ".[gui]"   # the [gui] extra (PySide6 + pygments)
 spar gui                  # operates on the current directory
 spar gui --dir PATH       # operate on a different project directory
 ```
@@ -112,7 +112,10 @@ spar gui --dir PATH       # operate on a different project directory
 It shows a live stream pane (the same feed as `spar watch`), a task board,
 a gate panel that lights up with the right buttons for whichever gate is
 pending (consensus `Accept` auto-starts execution; `final_merge` always
-requires an explicit manual confirmation), a toolbar for the run lifecycle
+requires an explicit manual confirmation; test escalations add a
+**Popraw komendę…** button — the GUI form of the `fix:<command>` gate
+decision, replacing a broken per-task test command and re-running it),
+a toolbar for the run lifecycle
 (New debate / Start exec / Resume / Stop), and Plan/Diff viewers. It is a
 **solo pilot**: one person clicks through gates for one run, same as
 running spar interactively in a terminal — it does not add multi-user or
@@ -196,7 +199,7 @@ match (wrapping around), all matches are highlighted, and **Zamień** /
 **Zamień wszystko** replace (disabled while the editor is read-only). **Esc**
 closes the bar.
 
-<!-- TODO: screenshot docs/img/gui-files.png po manualnym smoke -->
+![spar gui — widok Pliki z edytorem, taskami i czatem orkiestratora](docs/img/gui-files.png)
 
 Docked under the task board is the **orchestrator chat** — a persistent,
 **read-only advisor** (chat bubbles, lettered options as buttons, free-text
@@ -215,7 +218,7 @@ szkicem"** button appears (enabled when the engine is free) and opens the
 new-debate form pre-filled with the draft. Flow:
 `pytanie → czat (advisor) → szkic w bloku ```zadanie``` → „Nowa debata z tym szkicem" → prefilled formularz`.
 
-<!-- TODO: screenshot gui-chat.png po manualnym smoke -->
+(Czat orkiestratora widać w prawej kolumnie zrzutu widoku Pliki powyżej.)
 
 ## Agent mode (headless)
 

@@ -9,8 +9,9 @@ Accepted. Amends [0004](0004-gui-dashboard-pilot-with-grill-module.md)
 module and settles the main-window layout).
 
 Implementation: implemented 2026-07-11 (`c3a7710..9428be8`) in
-`spar/gui/{conversation,orchestrator,rails,chat_store}.py`; left-rail
-Pliki/Git remain future tranches.
+`spar/gui/{conversation,orchestrator,rails,chat_store}.py`. The left-rail
+Pliki module shipped via [0006](0006-files-module-editor-and-search.md)
+(tranches A+B, 2026-07-11); the git module remains a future tranche.
 
 ## Context
 

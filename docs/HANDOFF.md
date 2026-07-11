@@ -32,7 +32,7 @@ the tranche's new tests, no failures/regressions. Deferred tranche B (find-in-fi
 replace-in-files, Ctrl+F) and the git module. README screenshot TODO at
 `docs/img/gui-files.png`.
 
-## Files module tranche B (2026-07-11, `f5b6d1c..7da824d` + docs)
+## Files module tranche B (2026-07-11, `f5b6d1c..627eb2d`)
 
 Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-module-tranche-b.md`,
 43 challenge findings over 13 rounds): find-in-files, replace-in-files and the
@@ -81,8 +81,8 @@ session end-to-end in the running GUI) still pending.
 
 ## Where things are
 
-- Repo: `github.com/MarekBartczak/spar-cli`, branch **master**, latest `442d5fc`.
-- Suite: **311 passed, 2 skipped** (`python3 -m pytest -q`).
+- Repo: `github.com/MarekBartczak/spar-cli`, branch **master** (see `git log` for latest).
+- Suite: **1006 passed, 2 skipped** as of 2026-07-11 (`.venv/bin/python -m pytest tests/ -q`).
 - venv with `spar` editable: `/home/marek/P_PROJ/ai_fight/.venv/bin/spar`.
 - SDD ledger: `.superpowers/sdd/progress.md` (gitignored).
 - Blocker A design + 6-round challenge history:
