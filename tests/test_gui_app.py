@@ -399,6 +399,10 @@ class TestTheme:
         assert "#filesReadOnlyBanner" in qss
         assert "#diskBanner" in qss
         assert "#fileFinder" in qss
+        assert "#searchPanel" in qss
+        assert "#searchToggle" in qss
+        assert "#searchResults" in qss
+        assert "#editorFindBar" in qss
 
 
 def test_side_models_prefer_debate_model(tmp_path, monkeypatch):

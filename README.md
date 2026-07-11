@@ -173,6 +173,29 @@ you do, so nothing is silently clobbered).
 **Double Shift** opens a fuzzy file finder overlay — type part of a path,
 Enter (or double-click) opens it in the Pliki view, Esc closes.
 
+**Find in files (Ctrl+Shift+F).** Opens a search dock at the bottom of the
+Pliki view: type a query, toggle **Aa** (case), **.*** (regex) or **W**
+(whole word); results group as file → matching lines with a per-file count,
+and clicking a line opens the file at that match. Search runs off the UI
+thread and a new query cancels the previous one (ripgrep, when on PATH,
+accelerates only case-sensitive literal non-whole-word searches; every
+other search — case-insensitive, whole-word or regex — uses the built-in
+Python scan). **Replace in files:** fill the *Zamień na…* field, keep the
+files you want checked (all checked by default) and press **Zamień
+zaznaczone**. A checked file is skipped and reported (`pominięto N`) when
+it has unsaved edits in an open tab (niezapisane zmiany), changed on disk
+since the search (plik zmienił się), is not valid UTF-8 (nie-UTF-8), is a
+symlink pointing outside the project (dowiązanie poza projektem), or its
+write fails (błąd zapisu); every other checked file is rewritten on disk
+and any open clean tab auto-reloads. Replace is disabled while a run is
+live (read-only matrix); search stays available.
+
+**Find in the editor (Ctrl+F).** Opens a find/replace bar in the current
+tab, prefilled with the selection: **F3 / Shift+F3** jump to the next/previous
+match (wrapping around), all matches are highlighted, and **Zamień** /
+**Zamień wszystko** replace (disabled while the editor is read-only). **Esc**
+closes the bar.
+
 <!-- TODO: screenshot docs/img/gui-files.png po manualnym smoke -->
 
 Docked under the task board is the **orchestrator chat** — a persistent,

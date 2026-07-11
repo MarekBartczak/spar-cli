@@ -32,6 +32,39 @@ the tranche's new tests, no failures/regressions. Deferred tranche B (find-in-fi
 replace-in-files, Ctrl+F) and the git module. README screenshot TODO at
 `docs/img/gui-files.png`.
 
+## Files module tranche B (2026-07-11, `f5b6d1c..7da824d` + docs)
+
+Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-module-tranche-b.md`,
+43 challenge findings over 13 rounds): find-in-files, replace-in-files and the
+editor find bar land in `spar/gui/files.py`. Commits: `f5b6d1c` (pure
+search/replace engine: `SearchSpec`/`SearchMatch`, literal/regex/case/whole-word,
+`passes_search_guards` binary+size guards, per-line `replace_in_text` skipping
+zero-width matches), `fa3db6c` (optional ripgrep accelerator — gated by
+`is_rg_compatible` to case-sensitive literal non-whole-word specs, explicit
+file list from `build_file_index` batched by an argv byte budget, `--json
+--text` streaming parse with kill-on-supersede and a pre-launch fingerprint
+snapshot, python fallback on any failure, parity tests), `190db5c`
+(cancellable `SearchSession` facade + `_SearchWorker` on a persistent
+`QThread` with generation-token cancellation, and the `SearchPanel` dock:
+Ctrl+Shift+F, Aa/.*/W toggles, file→line results tree with per-file counts,
+status "szukam…" / "N wyników w M plikach" / truncation notice), `f379cb6`
+(replace-in-files: per-file checkboxes default-checked, "Zamień zaznaczone",
+atomic mode-preserving writes on resolved symlink targets, skip classes
+niezapisane zmiany / plik zmienił się (mtime+size fingerprint) / nie-UTF-8 /
+dowiązanie poza projektem / błąd zapisu reported as `pominięto N`, replace
+disabled under the read-only matrix and while a search is in flight, auto
+re-run after replace), `3c66f03` (`EditorFindBar`: Ctrl+F with selection
+prefill, F3/Shift+F3 next/prev with wrap, highlight-all via ExtraSelections,
+Zamień / Zamień wszystko honouring read-only, Esc closes), `7da824d` (wiring:
+`FilesView` vertical splitter hosting the dock, new QSettings key
+`files/search_split`, worker-thread teardown on view/window close). New QSS
+object names themed from `TOKENS` in `spar/gui/theme.py`: `#searchPanel`,
+`#searchQuery` (+ `[invalid="true"]`), `#replaceField`, `#findField`,
+`#findReplaceField`, `#searchToggle`, `#searchResults`, `#searchStatus`,
+`#editorFindBar`, `#replaceButton`. Test baseline 1006 passed, 2 skipped —
+baseline + tranche-B tests, no regressions. The git module remains the last
+pending left-rail tranche.
+
 ## GrillPane implemented (2026-07-10, `ff65e18..f35fb8b`)
 
 Per ADR 0004 and the plan (`docs/superpowers/plans/2026-07-10-grill-pane.md`,

@@ -132,4 +132,49 @@ def build_qss() -> str:
         background-color: {t['panel']};
         color: {t['text']};
     }}
+
+    #searchPanel {{
+        background-color: {t['panel']};
+        border-top: 1px solid {t['line']};
+    }}
+    #searchQuery, #replaceField, #findField, #findReplaceField {{
+        background-color: {t['panel-alt']};
+        color: {t['text']};
+        border: 1px solid {t['line']};
+        border-radius: 4px;
+        padding: 2px 6px;
+    }}
+    #searchQuery[invalid="true"] {{
+        border: 1px solid {t['gate']};
+    }}
+    #searchToggle {{
+        color: {t['text']};
+        background-color: {t['panel']};
+        border: 1px solid {t['line']};
+        border-radius: 4px;
+        padding: 2px 6px;
+    }}
+    #searchToggle:checked {{
+        background-color: {t['panel-alt']};
+        border: 1px solid {t['claude']};
+    }}
+    #searchResults {{
+        background-color: {t['panel']};
+        color: {t['text']};
+        border: none;
+    }}
+    #searchStatus {{
+        color: {t['muted']};
+    }}
+    #editorFindBar {{
+        background-color: {t['panel-alt']};
+        border-bottom: 1px solid {t['line']};
+    }}
+    #replaceButton {{
+        color: {t['text']};
+        background-color: {t['panel']};
+        border: 1px solid {t['line']};
+        border-radius: 4px;
+        padding: 2px 8px;
+    }}
     """

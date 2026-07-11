@@ -10,7 +10,10 @@ left rail's first real module and the centre-area model).
 
 Tranche A implemented 2026-07-11 (view switch, Pygments editor,
 save/dirty, read-only matrix + auto-reload, double-Shift finder). Tranche B
-(find/replace in files, Ctrl+F) and the git module remain pending.
+implemented 2026-07-11 (find-in-files Ctrl+Shift+F with ripgrep-accelerated
+cancellable search, replace-in-files honouring the read-only matrix and
+unsaved-tab safety, Ctrl+F in the editor). The git module remains the last
+pending left-rail tranche.
 
 ## Context
 
