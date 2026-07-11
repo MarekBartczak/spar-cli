@@ -297,10 +297,23 @@ if _HAS_QT:
         def _build_ui(self) -> None:
             layout = QVBoxLayout(self)
 
+            header_row = QHBoxLayout()
             self.header = QLabel("", self)
             self.header.setObjectName("orchestratorHeader")
             self.header.setStyleSheet(f"color: {TOKENS['muted']};")
-            layout.addWidget(self.header)
+            header_row.addWidget(self.header, stretch=1)
+
+            # Escape hatch (live smoke): drop the persisted session + transcript
+            # and start over — the next send builds a FRESH session carrying the
+            # CURRENT opening prompt.
+            self.clear_button = QPushButton("Wyczyść", self)
+            self.clear_button.setObjectName("clearChatButton")
+            self.clear_button.setStyleSheet(
+                f"color: {TOKENS['muted']}; padding: 1px 8px;"
+            )
+            self.clear_button.clicked.connect(self._on_clear_clicked)
+            header_row.addWidget(self.clear_button)
+            layout.addLayout(header_row)
 
             self.banner = QLabel("run w toku — tylko odczyt", self)
             self.banner.setObjectName("orchestratorBanner")
@@ -639,6 +652,45 @@ if _HAS_QT:
             self._append_notice("⚠ sesja utracona — następna wiadomość rozpocznie nową")
             self._set_in_flight(False)
             self._render_transcript()
+
+        # -- clear (Wyczyść) -------------------------------------------------------
+        def _on_clear_clicked(self) -> None:
+            """Discard the whole conversation and start over on demand.
+
+            Live smoke: a persisted session resumed across GUI restarts keeps
+            carrying the OPENING_PROMPT it was opened with — after a prompt
+            change the user was stuck with the old behavior. Clearing stops the
+            session (idempotent; a mid-turn thread is retained by stop()'s
+            abandon path), deletes .spar/chat.json, wipes the transcript and
+            option/handoff widgets, resets every delivery flag, and DROPS the
+            session object so the next send lazily builds a FRESH one
+            (reset=True, carrying the CURRENT opening prompt).
+            """
+            if self._session is not None:
+                self._session.stop()
+            self._session = None
+            self._initial_session_id = None
+            discard_chat(self._chat_path)
+            # Transcript + widgets.
+            self._bubbles = []
+            self._streaming_segments = []
+            self.transcript.clear()
+            self._clear_options()
+            self._draft = None
+            self.handoff_button.setVisible(False)
+            # Delivery / lifecycle flags — a brand-new panel over an empty
+            # .spar/chat.json.
+            self._opening_sent = False
+            self._injected_gate_key = None
+            self._pending_opening = False
+            self._pending_gate_key = None
+            self._session_lost = False
+            self._turn_count = 0
+            self.set_header(self._model, self._turn_count)
+            self._update_banner()
+            # A clear mid-turn must re-enable input (the old turn's late
+            # signals are suppressed by stop()'s generation bump).
+            self._set_in_flight(False)
 
         # -- lifecycle ------------------------------------------------------------
         def stop_session(self) -> None:

@@ -161,7 +161,10 @@ Docked under the task board is the **orchestrator chat** — a persistent,
 always available). It reads the repo and `.spar/` state but never edits
 files, never holds the run lock, and **never makes gate decisions** — the
 gate panel stays the only pilot. The conversation persists across GUI
-restarts via `.spar/chat.json`. During a live run the chat shows a
+restarts via `.spar/chat.json`; the **Wyczyść** button in the chat header
+drops it on demand and the next message starts a fresh session (a persisted
+session is also invalidated automatically when the built-in opening prompt
+changes between versions). During a live run the chat shows a
 "run w toku — tylko odczyt" banner and stays available for questions;
 while a gate pends, the chat silently receives the gate context, so you
 can ask e.g. "co byś wybrał i dlaczego?". When a reply contains a task

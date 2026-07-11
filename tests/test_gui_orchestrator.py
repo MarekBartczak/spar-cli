@@ -485,6 +485,99 @@ class TestOrchestratorChatPanel:
         assert calls == ["stop", "stop"]
 
 
+class TestClearChat:
+    def test_clear_button_in_header_row(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        btn = panel.findChild(QPushButton, "clearChatButton")
+        assert btn is not None
+        assert btn.text() == "Wyczyść"
+
+    def test_clear_mid_conversation_resets_everything(self, qtbot, tmp_path):
+        calls = []
+
+        class StopFake(FakeSession):
+            def stop(self):
+                calls.append("stop")
+
+        fake = StopFake()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(True)
+        panel.input_edit.setPlainText("pierwsze")
+        panel.send_button.click()
+        fake.session_id = "sess-1"
+        fake.turn_finished.emit(
+            "A. tak\nB. nie\n```zadanie\nZbuduj X\n```",
+            [Option("A", "tak"), Option("B", "nie")],
+        )
+        chat_path = tmp_path / ".spar" / "chat.json"
+        assert chat_path.exists()                      # mid-conversation state
+        assert panel.transcript.toPlainText().strip() != ""
+
+        panel.clear_button.click()
+
+        assert calls == ["stop"]                       # old session stopped
+        assert not chat_path.exists()                  # persisted meta discarded
+        assert panel.transcript.toPlainText().strip() == ""
+        assert panel.findChild(QPushButton, "option_A") is None
+        assert panel.handoff_button.isVisible() is False
+        assert panel._session is None                  # dropped: next send builds fresh
+        assert panel._opening_sent is False
+        assert panel._injected_gate_key is None
+        assert panel._turn_count == 0
+        assert "tura 0" in panel.header.text()
+        # Next send is a FRESH first turn carrying the CURRENT opening prompt.
+        fake2 = FakeSession()
+        panel._session = fake2                         # stand-in for the lazy build
+        panel.input_edit.setPlainText("nowy start")
+        panel.send_button.click()
+        sent_text, reset = fake2.sends[0]
+        assert reset is True
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+        assert "nowy start" in sent_text
+
+    def test_clear_while_in_flight_reenables_input(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.input_edit.setPlainText("pytanie")
+        panel.send_button.click()                      # in-flight: input disabled
+        assert panel.input_edit.isEnabled() is False
+        panel.clear_button.click()                     # no crash mid-turn
+        assert panel.input_edit.isEnabled() is True
+        assert panel.send_button.isEnabled() is True
+        assert panel._session is None
+        assert panel._pending_opening is False
+        assert panel._pending_gate_key is None
+
+    def test_clear_resets_session_lost_state(self, qtbot, tmp_path):
+        fake = FakeSession()
+        fake.session_id = "sess-x"
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.input_edit.setPlainText("q")
+        panel.send_button.click()
+        fake.session_lost.emit()
+        assert panel.banner.isVisible() is True
+        panel.clear_button.click()
+        assert panel._session_lost is False
+        assert panel.banner.isVisible() is False       # lost banner gone
+
+    def test_clear_forgets_persisted_initial_session_id(self, qtbot, tmp_path):
+        # A panel that RESUMED from chat.json still holds _initial_session_id;
+        # clearing must drop it or the lazily rebuilt session would resume the
+        # very session the user just cleared.
+        from spar.gui.chat_store import ChatMeta, save_chat
+        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-old", "opus", 4))
+        fake = FakeSession()
+        fake.session_id = "sess-old"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        assert panel._initial_session_id == "sess-old"
+        panel.clear_button.click()
+        assert panel._initial_session_id is None
+
+
 class TestGateInjection:
     def test_next_send_injects_gate_context_silently(self, qtbot, tmp_path):
         fake = FakeSession()
