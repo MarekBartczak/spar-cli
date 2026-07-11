@@ -1052,3 +1052,364 @@ class TestSearchPanel:
         panel._on_item_activated(line_item, 0)
         assert emitted and emitted[0][0] in ("a.py", "b.py")
         assert emitted[0][1] == 1  # line number
+
+
+class TestReplaceInFiles:
+    def _panel(self, qtbot, tmp_path):
+        from spar.gui.files import SearchPanel
+
+        (tmp_path / "a.py").write_text("cat here\ncat again\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("cat only\n", encoding="utf-8")
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        return panel
+
+    def _search(self, qtbot, panel, text="cat"):
+        panel.query.setText(text)
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel.results.topLevelItemCount() == 2, timeout=5000)
+
+    def test_fresh_panel_starts_with_replace_disabled(self, qtbot, tmp_path):
+        # review #42: __init__ must end with _update_replace_state() —
+        # a fresh panel has _results_spec None (stale), so the replace
+        # button starts DISABLED (Qt buttons default to enabled), and a
+        # click is a guarded no-op. Rows created later while the panel is
+        # read-only stay uncheckable (covered by
+        # test_rows_created_while_read_only_not_checkable).
+        panel = self._panel(qtbot, tmp_path)
+        assert panel.replace_button.isEnabled() is False
+        panel.replace.setText("dog")
+        panel._apply_replace()  # no results → must not touch any file
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "cat here\ncat again\n"
+
+    def test_replace_writes_checked_files(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "dog here\ndog again\n"
+        assert (tmp_path / "b.py").read_text(encoding="utf-8") == "dog only\n"
+
+    def test_unchecked_file_is_left_alone(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        # Uncheck the b.py row.
+        for i in range(panel.results.topLevelItemCount()):
+            item = panel.results.topLevelItem(i)
+            if item.data(0, __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.ItemDataRole.UserRole + 1) == "b.py":
+                item.setCheckState(0, __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Unchecked)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert (tmp_path / "b.py").read_text(encoding="utf-8") == "cat only\n"
+
+    def test_skips_files_with_unsaved_edits_and_reports(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        # a.py is "open dirty".
+        panel.dirty_open_paths = lambda: {str(tmp_path / "a.py")}
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "cat here\ncat again\n"
+        assert (tmp_path / "b.py").read_text(encoding="utf-8") == "dog only\n"
+        assert "pominięto 1" in panel.status.text()
+
+    def test_regex_replace_uses_same_toggle_pattern(self, qtbot, tmp_path):
+        (tmp_path / "c.py").write_text("v1 v2\n", encoding="utf-8")
+        from spar.gui.files import SearchPanel
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        panel.regex_toggle.setChecked(True)
+        panel.query.setText(r"v(\d)")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel.results.topLevelItemCount() >= 1, timeout=5000)
+        panel.replace.setText(r"w\1")
+        panel._apply_replace()
+        assert (tmp_path / "c.py").read_text(encoding="utf-8") == "w1 w2\n"
+
+    def test_read_only_disables_replace_not_search(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)  # give it results so the button can enable
+        panel.set_replace_enabled(False)
+        assert panel.replace.isEnabled() is False
+        assert panel.replace_button.isEnabled() is False
+        assert panel.query.isEnabled() is True  # search stays live
+
+    def test_replace_disabled_when_query_edited_after_search(self, qtbot, tmp_path):
+        # review #5: editing the query without re-running makes the results
+        # stale → replace disabled with an explanatory hint.
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        assert panel.replace_button.isEnabled() is True
+        panel.query.setText("dog")  # drift from the searched spec
+        assert panel.replace_button.isEnabled() is False
+        assert "nieaktualne" in panel.replace_button.toolTip()
+
+    def test_replace_disabled_while_search_in_flight(self, qtbot, tmp_path):
+        # review #15: replace must stay DISABLED until the search completes —
+        # _results_spec is promoted only in _on_finished, never at dispatch,
+        # so a partial (mid-scan) tree can never be replaced.
+        import time
+        from spar.gui.files import SearchMatch, SearchPanel, SearchSession
+
+        (tmp_path / "a.py").write_text("cat\n", encoding="utf-8")
+
+        def slow_scan(root, rel, pattern, limit=None):
+            time.sleep(0.2)
+            return [SearchMatch(rel, 1, "cat", 0, 3)]
+
+        session = SearchSession(tmp_path, scan_file=slow_scan)
+        panel = SearchPanel(tmp_path, session=session)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        # dispatch happened but finished has NOT fired yet.
+        assert panel._results_spec is None
+        assert panel.replace_button.isEnabled() is False
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        assert panel.replace_button.isEnabled() is True  # enabled on finish
+
+    def test_apply_replace_uses_stored_spec_not_current_controls(self, qtbot, tmp_path):
+        # review #5: even if forced, replace must not run against a drifted
+        # spec — it targets the stored one and no-ops when they differ.
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel.query.setText("zzz")  # current spec now differs from stored
+        panel._apply_replace()
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "cat here\ncat again\n"
+
+    def test_skips_file_changed_since_search_and_reports(self, qtbot, tmp_path):
+        # review #6: a file whose size/mtime changed after the search must
+        # be refused (its content may no longer match the results).
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        (tmp_path / "a.py").write_text("cat cat cat\n", encoding="utf-8")  # differs
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "cat cat cat\n"
+        assert (tmp_path / "b.py").read_text(encoding="utf-8") == "dog only\n"
+        assert "plik zmienił się" in panel.status.text()
+
+    def test_file_modified_between_scan_and_row_creation_is_skipped(self, qtbot, tmp_path):
+        # review #23: the fingerprint is captured AT SCAN TIME (before the
+        # file's bytes are read), not when the GUI row is built — rg scans
+        # a whole batch before any row lands, so a GUI-side stat would
+        # bless STALE matches with the NEW fingerprint. A file modified
+        # after the scan's read but before its row exists must be refused.
+        from spar.gui.files import SearchPanel, SearchSession, search_file
+
+        target = tmp_path / "a.py"
+        target.write_text("cat here\n", encoding="utf-8")
+
+        def mutating_scan(root, rel, pattern, limit=None):
+            matches = search_file(root, rel, pattern, limit=limit)
+            # the file changes AFTER the scan read, BEFORE the GUI row.
+            (tmp_path / rel).write_text(
+                "cat mutated after scan\n", encoding="utf-8"
+            )
+            return matches
+
+        session = SearchSession(tmp_path, scan_file=mutating_scan)
+        panel = SearchPanel(tmp_path, session=session)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        # untouched: the scan-time fingerprint no longer matches disk.
+        assert target.read_text(encoding="utf-8") == "cat mutated after scan\n"
+        assert "plik zmienił się" in panel.status.text()
+
+    def test_skips_non_utf8_file_and_reports(self, qtbot, tmp_path):
+        # review #6: strict decode — never corrupt non-UTF-8 bytes.
+        from spar.gui.files import SearchPanel
+
+        (tmp_path / "x.txt").write_bytes(b"caf\xe9 cat\n")  # invalid UTF-8
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel.results.topLevelItemCount() == 1, timeout=5000)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert (tmp_path / "x.txt").read_bytes() == b"caf\xe9 cat\n"  # untouched
+        assert "nie-UTF-8" in panel.status.text()
+
+    def test_replace_leaves_no_temp_file(self, qtbot, tmp_path):
+        # review #6: the atomic temp file must not linger after a write.
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert list(tmp_path.glob("*.spar-tmp")) == []
+
+    def test_replace_never_clobbers_existing_spar_tmp_sibling(self, qtbot, tmp_path):
+        # review #32: the old predictable temp name `<file>.spar-tmp`
+        # would OVERWRITE a legitimate user file of exactly that name
+        # (write_bytes truncates) and then rename it away or unlink it.
+        # mkstemp's unique, exclusively-created name can never collide:
+        # the pre-existing sibling must survive byte-identical.
+        sibling_a = tmp_path / "a.py.spar-tmp"
+        sibling_b = tmp_path / "b.py.spar-tmp"
+        sibling_a.write_text("legit user file, hands off\n", encoding="utf-8")
+        sibling_b.write_text("also legit\n", encoding="utf-8")
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        # the replace itself worked…
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "dog here\ndog again\n"
+        # …and the pre-existing *.spar-tmp files are untouched, in place.
+        assert sibling_a.read_text(encoding="utf-8") == "legit user file, hands off\n"
+        assert sibling_b.read_text(encoding="utf-8") == "also legit\n"
+
+    def test_replace_preserves_executable_mode(self, qtbot, tmp_path):
+        # review #17: os.replace swaps the inode, so the temp file's perms
+        # would clobber the original's — a 0o755 script would lose +x. The
+        # atomic writer chmods the temp to the original mode before rename.
+        import os
+        import stat as _stat
+
+        script = tmp_path / "run.sh"
+        script.write_text("cat here\ncat again\n", encoding="utf-8")
+        os.chmod(script, 0o755)
+        from spar.gui.files import SearchPanel
+
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert script.read_text(encoding="utf-8") == "dog here\ndog again\n"
+        assert _stat.S_IMODE(script.stat().st_mode) == 0o755  # +x survived
+
+    def test_replace_through_symlink_keeps_link_writes_target(self, qtbot, tmp_path):
+        # review #20: os.replace on the symlink path would swap the LINK
+        # itself for a regular file. The writer resolves first, so the
+        # link SURVIVES as a symlink and the TARGET's content changes.
+        # The target lives in a skip-dir (node_modules) so only the LINK
+        # row appears in the results.
+        import os
+
+        (tmp_path / "node_modules").mkdir()
+        real = tmp_path / "node_modules" / "real.txt"
+        real.write_text("cat here\n", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        os.symlink(real, link)
+        from spar.gui.files import SearchPanel
+
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert link.is_symlink()  # the link is STILL a symlink
+        assert real.read_text(encoding="utf-8") == "dog here\n"  # target rewritten
+
+    def test_replace_skips_symlink_escaping_project(self, qtbot, tmp_path):
+        # review #20: a symlink resolving OUTSIDE the project root is never
+        # written — skipped and reported.
+        import os
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "real.txt"
+        target.write_text("cat here\n", encoding="utf-8")
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        link = proj / "link.txt"
+        os.symlink(target, link)
+        from spar.gui.files import SearchPanel
+
+        panel = SearchPanel(proj)
+        qtbot.addWidget(panel)
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert target.read_text(encoding="utf-8") == "cat here\n"  # untouched
+        assert link.is_symlink()
+        assert "pominięto 1 (dowiązanie poza projektem)" in panel.status.text()
+
+    def test_replace_via_symlink_alias_of_dirty_tab_is_skipped(self, qtbot, tmp_path):
+        # review #29: the target is open DIRTY under its real path while
+        # the results row reaches it through a symlink alias. Comparing
+        # unresolved strings would miss it and overwrite the dirty file —
+        # resolved-vs-resolved comparison skips it as niezapisane zmiany.
+        # The target lives in a skip-dir so only the LINK row appears.
+        import os
+
+        (tmp_path / "node_modules").mkdir()
+        real = tmp_path / "node_modules" / "real.txt"
+        real.write_text("cat here\n", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        os.symlink(real, link)
+        from spar.gui.files import SearchPanel
+
+        panel = SearchPanel(tmp_path)
+        qtbot.addWidget(panel)
+        panel.dirty_open_paths = lambda: {str(real)}  # dirty under REAL path
+        panel.query.setText("cat")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        assert real.read_text(encoding="utf-8") == "cat here\n"  # untouched
+        assert "pominięto 1 (niezapisane zmiany)" in panel.status.text()
+
+    def test_symlink_loop_row_skipped_without_aborting_batch(self, qtbot, tmp_path):
+        # review #30: resolving a symlink loop raises (RuntimeError on
+        # older Pythons, OSError/ELOOP via stat elsewhere). It must be
+        # caught PER ROW — counted as błąd zapisu — while the rest of the
+        # batch is still replaced, never abort _apply_replace wholesale.
+        import os
+
+        panel = self._panel(qtbot, tmp_path)
+        self._search(qtbot, panel)  # rows for a.py and b.py
+        # a.py becomes a self-referential symlink AFTER the scan.
+        (tmp_path / "a.py").unlink()
+        os.symlink(tmp_path / "a.py", tmp_path / "a.py")
+        panel.replace.setText("dog")
+        panel._apply_replace()  # must NOT raise
+        assert (tmp_path / "b.py").read_text(encoding="utf-8") == "dog only\n"
+        assert "błąd zapisu" in panel.status.text()
+
+    def test_skip_warning_survives_refresh(self, qtbot, tmp_path):
+        # review #16: the replace summary (with skip warnings) must persist
+        # through the async refresh search — its _on_finished appends counts
+        # to the summary instead of overwriting it.
+        panel = self._panel(qtbot, tmp_path)
+        panel.dirty_open_paths = lambda: {str(tmp_path / "a.py")}
+        self._search(qtbot, panel)
+        panel.replace.setText("dog")
+        panel._apply_replace()
+        # let the refresh search complete (its finished fires on a later turn)
+        qtbot.waitUntil(lambda: "wyników" in panel.status.text(), timeout=5000)
+        assert "pominięto 1" in panel.status.text()  # skip warning survived
+
+    def test_rows_created_while_read_only_not_checkable(self, qtbot, tmp_path):
+        # review #11: rows built while replace is disabled must not be
+        # user-checkable.
+        from PySide6.QtCore import Qt
+
+        panel = self._panel(qtbot, tmp_path)
+        panel.set_replace_enabled(False)
+        self._search(qtbot, panel)
+        item = panel.results.topLevelItem(0)
+        assert not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable)

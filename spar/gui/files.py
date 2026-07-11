@@ -12,6 +12,8 @@ import json
 import os
 import re
 import shutil
+import stat
+import tempfile
 import time as _time
 import weakref
 from dataclasses import dataclass
@@ -34,6 +36,7 @@ __all__ = [
     "search_file",
     "search_paths",
     "replace_in_text",
+    "_atomic_write_bytes",
     "_RipgrepParseError",
     "ripgrep_available",
     "is_rg_compatible",
@@ -273,6 +276,50 @@ def replace_in_text(text: str, pattern, replacement: str, *, regex: bool):
         pieces.append(line[pos:])
         new_lines.append("".join(pieces))
     return "\n".join(new_lines), count
+
+
+def _atomic_write_bytes(path, data: bytes) -> None:
+    """Write *data* to *path* atomically: a temp file in the same directory
+    then ``os.replace`` (same-filesystem rename). Preserves exact bytes —
+    no newline translation, no encoding round-trip (review #6). review #32:
+    the temp file comes from ``tempfile.mkstemp`` (unique random name,
+    O_EXCL-created) — the old predictable sibling ``<file>.spar-tmp`` would
+    have OVERWRITTEN a legitimate user file of that exact name and then
+    deleted it (unlink in the error path) or renamed it away; mkstemp can
+    never collide with an existing file. Because ``os.replace`` swaps in a
+    fresh inode, the temp fd is ``fchmod``'d to the ORIGINAL file's
+    permission bits BEFORE the rename so executable bits (e.g. a 0o755
+    script) survive the replace (review #17; mkstemp's default is 0o600,
+    so without this even plain 0o644 files would come out unreadable to
+    the group). review #20: *path* is resolved first — os.replace on a
+    symlink path would replace the LINK itself with a regular file, so the
+    dance always targets the real file (the caller has already done the
+    project-root escape check on the resolved path)."""
+    path = Path(path).resolve()  # review #20: write the TARGET, not the link
+    # review #32: unique + exclusive; keep the .spar-tmp suffix so humans
+    # (and the leftover-cleanup test) can still recognise strays.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".spar-tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        try:
+            orig_mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            orig_mode = None
+        with os.fdopen(fd, "wb") as fh:  # review #32: write via the fd
+            if orig_mode is not None:
+                # review #17: preserve exec/perm bits (fchmod while the
+                # fd is guaranteed open — no window for an fd leak)
+                os.fchmod(fd, orig_mode)
+            fh.write(data)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 _SEARCH_MAX_RESULTS = 5000  # cap enforced in BOTH engines (review #33)
@@ -1645,6 +1692,18 @@ if _HAS_QT:
                 query_row.addWidget(tb)
             outer.addLayout(query_row)
 
+            # -- replace row --
+            replace_row = QHBoxLayout()
+            self.replace = QLineEdit(self)
+            self.replace.setObjectName("replaceField")
+            self.replace.setPlaceholderText("Zamień na…")
+            replace_row.addWidget(self.replace, stretch=1)
+            self.replace_button = QPushButton("Zamień zaznaczone", self)
+            self.replace_button.setObjectName("replaceButton")
+            self.replace_button.clicked.connect(self._apply_replace)
+            replace_row.addWidget(self.replace_button)
+            outer.addLayout(replace_row)
+
             # -- results tree --
             self.results = QTreeWidget(self)
             self.results.setObjectName("searchResults")
@@ -1661,6 +1720,14 @@ if _HAS_QT:
             self._session = session or SearchSession(self.project_dir, self)
             self._session.batch.connect(self._on_batch)
             self._session.finished.connect(self._on_finished)
+
+            # default hook: no open editor is dirty (MainWindow injects the
+            # real one). Set at the END of __init__ so all controls exist.
+            self.dirty_open_paths = lambda: set()
+            # review #42: QPushButton defaults to ENABLED, and nothing else
+            # runs before the first search — sync the fresh panel now
+            # (_results_spec is None → stale → button disabled).
+            self._update_replace_state()
 
         # -- spec / validation --
         def _current_spec(self):
@@ -1683,8 +1750,138 @@ if _HAS_QT:
             self.query.selectAll()
 
         def set_replace_enabled(self, enabled: bool) -> None:
-            self._replace_enabled = enabled  # Task 4 wires the widgets
+            self._replace_enabled = enabled
+            self.replace.setEnabled(enabled)
+            for i in range(self.results.topLevelItemCount()):
+                item = self.results.topLevelItem(i)
+                flags = item.flags()
+                if enabled:
+                    flags |= Qt.ItemFlag.ItemIsUserCheckable
+                else:
+                    flags &= ~Qt.ItemFlag.ItemIsUserCheckable
+                item.setFlags(flags)
+            # _update_replace_state also honours result-staleness (review #5).
             self._update_replace_state()
+
+        def _apply_replace(self) -> None:
+            if not self._replace_enabled:
+                return
+            # review #5: replace the STORED search spec, never the live
+            # controls (which may have drifted). If the results are stale
+            # the button is already disabled, but guard defensively.
+            spec = self._results_spec
+            if spec is None or spec != self._current_spec():
+                return
+            try:
+                pattern = compile_search_pattern(spec)
+            except re.error:
+                return
+            replacement = self.replace.text()
+            # review #29: dirty-tab protection compares RESOLVED targets on
+            # BOTH sides — a file open dirty under one path must also block
+            # a replace reaching the same file via a symlink alias.
+            dirty = set()
+            for p in self.dirty_open_paths():
+                try:
+                    dirty.add(str(Path(p).resolve()))
+                except (OSError, RuntimeError):
+                    dirty.add(str(p))  # unresolvable → keep the raw string
+            # review #20: escape check is done on RESOLVED paths, both sides.
+            root_resolved = Path(self.project_dir).resolve()
+            total = files = 0
+            skipped_dirty = skipped_changed = skipped_nonutf8 = skipped_err = 0
+            skipped_symlink = 0
+            for i in range(self.results.topLevelItemCount()):
+                item = self.results.topLevelItem(i)
+                if item.checkState(0) != Qt.CheckState.Checked:
+                    continue
+                rel = item.data(0, Qt.ItemDataRole.UserRole + 1)
+                fingerprint = item.data(0, Qt.ItemDataRole.UserRole + 2)
+                abs_path = self.project_dir / rel
+                # review #20: os.replace on a symlink path would replace the
+                # LINK with a regular file. Resolve to the real target and
+                # operate on THAT; a target outside the project is refused.
+                # review #30: resolution runs INSIDE the per-row try — a
+                # symlink loop raises (RuntimeError on older Pythons,
+                # OSError/ELOOP elsewhere) and must skip THIS row only,
+                # never abort the whole batch.
+                try:
+                    real_path = abs_path.resolve()
+                except (OSError, RuntimeError):
+                    skipped_err += 1
+                    continue
+                # review #29: check the RESOLVED target against the
+                # RESOLVED dirty set, so a symlink alias of a dirty tab
+                # is skipped as niezapisane zmiany.
+                if str(real_path) in dirty:
+                    skipped_dirty += 1
+                    continue
+                try:
+                    real_path.relative_to(root_resolved)
+                except ValueError:
+                    skipped_symlink += 1
+                    continue
+                try:
+                    st = real_path.stat()
+                except OSError:
+                    skipped_err += 1
+                    continue
+                # review #6: refuse to write if the file changed since the
+                # SCAN-time fingerprint (review #23) was captured.
+                if fingerprint is None or (st.st_mtime_ns, st.st_size) != fingerprint:
+                    skipped_changed += 1
+                    continue
+                try:
+                    raw = real_path.read_bytes()
+                except OSError:
+                    skipped_err += 1
+                    continue
+                try:
+                    text = raw.decode("utf-8")  # STRICT — never corrupt bytes
+                except UnicodeDecodeError:
+                    skipped_nonutf8 += 1
+                    continue
+                try:
+                    new_text, n = replace_in_text(
+                        text, pattern, replacement, regex=spec.regex
+                    )
+                except re.error:
+                    skipped_err += 1
+                    continue
+                if not n:
+                    continue
+                try:
+                    # No newline translation: encode and write bytes
+                    # atomically — to the RESOLVED target (review #20).
+                    _atomic_write_bytes(real_path, new_text.encode("utf-8"))
+                except OSError:
+                    skipped_err += 1
+                    continue
+                total += n
+                files += 1
+            msg = f"zamieniono {total} w {files} plikach"
+            skips = []
+            if skipped_dirty:
+                skips.append(f"{skipped_dirty} (niezapisane zmiany)")
+            if skipped_symlink:
+                skips.append(f"{skipped_symlink} (dowiązanie poza projektem)")
+            if skipped_changed:
+                skips.append(f"{skipped_changed} (plik zmienił się)")
+            if skipped_nonutf8:
+                skips.append(f"{skipped_nonutf8} (nie-UTF-8)")
+            if skipped_err:
+                skips.append(f"{skipped_err} (błąd zapisu)")
+            if skips:
+                msg += " · pominięto " + ", ".join(skips)
+            # review #16: make the replace summary STICKY. Setting the label
+            # synchronously is not enough — the refresh search below finishes
+            # on a later event-loop turn and its _on_finished would clobber
+            # this text. Stash it so that _on_finished APPENDS its counts to
+            # the summary instead of overwriting it, and re-run the search
+            # with preserve_summary so the transient "szukam…" never wins.
+            self._replace_summary = msg
+            self.status.setText(msg)
+            self._run_search(preserve_summary=True)
 
         def stop_session(self) -> None:
             # review #3: idempotent teardown of the search thread. Called by
@@ -1787,6 +1984,11 @@ if _HAS_QT:
             # (rows are built after rg scanned a whole batch — a GUI-side
             # stat here would bless STALE matches with a NEW fingerprint).
             item.setData(0, Qt.ItemDataRole.UserRole + 2, fingerprint)
+            item.setCheckState(0, Qt.CheckState.Checked)  # default checked
+            if self._replace_enabled:  # review #11
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             item.setExpanded(True)
             return item
 
