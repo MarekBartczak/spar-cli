@@ -152,9 +152,28 @@ tool windows). The right rail toggles the **Taski** panel (task board +
 gate) and the **Czat** panel, and has a **Bramka** icon that lights up with
 an attention dot while a gate is pending and force-opens the Taski panel —
 collapsing the panel never discards the pending decision. The left rail
-holds a disabled **Pliki** placeholder for a future tranche. Collapse state
-persists across restarts (QSettings); with everything collapsed the live
-stream takes the full window width.
+carries two exclusive view toggles — **Strumień** (▤, the live stream) and
+**Pliki** (🗀, a file browser + editor). Exactly one is active; starting or
+resuming a run (and the consensus auto-exec chain) auto-switches back to
+Strumień. A pending gate does not change the view. The active view persists
+across restarts (QSettings).
+
+**Pliki view.** A project tree (left) beside a tabbed editor (right).
+Double-click a file to open it in a tab; re-opening focuses the existing
+tab. The editor has line numbers, current-line highlight and Pygments
+syntax colouring (lexer picked by filename; unknown types show as plain
+text). Ctrl+S saves; closing a tab, switching away, or closing the window
+with unsaved changes prompts save/discard/cancel. While a run is live
+(RUNNING / gate pending / locked) the editor is **read-only** — a
+"run w toku — tylko podgląd" banner shows, tabs carry a 🔒, and files the
+engine rewrites on disk auto-reload when you have no local edits (a
+"plik zmienił się na dysku" banner with **Przeładuj** appears instead when
+you do, so nothing is silently clobbered).
+
+**Double Shift** opens a fuzzy file finder overlay — type part of a path,
+Enter (or double-click) opens it in the Pliki view, Esc closes.
+
+<!-- TODO: screenshot docs/img/gui-files.png po manualnym smoke -->
 
 Docked under the task board is the **orchestrator chat** — a persistent,
 **read-only advisor** (chat bubbles, lettered options as buttons, free-text

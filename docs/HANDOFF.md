@@ -6,6 +6,32 @@ SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
 
+## Files module tranche A (2026-07-11, `6f4ea8a..da3f87e`)
+
+Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-tranche-a.md`):
+the Pliki left-rail view replaces the disabled placeholder. Centre `QStackedWidget`
+carries `Strumień` (live stream) and `Pliki` views, driven by two exclusive
+toggles in `rails/centre_view` QSettings key; run-start and resume auto-switch to
+Strumień via the `runner.started` signal. `FilesView` pairs a `QFileSystemModel`
+tree (hides `.git`, shows `.spar` collapsed, hidden files visible) with a
+tabbed `FileEditor` (gutter with line numbers, current-line highlight,
+Pygments syntax-aware lexer selected by filename, Ctrl+S atomic save, dirty
+marker, save-failure dialog). The read-only matrix, enforced via the same
+`RunnerState` signal (RUNNING / GATE_PENDING / LOCKED), surfaces via a
+"run w toku — tylko podgląd" banner and lock icons on tabs; `QFileSystemWatcher`
+auto-reloads clean buffers when files change on disk, showing a "plik zmienił
+się na dysku / Przeładuj" conflict banner when the user has local edits (no
+silent clobber). `FileFinderOverlay` implements double-Shift WebStorm-style fuzzy
+file lookup (in-memory index built once per session, subsequence-scoring algorithm
+with path-position bonuses). Pre-spawn guard `_ensure_editors_clean()` added to
+every execution path (new-debate, chat-handoff, exec, resume, and gate
+accept/abort/extend/fix/remarks via a new `GatePanel.preflight_resume` hook)
+to catch uncommitted edits before the engine runs. New dependency: `pygments`
+in the `[gui]` extra. Test baseline 906 passed, 2 skipped — full baseline plus
+the tranche's new tests, no failures/regressions. Deferred tranche B (find-in-files,
+replace-in-files, Ctrl+F) and the git module. README screenshot TODO at
+`docs/img/gui-files.png`.
+
 ## GrillPane implemented (2026-07-10, `ff65e18..f35fb8b`)
 
 Per ADR 0004 and the plan (`docs/superpowers/plans/2026-07-10-grill-pane.md`,
