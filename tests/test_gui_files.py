@@ -546,3 +546,509 @@ class TestDoubleShift:
         filt._now = lambda: 0.2
         filt.eventFilter(None, ctrl_shift())
         assert fired == []
+
+
+class TestSearchSession:
+    def test_delivers_matches(self, qtbot, tmp_path):
+        from spar.gui.files import SearchSession, SearchSpec
+
+        (tmp_path / "a.py").write_text("todo one\ntodo two\n", encoding="utf-8")
+        session = SearchSession(tmp_path)
+        got = []
+        # review #23: payload is (matches, fingerprint) — one file per batch
+        session.batch.connect(lambda payload: got.extend(payload[0]))
+        done = []
+        session.finished.connect(lambda n, m: done.append((n, m)))
+        session.search(SearchSpec("todo"))
+        qtbot.waitUntil(lambda: bool(done), timeout=5000)
+        assert done[0][0] == 2  # two matches
+        assert {m.line for m in got} == {1, 2}
+        session.stop()
+
+    def test_superseded_search_delivers_no_stale_results(self, qtbot, tmp_path):
+        # Slow fake scan: first query is still "scanning" when the second
+        # supersedes it; only the second query's results may arrive.
+        import time
+        from spar.gui.files import SearchSession, SearchSpec, SearchMatch
+
+        (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+
+        def slow_scan(root, rel, pattern, limit=None):
+            time.sleep(0.2)
+            # Tag the match text with the pattern so we can tell runs apart.
+            return [SearchMatch(rel, 1, pattern.pattern, 0, 1)]
+
+        session = SearchSession(tmp_path, scan_file=slow_scan)
+        got = []
+        # review #23: payload is (matches, fingerprint) — one file per batch
+        session.batch.connect(lambda payload: got.extend(payload[0]))
+        session.search(SearchSpec("first"))
+        session.search(SearchSpec("second"))  # supersedes immediately
+        qtbot.wait(800)
+        texts = {m.text for m in got}
+        assert "first" not in texts  # stale run dropped
+        session.stop()
+
+    def test_regex_search_uses_python_not_ripgrep(self, qtbot, tmp_path, monkeypatch):
+        # review #4: regex specs must never shell out to rg (no parity).
+        from spar.gui import files as fmod
+
+        (tmp_path / "a.py").write_text("v1 v2\n", encoding="utf-8")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("ripgrep used for a regex search")
+
+        monkeypatch.setattr(fmod, "build_ripgrep_argv", _boom)
+        session = fmod.SearchSession(tmp_path)
+        done, got = [], []
+        session.finished.connect(lambda n, m: done.append((n, m)))
+        # review #23: payload is (matches, fingerprint) — one file per batch
+        session.batch.connect(lambda payload: got.extend(payload[0]))
+        session.search(fmod.SearchSpec(r"v\d", regex=True))
+        qtbot.waitUntil(lambda: bool(done), timeout=5000)
+        assert done[0][0] == 2  # two matches, via the python path
+        session.stop()
+
+    def test_case_insensitive_search_uses_python_not_ripgrep(self, qtbot, tmp_path, monkeypatch):
+        # review #19: rg's -i unicode case-folding diverges from python re,
+        # so a case-insensitive spec (is_rg_compatible == False) must take
+        # the python path, never rg.
+        from spar.gui import files as fmod
+
+        (tmp_path / "a.py").write_text("TODO todo\n", encoding="utf-8")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("ripgrep used for a case-insensitive search")
+
+        monkeypatch.setattr(fmod, "build_ripgrep_argv", _boom)
+        session = fmod.SearchSession(tmp_path)
+        done = []
+        session.finished.connect(lambda n, m: done.append((n, m)))
+        session.search(fmod.SearchSpec("todo"))  # default: case-insensitive
+        qtbot.waitUntil(lambda: bool(done), timeout=5000)
+        assert done[0][0] == 2  # both cases matched, via the python path
+        session.stop()
+
+    def test_cancel_bumps_generation_and_drops_stale(self, qtbot, tmp_path):
+        # review #2 (empty/invalid clause): cancel() must supersede an
+        # in-flight run so its late batches never reach the facade.
+        import time
+        from spar.gui.files import SearchSession, SearchSpec, SearchMatch
+
+        (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+
+        def slow_scan(root, rel, pattern, limit=None):
+            time.sleep(0.2)
+            return [SearchMatch(rel, 1, "x", 0, 1)]
+
+        session = SearchSession(tmp_path, scan_file=slow_scan)
+        got = []
+        # review #23: payload is (matches, fingerprint) — one file per batch
+        session.batch.connect(lambda payload: got.extend(payload[0]))
+        session.search(SearchSpec("first"))
+        session.cancel()  # supersede without dispatching a new search
+        qtbot.wait(600)
+        assert got == []  # cancelled run delivered nothing
+        session.stop()
+
+    def test_stop_bumps_worker_live_generation(self, qtbot, tmp_path):
+        # review #14: stop() must bump the WORKER's live generation (not just
+        # the facade's), so an in-flight python scan sees the supersede and
+        # bails promptly instead of finishing the whole walk.
+        import time
+        from spar.gui.files import SearchSession, SearchSpec, SearchMatch
+
+        (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+
+        def slow_scan(root, rel, pattern, limit=None):
+            time.sleep(0.2)
+            return [SearchMatch(rel, 1, "x", 0, 1)]
+
+        session = SearchSession(tmp_path, scan_file=slow_scan)
+        session.search(SearchSpec("first"))
+        searched_gen = session._generation
+        session.stop()
+        assert session._worker._live_generation == session._generation
+        assert session._worker._live_generation > searched_gen
+
+    def test_ripgrep_batch_killed_when_superseded_with_no_output_yet(self, tmp_path, monkeypatch):
+        # reviews #14/#22/#24: a large NO-MATCH rg batch emits no stdout
+        # at all. A worker blocking in `for line in proc.stdout` could
+        # only notice a supersede on the next line — which never comes —
+        # stalling this run AND every queued search. The queue-based
+        # drain re-checks _live_generation on every queue.get timeout
+        # tick (~50 ms), so rg is killed even while completely silent.
+        import io
+        import subprocess
+        import threading
+
+        from spar.gui import files as fmod
+
+        (tmp_path / "a.py").write_text("todo\n", encoding="utf-8")
+        worker = fmod._SearchWorker(tmp_path)
+        worker._live_generation = 1
+        killed = threading.Event()
+
+        class FakeStdout:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                # the daemon reader thread blocks HERE: rg has produced
+                # NO output yet. Supersede now — only a queue.get
+                # timeout tick can notice it (there is no line to read).
+                worker._live_generation = 2
+                if not killed.wait(timeout=5):
+                    raise AssertionError(
+                        "worker never killed the silent rg batch"
+                    )
+                raise StopIteration  # kill() → stream ends
+
+        class FakePopen:
+            def __init__(self, *a, **k):
+                self.stdout = FakeStdout()
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def kill(self):
+                killed.set()
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakePopen())
+        result = worker._ripgrep_grouped(
+            1, fmod.SearchSpec("todo", case_sensitive=True)
+        )
+        assert result is None      # cancelled → caller takes python early-exit
+        assert killed.is_set()     # rg killed while it had emitted NOTHING
+
+    def test_ripgrep_output_exceeding_pipe_capacity_completes(self, tmp_path):
+        # review #22: stdout must be drained WHILE rg runs. The old shape
+        # (wait for exit, then communicate) deadlocked once the --json
+        # output exceeded the OS pipe capacity (~64 KB): rg blocked
+        # writing the full pipe while the worker blocked waiting for
+        # exit. 3000 match events ≈ several hundred KB of JSON.
+        import shutil
+
+        if shutil.which("rg") is None:
+            pytest.skip("ripgrep not installed")
+        from spar.gui import files as fmod
+
+        body = "".join(f"todo padding line {i:05d}\n" for i in range(3000))
+        (tmp_path / "big.py").write_text(body, encoding="utf-8")
+        worker = fmod._SearchWorker(tmp_path)
+        worker._live_generation = 1
+        result = worker._ripgrep_grouped(
+            1, fmod.SearchSpec("todo", case_sensitive=True)
+        )
+        assert result is not None           # completed — no deadlock
+        grouped, truncated = result         # review #33: (groups, truncated)
+        assert truncated is False           # 3000 < _SEARCH_MAX_RESULTS
+        (rel, fingerprint, bucket), = grouped
+        assert rel == "big.py" and len(bucket) == 3000
+        assert fingerprint is not None      # review #25: pre-launch snapshot
+
+    def test_batch_payload_carries_scan_time_fingerprint(self, qtbot, tmp_path):
+        # review #23: the (mtime_ns, size) fingerprint is captured by the
+        # WORKER (before the file is read) and travels with the payload —
+        # the GUI never stats the file itself.
+        from spar.gui.files import SearchSession, SearchSpec
+
+        f = tmp_path / "a.py"
+        f.write_text("todo\n", encoding="utf-8")
+        st = f.stat()
+        session = SearchSession(tmp_path)
+        payloads = []
+        session.batch.connect(payloads.append)
+        done = []
+        session.finished.connect(lambda n, m: done.append(n))
+        session.search(SearchSpec("todo"))
+        qtbot.waitUntil(lambda: bool(done), timeout=5000)
+        (matches, fingerprint), = payloads
+        assert [m.line for m in matches] == [1]
+        assert fingerprint == (st.st_mtime_ns, st.st_size)
+        session.stop()
+
+    def test_rg_fingerprint_snapshot_taken_before_launch(self, tmp_path, monkeypatch):
+        # review #25: the rg path must stat the WHOLE batch BEFORE
+        # launching rg. Stat-at-first-parsed-match (the old shape) ran
+        # AFTER rg had already read the file: a write landing between
+        # rg's read and the parse got blessed with the POST-write
+        # fingerprint, and replace would clobber the newer content.
+        # Here a fake rg mutates the file mid-stream — the emitted
+        # fingerprint must be the PRE-launch one, so the replace-time
+        # verification (review #6) refuses with "plik zmienił się".
+        import io
+        import json
+        import subprocess
+
+        from spar.gui import files as fmod
+
+        f = tmp_path / "a.py"
+        f.write_text("todo\n", encoding="utf-8")
+        st = f.stat()
+        pre = (st.st_mtime_ns, st.st_size)
+
+        row = json.dumps({
+            "type": "match",
+            "data": {
+                "path": {"text": str(f)},
+                "line_number": 1,
+                "lines": {"text": "todo\n"},
+                "submatches": [{"start": 0, "end": 4}],
+            },
+        }) + "\n"
+
+        class FakeStdout:
+            def __init__(self):
+                self._lines = iter([row])
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                # rg is streaming: the file changes AFTER launch (and
+                # after rg's read), BEFORE its match row is parsed.
+                f.write_text("todo but changed on disk\n", encoding="utf-8")
+                return next(self._lines)
+
+        class FakePopen:
+            def __init__(self, *a, **k):
+                self.stdout = FakeStdout()
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakePopen())
+        worker = fmod._SearchWorker(tmp_path)
+        worker._live_generation = 1
+        grouped, _truncated = worker._ripgrep_grouped(
+            1, fmod.SearchSpec("todo", case_sensitive=True)
+        )  # review #33: returns (groups, truncated)
+        (rel, fingerprint, bucket), = grouped
+        assert rel == "a.py" and len(bucket) == 1
+        assert fingerprint == pre  # snapshot from BEFORE the launch
+        st2 = f.stat()
+        # the mid-stream write no longer matches the payload fingerprint,
+        # so _apply_replace's check (review #6) skips it: replace refuses.
+        assert (st2.st_mtime_ns, st2.st_size) != fingerprint
+
+    def test_rg_result_cap_enforced_during_parse_kills_rg(self, tmp_path, monkeypatch):
+        # review #33: the old shape accumulated EVERY parsed match in
+        # `grouped` and only capped the EMISSION in _emit_grouped — a
+        # common literal over a big tree could parse millions of match
+        # rows into memory (OOM). The cap must stop the PARSE: a fake rg
+        # streaming far more than _SEARCH_MAX_RESULTS rows is killed the
+        # moment the cap is reached, the stream is not drained further,
+        # and the collected groups come back flagged truncated.
+        import io
+        import json
+        import subprocess
+        import threading
+
+        from spar.gui import files as fmod
+
+        f = tmp_path / "a.py"
+        f.write_text("todo\n", encoding="utf-8")
+        cap = fmod._SEARCH_MAX_RESULTS
+        killed = threading.Event()
+
+        def _rows():
+            # an "endless" rg: serves comfortably past the cap, then
+            # STALLS — only a kill (which in real life closes stdout)
+            # lets the stream end. If the worker kept accumulating
+            # instead of capping the parse, it would hang here and the
+            # wait below would fail the test.
+            for i in range(cap + 100):
+                yield json.dumps({
+                    "type": "match",
+                    "data": {
+                        "path": {"text": str(f)},
+                        "line_number": i + 1,
+                        "lines": {"text": "todo\n"},
+                        "submatches": [{"start": 0, "end": 4}],
+                    },
+                }) + "\n"
+            if not killed.wait(timeout=5):
+                raise AssertionError(
+                    "worker never killed rg at the result cap"
+                )
+
+        class FakePopen:
+            def __init__(self, *a, **k):
+                self.stdout = _rows()
+                self.stderr = io.StringIO("")
+                self.returncode = 0
+
+            def kill(self):
+                killed.set()
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakePopen())
+        worker = fmod._SearchWorker(tmp_path)
+        worker._live_generation = 1
+        grouped, truncated = worker._ripgrep_grouped(
+            1, fmod.SearchSpec("todo", case_sensitive=True)
+        )
+        assert truncated is True
+        assert killed.is_set()           # rg killed mid-stream at the cap
+        total = sum(len(bucket) for _rel, _fp, bucket in grouped)
+        assert total == cap              # collected == cap, nothing beyond
+
+    def test_rg_batches_bounded_by_argv_byte_budget(self, tmp_path):
+        # review #34: _RIPGREP_BATCH alone bounds the file COUNT, not the
+        # argv BYTES — long paths could trip ARG_MAX. Batches split when
+        # the estimated encoded size exceeds _RIPGREP_ARGV_BUDGET, with
+        # the count as the secondary bound. review #36: the budget must
+        # count the ABSOLUTE strings build_ripgrep_argv passes
+        # (str(root / rel)), not the bare relatives — the assertion below
+        # measures the absolute forms.
+        from spar.gui import files as fmod
+
+        long_rel = "d/" + "x" * 4094  # 4 KB per path
+        files = [f"{long_rel}{i:04d}" for i in range(100)]  # ~400 KB total
+        batches = list(fmod._rg_batches(tmp_path, files))
+        assert len(batches) > 1                      # split by BYTES
+        assert [p for b in batches for p in b] == files  # order + coverage
+        import os as _os
+        for b in batches:
+            # review #36: measure what rg's argv actually carries.
+            size = sum(
+                len(_os.fsencode(str(tmp_path / p))) + 1 for p in b
+            )
+            assert size <= fmod._RIPGREP_ARGV_BUDGET
+            assert len(b) <= fmod._RIPGREP_BATCH     # secondary bound
+
+    def test_python_path_result_cap_slices_single_huge_file(self, qtbot, tmp_path):
+        # review #35: the python path emitted each file's COMPLETE matches
+        # list BEFORE the cap check — one file with more matches than
+        # _SEARCH_MAX_RESULTS blew straight past the cap. The per-file
+        # list must be sliced to the remaining allowance before the emit:
+        # exactly cap results arrive, flagged truncated.
+        from spar.gui import files as fmod
+
+        cap = fmod._SEARCH_MAX_RESULTS
+        (tmp_path / "huge.py").write_text("x\n", encoding="utf-8")
+        seen_limits = []
+
+        def fat_scan(root, rel, pattern, limit=None):
+            seen_limits.append(limit)   # review #37: spy on the allowance
+            return [
+                fmod.SearchMatch(rel, i + 1, "x", 0, 1)
+                for i in range(cap + 100)   # over-returns past its limit —
+                # exercises the worker's belt-and-braces slice
+            ]
+
+        session = fmod.SearchSession(tmp_path, scan_file=fat_scan)
+        got, done = [], []
+        # review #23: payload is (matches, fingerprint) — one file per batch
+        session.batch.connect(lambda payload: got.extend(payload[0]))
+        session.finished.connect(lambda n, m, t: done.append((n, m, t)))
+        session.search(fmod.SearchSpec("x"))
+        qtbot.waitUntil(lambda: bool(done), timeout=5000)
+        assert len(got) == cap              # sliced to EXACTLY the cap
+        assert done[0] == (cap, 1, True)    # truncated flagged
+        # review #37: the worker passed the REMAINING allowance down as
+        # search_file's limit (first file ⇒ the full cap).
+        assert seen_limits == [cap]
+        session.stop()
+
+
+class TestSearchPanel:
+    def _panel(self, qtbot, tmp_path):
+        from spar.gui.files import SearchPanel
+
+        (tmp_path / "a.py").write_text("todo one\nplain\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("todo two\n", encoding="utf-8")
+        panel = SearchPanel(tmp_path)
+        # qtbot.addWidget closes the panel at teardown; SearchPanel.closeEvent
+        # calls stop_session() so the search thread never leaks (review #3).
+        qtbot.addWidget(panel)
+        return panel
+
+    def test_search_populates_results_tree(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel.results.topLevelItemCount() == 2, timeout=5000)
+        files = {
+            panel.results.topLevelItem(i).text(0).split(" ")[0]
+            for i in range(panel.results.topLevelItemCount())
+        }
+        assert files == {"a.py", "b.py"}
+
+    def test_status_reports_counts(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: "wyników" in panel.status.text(), timeout=5000)
+        assert "2" in panel.status.text()  # 2 matches
+        assert "2 plik" in panel.status.text()  # in 2 files
+
+    def test_invalid_regex_marks_query_and_disables(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        panel.regex_toggle.setChecked(True)
+        panel.query.setText("(")
+        panel._run_search()
+        assert panel._invalid is True
+        assert panel.query.property("invalid") is True
+
+    def test_empty_query_cancels_and_clears(self, qtbot, tmp_path):
+        # review #2: an empty query must bump the generation (cancel any
+        # in-flight run) and clear, not silently leave a search running.
+        panel = self._panel(qtbot, tmp_path)
+        cancelled = []
+        panel._session.cancel = lambda: cancelled.append(True)
+        panel.query.setText("")
+        panel._run_search()
+        assert cancelled == [True]
+        assert panel.results.topLevelItemCount() == 0
+
+    def test_invalid_query_cancels_in_flight(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        cancelled = []
+        panel._session.cancel = lambda: cancelled.append(True)
+        panel.regex_toggle.setChecked(True)
+        panel.query.setText("(")
+        panel._run_search()
+        assert cancelled == [True]
+
+    def test_invalid_query_clears_results_and_resets_specs(self, qtbot, tmp_path):
+        # review #28: the invalid-regex branch mirrors the empty-query
+        # path — already-delivered (possibly partial) results are cleared
+        # and both specs reset, so replace stays disabled and no stale
+        # tree sits under the error banner.
+        panel = self._panel(qtbot, tmp_path)
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        assert panel.results.topLevelItemCount() == 2
+        panel.regex_toggle.setChecked(True)  # re-runs; "todo" still valid
+        panel.query.setText("todo(")         # now an invalid regex
+        panel._run_search()
+        assert panel._invalid is True
+        assert panel.results.topLevelItemCount() == 0  # partials cleared
+        assert panel._pending_spec is None
+        assert panel._results_spec is None
+
+    def test_clicking_line_emits_open_location(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel.results.topLevelItemCount() == 2, timeout=5000)
+        emitted = []
+        panel.open_location.connect(lambda *a: emitted.append(a))
+        # first file's first (and only) line child
+        file_item = panel.results.topLevelItem(0)
+        line_item = file_item.child(0)
+        panel._on_item_activated(line_item, 0)
+        assert emitted and emitted[0][0] in ("a.py", "b.py")
+        assert emitted[0][1] == 1  # line number

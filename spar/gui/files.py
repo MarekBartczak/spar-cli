@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import time as _time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -220,6 +221,20 @@ def search_file(
     )
 
 
+def _stat_fingerprint(path):
+    """``(st_mtime_ns, st_size)`` of *path*, or ``None`` when unreadable.
+    reviews #23/#25: captured inside the scan itself — the python path
+    stats each file BEFORE reading it; the rg path snapshots the WHOLE
+    batch BEFORE launching rg (pre-launch dict rel → fingerprint) — so a
+    file modified between the scan's read and the GUI row creation keeps
+    its SCAN-time fingerprint and replace refuses it ("plik zmienił się")."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def search_paths(root, rel_paths, pattern) -> "list[SearchMatch]":
     """Reference python content search over *rel_paths*, sorted by
     (path, line, start). This is the shape ripgrep must reproduce."""
@@ -260,6 +275,7 @@ def replace_in_text(text: str, pattern, replacement: str, *, regex: bool):
     return "\n".join(new_lines), count
 
 
+_SEARCH_MAX_RESULTS = 5000  # cap enforced in BOTH engines (review #33)
 _RIPGREP_BATCH = 2000  # files per rg invocation (secondary bound)
 _RIPGREP_ARGV_BUDGET = 128 * 1024  # review #34: primary argv BYTE bound
 
@@ -663,6 +679,8 @@ if _HAS_QT:
         QSettings,
         QSortFilterProxyModel,
         QStringListModel,
+        QThread,
+        Slot,
     )
     from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import (
@@ -674,9 +692,14 @@ if _HAS_QT:
         QPushButton,
         QSplitter,
         QTabWidget,
+        QToolButton,
         QTreeView,
+        QTreeWidget,
+        QTreeWidgetItem,
         QVBoxLayout,
     )
+
+    _SEARCH_ABANDONED_THREADS: "set[QThread]" = set()
 
     from spar.gui.runner import RunnerState
 
@@ -1131,3 +1154,667 @@ if _HAS_QT:
                 else:
                     self._last_shift = None  # any other key breaks the pair
             return False  # never consume the event
+
+    class _SearchWorker(QObject):
+        """Runs the content search on a worker QThread. Every signal is
+        generation-stamped; the loop early-exits when a newer generation
+        supersedes it (``_live_generation`` is set from the GUI thread —
+        a plain int assignment, atomic in CPython)."""
+
+        # review #23: one FILE per batch — payload is
+        # (list[SearchMatch], fingerprint-or-None) so the scan-time stat
+        # travels with the matches it describes.
+        match_batch = Signal(int, object)   # generation, (list[SearchMatch], fingerprint)
+        # review #33: trailing bool = truncated (result cap hit mid-scan)
+        finished = Signal(int, int, int, bool)  # generation, total_matches, total_files, truncated
+
+        def __init__(self, project_dir, scan_file=None):
+            super().__init__()
+            self._project_dir = Path(project_dir)
+            self._scan_file = scan_file or search_file
+            self._live_generation = 0
+
+        @Slot(int, object)
+        def run_turn(self, generation: int, spec) -> None:
+            # review #2: NEVER write _live_generation here — the facade owns
+            # it (monotonic). The worker only READS it for early-exit. An
+            # older queued turn writing its own generation back would delay
+            # the newer search and repaint a cleared panel.
+            try:
+                pattern = compile_search_pattern(spec)
+            except re.error:
+                self.finished.emit(generation, 0, 0, False)
+                return
+            # reviews #4/#19: ripgrep ONLY for is_rg_compatible specs
+            # (case-sensitive, non-whole-word, literal) on the real scan
+            # path. rg runs to completion — or to the result cap (review
+            # #33) — grouped per file; None means "fall back to the python
+            # reference" (spawn failure, non-clean exit, or a non-UTF-8
+            # parse anomaly).
+            grouped = None
+            if (
+                self._scan_file is search_file
+                and is_rg_compatible(spec)
+                and ripgrep_available()
+            ):
+                grouped = self._ripgrep_grouped(generation, spec)
+            if grouped is not None:
+                groups, truncated = grouped  # review #33
+                self._emit_grouped(generation, groups, truncated)
+                return
+            # -- python reference path (regex, injected fake, or fallback) --
+            total_matches = 0
+            total_files = 0
+            truncated = False  # review #33: cap hit → flag, not silent stop
+            for rel in build_file_index(self._project_dir):
+                if generation != self._live_generation:
+                    return
+                # review #23: fingerprint BEFORE the read — a file
+                # modified after this stat (even mid-scan) must fail the
+                # replace-time verification.
+                fingerprint = _stat_fingerprint(self._project_dir / rel)
+                # review #35: cap BEFORE emitting — the old shape emitted
+                # each file's COMPLETE matches list and only then checked
+                # the cap. review #37: the remaining allowance is passed
+                # DOWN as search_file's limit so the scan stops at the cap
+                # instead of materializing millions of SearchMatch objects
+                # from one pathological file and slicing afterwards.
+                remaining = _SEARCH_MAX_RESULTS - total_matches
+                matches = self._scan_file(
+                    self._project_dir, rel, pattern, limit=remaining
+                )
+                if matches:
+                    # len == remaining ⇒ allowance exhausted ⇒ truncated.
+                    # The slice stays as belt-and-braces for an injected
+                    # scan_file that over-returns past its limit.
+                    if len(matches) >= remaining:
+                        matches = matches[:remaining]
+                        truncated = True  # review #33: mirrors the rg path
+                    total_files += 1
+                    total_matches += len(matches)
+                    self.match_batch.emit(generation, (matches, fingerprint))
+                if truncated:
+                    break
+            if generation == self._live_generation:
+                self.finished.emit(
+                    generation, total_matches, total_files, truncated
+                )
+
+        def _ripgrep_grouped(self, generation, spec):
+            """Run rg for an is_rg_compatible *spec* (review #19) over the
+            EXPLICIT file list from build_file_index (review #13),
+            prefiltered by passes_search_guards and batched by _rg_batches
+            (review #34: argv BYTE budget first, file count second;
+            review #36: the budget counts the ABSOLUTE ``str(root / rel)``
+            strings build_ripgrep_argv actually passes — see the
+            builder's docstring; an E2BIG that still slips through
+            surfaces as OSError from Popen and takes the fallback below);
+            return ``(grouped, truncated)`` where *grouped* is a list of
+            (rel, fingerprint, [SearchMatch]) grouped per file and
+            *truncated* flags a result-cap stop (review #33) — or None to
+            signal a python fallback (review #4).
+
+            review #33: the _SEARCH_MAX_RESULTS cap is enforced HERE,
+            while parsing — accumulating everything and letting
+            _emit_grouped cap the EMISSION would still hold an unbounded
+            `grouped` in memory (a common literal over a big tree can
+            match millions of lines → OOM). On reaching the cap the
+            worker kills rg mid-stream, skips the remaining batches, and
+            returns what it has with truncated=True, mirroring the python
+            path's cap-break.
+
+            review #13: rg is handed the exact same file set the python
+            reference scans (``rg -e pat -- f1 f2 …``) instead of a directory
+            root, so the two engines can never diverge on filesystem
+            semantics (symlinked files, .gitignore, hidden files, excludes).
+
+            reviews #14/#22/#24: each batch runs under subprocess.Popen.
+            A daemon reader thread drains stdout into a queue.Queue
+            (None sentinel = EOF) so rg can never block on a full pipe;
+            the worker pulls lines with queue.get(timeout=0.05) and
+            re-checks self._live_generation on EVERY timeout tick —
+            review #24: a large no-match batch emits NO stdout, so a
+            worker blocking in `for line in proc.stdout` awaiting output
+            could not see a supersede until the batch ended, stalling
+            this run and every queued search. Waiting for exit before
+            reading (poll loop + communicate) would DEADLOCK once the
+            --json output exceeds the OS pipe capacity (~64 KB). A
+            second daemon thread drains stderr. A superseding search
+            kills rg mid-stream (or mid-silence) and returns None (the
+            caller then takes the python path, whose first generation
+            check early-exits at once). Never blocks a newer query
+            behind a slow rg.
+
+            reviews #23/#25: every file of a batch is statted BEFORE
+            that batch's rg process is launched (pre-launch snapshot
+            dict rel → fingerprint); parsed groups take their
+            fingerprints from the snapshot. Stat-at-first-parsed-match
+            ran AFTER rg had already read the file and could bless a
+            write landing between rg's read and the parse."""
+            import queue
+            import subprocess
+            import threading
+
+            # review #19: apply the SAME size/binary guards the python
+            # reference applies (shared predicate), so rg never scans a
+            # file search_file would skip.
+            files = [
+                rel for rel in build_file_index(self._project_dir)
+                if passes_search_guards(self._project_dir, rel)
+            ]
+            if not files:
+                return ([], False)
+            # Each file appears in exactly one batch and rg keeps a file's
+            # matches contiguous, so per-file grouping is stable across
+            # the consecutive batches (state spans the batch loop).
+            grouped: list = []
+            current_rel = None
+            bucket: list = []
+            total_parsed = 0  # review #33: cap counted DURING the parse
+            fingerprints: dict = {}  # review #25: pre-launch snapshot
+            # review #34: byte-budget batches, count as secondary bound;
+            # review #36: budgeted on the ABSOLUTE strings rg receives.
+            for batch in _rg_batches(self._project_dir, files):
+                if generation != self._live_generation:
+                    return None  # superseded → python path early-exits
+                # review #25: stat the WHOLE batch BEFORE launching rg —
+                # rg reads the files only after this snapshot, so any
+                # later write (even mid-stream) fails the replace-time
+                # fingerprint verification.
+                for rel in batch:
+                    fingerprints[rel] = _stat_fingerprint(
+                        self._project_dir / rel
+                    )
+                argv = build_ripgrep_argv(self._project_dir, spec, batch)
+                try:
+                    proc = subprocess.Popen(
+                        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                except OSError:
+                    return None  # spawn/exec failure
+                # review #22: drain stderr on a side thread so a warning-
+                # spewing rg can never fill THAT pipe either.
+                stderr_chunks: list = []
+                drain = threading.Thread(
+                    target=lambda: stderr_chunks.append(proc.stderr.read()),
+                    daemon=True,
+                )
+                drain.start()
+                # review #24: a daemon reader pushes stdout lines into a
+                # queue (None = EOF) — the worker never blocks on the
+                # pipe itself, so a supersede is noticed within ~50 ms
+                # even while rg emits nothing (large no-match batch).
+                lines: "queue.Queue" = queue.Queue()
+
+                def _pump(out=proc.stdout, q=lines):
+                    for line in out:
+                        q.put(line)
+                    q.put(None)
+
+                reader = threading.Thread(target=_pump, daemon=True)
+                reader.start()
+
+                def _stdout_lines():
+                    # reviews #22/#24: queue.get with a 50 ms timeout —
+                    # the live generation is checked on every tick, not
+                    # only between lines.
+                    while True:
+                        if generation != self._live_generation:
+                            return  # loop below sees the stale generation
+                        try:
+                            line = lines.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
+                        if line is None:
+                            return  # EOF — rg closed stdout
+                        yield line
+
+                try:
+                    for m in parse_ripgrep_stream(
+                        _stdout_lines(), self._project_dir
+                    ):
+                        if m.path != current_rel:
+                            if current_rel is not None:
+                                grouped.append((
+                                    current_rel,
+                                    # review #25: fingerprint from the
+                                    # PRE-launch snapshot, never a stat
+                                    # taken after rg read the file.
+                                    fingerprints[current_rel],
+                                    bucket,
+                                ))
+                                bucket = []
+                            current_rel = m.path
+                        bucket.append(m)
+                        total_parsed += 1
+                        if total_parsed >= _SEARCH_MAX_RESULTS:
+                            # review #33: cap reached WHILE parsing —
+                            # kill rg mid-stream, skip every remaining
+                            # batch, flush the open bucket and return the
+                            # collected groups flagged as truncated.
+                            proc.kill()
+                            proc.wait()
+                            reader.join()
+                            drain.join()
+                            grouped.append((
+                                current_rel,
+                                fingerprints[current_rel],
+                                bucket,
+                            ))
+                            return (grouped, True)
+                except _RipgrepParseError:
+                    proc.kill()
+                    proc.wait()
+                    reader.join()
+                    drain.join()
+                    return None  # non-UTF-8 "bytes" member → python reference
+                if generation != self._live_generation:
+                    # review #14/#24: kill mid-stream OR mid-silence,
+                    # never await — the queue drain guarantees this
+                    # branch is reached within ~50 ms of the supersede.
+                    proc.kill()
+                    proc.wait()
+                    reader.join()
+                    drain.join()
+                    return None  # cancelled mid-run → python early-exits
+                proc.wait()      # stdout is exhausted — rg is exiting
+                reader.join()
+                drain.join()
+                err = (stderr_chunks[0] if stderr_chunks else "") or ""
+                # rg exit codes: 0 = matches, 1 = no matches, >=2 = error.
+                if proc.returncode not in (0, 1) or err.strip():
+                    return None
+            if current_rel is not None:
+                grouped.append(
+                    (current_rel, fingerprints[current_rel], bucket)
+                )
+            return (grouped, False)
+
+        def _emit_grouped(self, generation, grouped, truncated):
+            # review #33: the cap is enforced at PARSE time (see
+            # _ripgrep_grouped) — `grouped` is already ≤ the cap; the
+            # break below is a defensive belt only.
+            total_matches = 0
+            total_files = 0
+            for _rel, fingerprint, bucket in grouped:
+                if generation != self._live_generation:
+                    return
+                if bucket:
+                    total_files += 1
+                    total_matches += len(bucket)
+                    # review #23: the scan-time fingerprint travels with
+                    # its file's matches.
+                    self.match_batch.emit(generation, (bucket, fingerprint))
+                if total_matches >= _SEARCH_MAX_RESULTS:
+                    break
+            if generation == self._live_generation:
+                self.finished.emit(
+                    generation, total_matches, total_files, truncated
+                )
+
+    # review #3: strong registry pinning every live SearchSession. The
+    # QThread is owned by shiboken (no Qt parent), so its C++ object is
+    # deleted when the facade's Python wrapper is garbage-collected — and
+    # Qt ABORTS (or, mid-run, SEGFAULTS as it races the worker) if that
+    # happens while the thread runs. A worker that finished a search sits
+    # IDLE in its event loop (``isRunning() is True``), so it never
+    # self-stops. pytest-qt holds only a WEAKREF to a panel, so its
+    # teardown ``close()`` (hence ``closeEvent``/``stop()``) can be skipped
+    # and the facade GC'd at an arbitrary later point. Pinning it here
+    # keeps every facade (and its thread) alive until an explicit
+    # ``stop()`` unpins it — making teardown deterministic instead of
+    # racing GC finalization against Qt's C++ destruction.
+    _LIVE_SEARCH_SESSIONS: "set[SearchSession]" = set()
+
+    def _shutdown_search_thread(thread) -> None:
+        """Quit and JOIN *thread* if it is still running. Registered as a
+        ``weakref.finalize`` on every SearchSession so a facade that is
+        never explicitly stopped still tears its thread down cleanly when
+        it is finalized — for a pinned facade that is at interpreter exit
+        (weakref runs pending finalizers before the modules are torn
+        down). Captures only the thread, never the facade."""
+        try:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(3000)
+        except RuntimeError:
+            pass
+
+    class SearchSession(QObject):
+        """GUI-thread facade over _SearchWorker (mirrors ConversationSession):
+        generation-token cancellation, generation-filtered delivery."""
+
+        batch = Signal(object)        # (list[SearchMatch], fingerprint) — one file
+        # review #33: trailing bool = truncated ("wyniki obcięte")
+        finished = Signal(int, int, bool)  # total_matches, total_files, truncated
+        _dispatch = Signal(int, object)  # generation, spec
+
+        def __init__(self, project_dir, parent=None, scan_file=None):
+            super().__init__(parent)
+            self._generation = 0
+            self._started = False   # review #3: lazy thread start
+            self._stopped = False   # review #3: idempotent stop
+            self._thread = QThread()
+            self._worker = _SearchWorker(project_dir, scan_file=scan_file)
+            self._worker.moveToThread(self._thread)
+            self._dispatch.connect(
+                self._worker.run_turn, Qt.ConnectionType.QueuedConnection
+            )
+            self._worker.match_batch.connect(
+                self._on_batch, Qt.ConnectionType.QueuedConnection
+            )
+            self._worker.finished.connect(
+                self._on_finished, Qt.ConnectionType.QueuedConnection
+            )
+            self._thread.finished.connect(self._worker.deleteLater)
+            # review #3: guarantee the QThread is quit+joined before its
+            # shiboken-owned C++ object is destroyed, even if the owner is
+            # garbage-collected before closeEvent/stop() runs (see
+            # _shutdown_search_thread). The finalizer captures only the
+            # thread (never self), so it does not keep the facade alive.
+            self._finalizer = weakref.finalize(
+                self, _shutdown_search_thread, self._thread
+            )
+            # review #3: pin until stop() so GC never tears the running
+            # thread down mid-run (races Qt's C++ destruction → segfault).
+            _LIVE_SEARCH_SESSIONS.add(self)
+
+        def _ensure_started(self) -> None:
+            # review #3: only spawn the QThread once a search actually runs,
+            # so panels that never search never leak a thread.
+            if not self._started and not self._stopped:
+                self._thread.start()
+                self._started = True
+
+        def search(self, spec) -> None:
+            self._ensure_started()
+            self._generation += 1
+            # Set the worker's live generation BEFORE dispatch so an
+            # in-flight older run sees the bump and bails (int write is
+            # atomic in CPython; the worker only ever reads it — review #2).
+            self._worker._live_generation = self._generation
+            self._dispatch.emit(self._generation, spec)
+
+        def cancel(self) -> None:
+            # review #2: supersede any in-flight run WITHOUT dispatching a
+            # new one (empty/invalid query). Late batches are dropped by the
+            # generation filter and the worker loop early-exits.
+            self._generation += 1
+            self._worker._live_generation = self._generation
+
+        def stop(self) -> None:
+            if self._stopped:   # review #3: idempotent
+                return
+            self._stopped = True
+            _LIVE_SEARCH_SESSIONS.discard(self)  # review #3: unpin
+            self._generation += 1
+            # review #14: bump the worker's live generation too, so an
+            # in-flight python scan (or an rg poll loop) sees the supersede
+            # and bails PROMPTLY instead of finishing the whole walk before
+            # the thread quits.
+            self._worker._live_generation = self._generation
+            thread = self._thread
+            try:
+                if thread.isRunning():
+                    _SEARCH_ABANDONED_THREADS.add(thread)
+
+                    def _release(thread=thread) -> None:
+                        thread.deleteLater()
+                        _SEARCH_ABANDONED_THREADS.discard(thread)
+
+                    thread.finished.connect(_release)
+                thread.quit()
+                # review #3: JOIN the (now generation-bumped) thread so a
+                # caller's teardown — SearchPanel.closeEvent under
+                # qtbot.addWidget has no fixture that waits — never destroys
+                # a still-running QThread (Qt aborts the process on that).
+                # The worker bails promptly on the supersede, so this returns
+                # in ~ms; the bounded timeout keeps a genuinely stuck thread
+                # abandoned (already in _SEARCH_ABANDONED_THREADS) instead of
+                # blocking the GUI indefinitely.
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+
+        def _on_batch(self, generation: int, payload) -> None:
+            if generation != self._generation:
+                return
+            self.batch.emit(payload)
+
+        def _on_finished(self, generation: int, total_matches: int,
+                         total_files: int, truncated: bool) -> None:
+            if generation != self._generation:
+                return
+            self.finished.emit(total_matches, total_files, truncated)
+
+    class SearchPanel(QWidget):
+        """Find/replace-in-files dock (ADR 0006 tranche B). Replace UI is
+        added in Task 4; this task builds search + results + status."""
+
+        open_location = Signal(str, int, int, int)  # rel, line, start, end
+
+        def __init__(self, project_dir, parent=None, session=None):
+            super().__init__(parent)
+            self.setObjectName("searchPanel")
+            self.project_dir = Path(project_dir)
+            self._invalid = False
+            self._replace_enabled = True
+            # review #5/#15: the spec whose results FULLY populate the tree.
+            # Replace reuses THIS, not the live controls; if the controls
+            # drift from it the replace button is disabled. It is promoted
+            # from _pending_spec ONLY in _on_finished (never at dispatch), so
+            # a still-running search never exposes a partial tree to replace.
+            self._pending_spec = None
+            self._results_spec = None
+            # review #16: sticky replace summary; when set, the refresh
+            # search's _on_finished appends its counts to it (not overwrite).
+            self._replace_summary = None
+
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(6, 4, 6, 4)
+            outer.setSpacing(4)
+
+            # -- query row --
+            query_row = QHBoxLayout()
+            self.query = QLineEdit(self)
+            self.query.setObjectName("searchQuery")
+            self.query.setPlaceholderText("Szukaj w plikach… (Enter)")
+            self.query.returnPressed.connect(self._run_search)
+            # review #5: editing the query without re-running marks the
+            # existing results stale (disables replace).
+            self.query.textChanged.connect(self._update_replace_state)
+            query_row.addWidget(self.query, stretch=1)
+            self.case_toggle = QToolButton(self)
+            self.case_toggle.setObjectName("searchToggle")
+            self.case_toggle.setText("Aa")
+            self.case_toggle.setCheckable(True)
+            self.case_toggle.setToolTip("Rozróżniaj wielkość liter")
+            self.regex_toggle = QToolButton(self)
+            self.regex_toggle.setObjectName("searchToggle")
+            self.regex_toggle.setText(".*")
+            self.regex_toggle.setCheckable(True)
+            self.regex_toggle.setToolTip("Wyrażenie regularne")
+            self.word_toggle = QToolButton(self)
+            self.word_toggle.setObjectName("searchToggle")
+            self.word_toggle.setText("W")
+            self.word_toggle.setCheckable(True)
+            self.word_toggle.setToolTip("Całe słowa")
+            for tb in (self.case_toggle, self.regex_toggle, self.word_toggle):
+                tb.clicked.connect(self._run_search)
+                query_row.addWidget(tb)
+            outer.addLayout(query_row)
+
+            # -- results tree --
+            self.results = QTreeWidget(self)
+            self.results.setObjectName("searchResults")
+            self.results.setHeaderHidden(True)
+            self.results.itemActivated.connect(self._on_item_activated)
+            self.results.itemClicked.connect(self._on_item_activated)
+            outer.addWidget(self.results, stretch=1)
+
+            # -- status --
+            self.status = QLabel("", self)
+            self.status.setObjectName("searchStatus")
+            outer.addWidget(self.status)
+
+            self._session = session or SearchSession(self.project_dir, self)
+            self._session.batch.connect(self._on_batch)
+            self._session.finished.connect(self._on_finished)
+
+        # -- spec / validation --
+        def _current_spec(self):
+            return SearchSpec(
+                self.query.text(),
+                regex=self.regex_toggle.isChecked(),
+                case_sensitive=self.case_toggle.isChecked(),
+                whole_word=self.word_toggle.isChecked(),
+            )
+
+        def _mark_invalid(self, invalid: bool) -> None:
+            self._invalid = invalid
+            self.query.setProperty("invalid", invalid)
+            # Repolish so the dynamic-property QSS re-applies.
+            self.query.style().unpolish(self.query)
+            self.query.style().polish(self.query)
+
+        def focus_query(self) -> None:
+            self.query.setFocus()
+            self.query.selectAll()
+
+        def set_replace_enabled(self, enabled: bool) -> None:
+            self._replace_enabled = enabled  # Task 4 wires the widgets
+            self._update_replace_state()
+
+        def stop_session(self) -> None:
+            # review #3: idempotent teardown of the search thread. Called by
+            # closeEvent, FilesView.stop_search/closeEvent (review #21),
+            # and MainWindow.closeEvent.
+            self._session.stop()
+
+        def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+            self.stop_session()
+            super().closeEvent(event)
+
+        def _update_replace_state(self) -> None:
+            # review #5: replace targets the spec whose results are shown.
+            # If the live controls drift from it (query edited, toggle
+            # changed without re-running), disable replace with a hint.
+            # Defensive: no-op until Task 4 adds the replace button.
+            button = getattr(self, "replace_button", None)
+            if button is None:
+                return
+            stale = (
+                self._results_spec is None
+                or self._results_spec != self._current_spec()
+            )
+            button.setEnabled(self._replace_enabled and not stale)
+            button.setToolTip(
+                "wyniki nieaktualne — uruchom szukanie ponownie"
+                if (stale and self._replace_enabled) else ""
+            )
+
+        # -- run --
+        def _run_search(self, *_args, preserve_summary: bool = False) -> None:
+            # *_args absorbs the bool that QToolButton.clicked emits (the
+            # toggles connect straight to this slot). review #16: a
+            # user-initiated search clears any sticky replace summary; only
+            # the post-replace refresh passes preserve_summary=True.
+            if not preserve_summary:
+                self._replace_summary = None
+            spec = self._current_spec()
+            if not spec.query:
+                # review #2: cancel any in-flight run so it can't repopulate
+                # the panel we are about to clear.
+                self._session.cancel()
+                self.results.clear()
+                self.status.setText("")
+                self._mark_invalid(False)
+                self._pending_spec = None
+                self._results_spec = None
+                self._update_replace_state()
+                return
+            try:
+                compile_search_pattern(spec)
+            except re.error:
+                self._session.cancel()  # review #2: cancel in-flight
+                # review #28: mirror the empty-query path — the cancelled
+                # run may already have delivered partial batches, so clear
+                # the tree and reset BOTH specs; otherwise stale partial
+                # results sit under the error banner and (with specs still
+                # set) could even be replaced.
+                self.results.clear()
+                self._pending_spec = None
+                self._results_spec = None
+                self._mark_invalid(True)
+                self.status.setText("niepoprawne wyrażenie regularne")
+                self._update_replace_state()
+                return
+            self._mark_invalid(False)
+            self.results.clear()
+            if not preserve_summary:
+                self.status.setText("szukam…")
+            # review #15: the tree is being (re)built for *spec* but is NOT
+            # yet complete. Stash it as _pending_spec ONLY; keep _results_spec
+            # None so replace stays DISABLED until _on_finished promotes it —
+            # otherwise a partial (mid-scan) tree could be replaced.
+            self._pending_spec = spec
+            self._results_spec = None
+            self._session.search(spec)
+            self._update_replace_state()
+
+        def _on_batch(self, payload) -> None:
+            # Group into (or reuse) a file row, append line children.
+            # review #23: the scan-time fingerprint arrives WITH the
+            # matches; the GUI only stores it, never stats the file.
+            matches, fingerprint = payload
+            for m in matches:
+                file_item = self._file_item(m.path, fingerprint)
+                line_item = QTreeWidgetItem(file_item, [f"{m.line}: {m.text}"])
+                line_item.setData(0, Qt.ItemDataRole.UserRole,
+                                  (m.path, m.line, m.start, m.end))
+                count = file_item.childCount()
+                file_item.setText(0, f"{m.path}  ({count})")
+
+        def _file_item(self, rel: str, fingerprint):
+            for i in range(self.results.topLevelItemCount()):
+                item = self.results.topLevelItem(i)
+                if item.data(0, Qt.ItemDataRole.UserRole + 1) == rel:
+                    return item
+            item = QTreeWidgetItem(self.results, [f"{rel}  (0)"])
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, rel)
+            # review #23: store the SCAN-TIME fingerprint from the payload
+            # (rows are built after rg scanned a whole batch — a GUI-side
+            # stat here would bless STALE matches with a NEW fingerprint).
+            item.setData(0, Qt.ItemDataRole.UserRole + 2, fingerprint)
+            item.setExpanded(True)
+            return item
+
+        def _on_finished(self, total_matches: int, total_files: int,
+                         truncated: bool = False) -> None:
+            # review #15: the tree is now COMPLETE for _pending_spec — only
+            # here (never at dispatch) is it promoted to the replace target.
+            # The facade already generation-filters finished, so this fires
+            # only for the current (live) search.
+            self._results_spec = self._pending_spec
+            counts = f"{total_matches} wyników w {total_files} plikach"
+            if truncated:  # review #33: the scan stopped at the cap
+                counts += (
+                    f" · wyniki obcięte do {_SEARCH_MAX_RESULTS}"
+                )
+            # review #16: if a replace just ran, this is its refresh search —
+            # append the counts to the sticky summary instead of clobbering
+            # it, then consume the summary (persists until the next search).
+            if self._replace_summary is not None:
+                self.status.setText(f"{self._replace_summary} · {counts}")
+                self._replace_summary = None
+            else:
+                self.status.setText(counts)
+            self._update_replace_state()
+
+        def _on_item_activated(self, item, _col) -> None:
+            payload = item.data(0, Qt.ItemDataRole.UserRole)
+            if payload is None:  # a file row, not a line
+                return
+            rel, line, start, end = payload
+            self.open_location.emit(rel, line, start, end)
