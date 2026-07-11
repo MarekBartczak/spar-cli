@@ -1601,23 +1601,31 @@ if _HAS_QT:
             self._last_shift = None
             self._now = _time.monotonic
             self._last_event = None
+            self._last_ts = None
 
         def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
             if event.type() == QEvent.Type.KeyPress:
                 if getattr(event, "isAutoRepeat", lambda: False)():
                     return False
-                # A bare Shift is not consumed by the focused widget, so Qt
-                # re-delivers the SAME event object up the parent chain and an
-                # application-level filter sees every hop. Without dedup one
-                # physical press counts as several presses → the finder fired
-                # on a SINGLE Shift (live finding). Dedup by wrapper identity;
-                # HOLDING the reference keeps the id unique (no heap reuse —
-                # an id()+timestamp pair proved flaky when two synthetic
-                # events shared an address and a zero timestamp). The wrapper
-                # is only compared by identity, never dereferenced later.
-                if event is self._last_event:
-                    return False
-                self._last_event = event
+                # One PHYSICAL key press reaches an application-level filter
+                # several times: Qt delivers a QWindow-level event and then a
+                # DISTINCT QKeyEvent instance to the focused widget, and an
+                # unconsumed bare Shift additionally propagates up the parent
+                # chain. Identity dedup missed the window/widget pair (they
+                # are different objects) → the finder still fired on a single
+                # Shift (live finding #2). All copies of one physical press
+                # share its input timestamp, so dedup on that; synthetic test
+                # events carry timestamp 0 → fall back to wrapper identity
+                # (the reference is held so the id cannot be heap-reused).
+                ts = event.timestamp()
+                if ts:
+                    if ts == self._last_ts:
+                        return False
+                    self._last_ts = ts
+                else:
+                    if event is self._last_event:
+                        return False
+                    self._last_event = event
                 if event.key() == Qt.Key.Key_Shift:
                     # review #7: require a BARE Shift. On the Shift keypress
                     # the only modifier that may legitimately be reported is
@@ -2163,8 +2171,12 @@ if _HAS_QT:
             # a fresh dialog always starts unchecked.
             self.mask_combo.addItems(self._mask_history())
             self.mask_combo.setEditText(self.mask_combo.currentText())
-            mask_row.addWidget(self.mask_combo, stretch=1)
-            outer.addLayout(mask_row)
+            # WebStorm-style: a NARROW mask field in the TOP row, left-aligned
+            # (live finding — the full-width row under the query read badly).
+            self.mask_combo.setFixedWidth(220)
+            mask_row.addWidget(self.mask_combo)
+            mask_row.addStretch(1)
+            outer.insertLayout(0, mask_row)
             # Toggling the mask re-runs like the other toggles; editing the
             # mask text is spec drift, exactly like editing the query.
             self.mask_check.toggled.connect(self.mask_combo.setEnabled)

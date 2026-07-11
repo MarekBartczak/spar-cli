@@ -523,6 +523,38 @@ class TestDoubleShift:
         filt.eventFilter(None, ev2)
         assert fired == [1]
 
+    def test_window_and_widget_copies_count_as_one_press(self, qtbot):
+        # Live finding #2: one physical press yields a QWindow-level event
+        # AND a distinct widget-level QKeyEvent instance — identity dedup
+        # missed the pair. Copies share the input timestamp; a genuinely new
+        # press carries a new timestamp.
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+
+        def shift(ts):
+            ev = QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Shift,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            ev.setTimestamp(ts)
+            return ev
+
+        filt._now = lambda: 0.0
+        # One physical press: two DISTINCT instances, same timestamp.
+        filt.eventFilter(None, shift(1000))
+        filt.eventFilter(None, shift(1000))
+        assert fired == []  # single press must NOT trigger
+        # Second physical press (new timestamp, again two copies) → trigger.
+        filt._now = lambda: 0.2
+        filt.eventFilter(None, shift(1180))
+        filt.eventFilter(None, shift(1180))
+        assert fired == [1]
+
     def test_other_key_between_resets(self, qtbot):
         from PySide6.QtCore import QEvent, Qt
         from PySide6.QtGui import QKeyEvent
