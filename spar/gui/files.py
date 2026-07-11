@@ -2149,16 +2149,16 @@ if _HAS_QT:
                 query_row.addWidget(tb)
             outer.addLayout(query_row)
 
-            # -- file-mask row (WebStorm "File mask") --
+            # -- file mask (WebStorm "File mask"): SAME row as the query,
+            # right of the Aa/.*/W toggles, narrow (live finding #3) --
             self._settings = QSettings("spar", "gui")
-            mask_row = QHBoxLayout()
             self.mask_check = QCheckBox("Maska plików:", self)
             self.mask_check.setObjectName("searchMaskCheck")
             self.mask_check.setToolTip(
                 "Ogranicz szukanie do plików pasujących do masek "
                 "(np. *.ts, *.tsx)"
             )
-            mask_row.addWidget(self.mask_check)
+            query_row.addWidget(self.mask_check)
             self.mask_combo = QComboBox(self)
             self.mask_combo.setObjectName("searchMaskCombo")
             self.mask_combo.setEditable(True)
@@ -2171,12 +2171,8 @@ if _HAS_QT:
             # a fresh dialog always starts unchecked.
             self.mask_combo.addItems(self._mask_history())
             self.mask_combo.setEditText(self.mask_combo.currentText())
-            # WebStorm-style: a NARROW mask field in the TOP row, left-aligned
-            # (live finding — the full-width row under the query read badly).
-            self.mask_combo.setFixedWidth(220)
-            mask_row.addWidget(self.mask_combo)
-            mask_row.addStretch(1)
-            outer.insertLayout(0, mask_row)
+            self.mask_combo.setFixedWidth(150)
+            query_row.addWidget(self.mask_combo)
             # Toggling the mask re-runs like the other toggles; editing the
             # mask text is spec drift, exactly like editing the query.
             self.mask_check.toggled.connect(self.mask_combo.setEnabled)
