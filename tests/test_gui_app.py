@@ -101,6 +101,39 @@ class TestMainWindow:
         assert marker.exists()
         assert marker.read_text() == "sigint"
 
+    def test_state_changed_drives_chat_banner_for_running_and_locked(self, qtbot, tmp_path):
+        # Review #28: LOCKED means a CONFIRMED live sibling spar process — the
+        # read-only banner must show for it exactly as for our own RUNNING child,
+        # and hide again on non-live states.
+        from spar.gui.runner import RunnerState
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        calls = []
+        window.chat_panel.set_running = lambda flag: calls.append(flag)
+        window._on_state_changed(RunnerState.RUNNING)
+        window._on_state_changed(RunnerState.IDLE)
+        window._on_state_changed(RunnerState.LOCKED)
+        window._on_state_changed(RunnerState.DONE)
+        assert calls == [True, False, True, False]
+
+    def test_mainwindow_close_stops_chat_session(self, qtbot, tmp_path):
+        # Review #11: drives MainWindow.close() through closeEvent and asserts
+        # the chat session is stopped (the earlier retention test never
+        # constructed/closed a MainWindow).
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        calls = []
+        real_stop = window.chat_panel.stop_session
+
+        def spy():
+            calls.append("stop")
+            real_stop()  # still perform the real teardown (abandoned-thread safe)
+
+        window.chat_panel.stop_session = spy
+        window.close()  # -> closeEvent -> stop_session()
+        assert calls == ["stop"]
+
 
 class TestRailsLayout:
     """ADR 0005: JetBrains-style icon rails on both edges toggling the

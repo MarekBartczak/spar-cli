@@ -48,6 +48,13 @@ _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Di
 # QSplitter sizes expressing the required 1.7 : 1 left:right ratio.
 _SPLITTER_SIZES = [1700, 1000]
 
+# A run is LIVE (repo being mutated / read-only advisor caveat applies) in
+# these states. LOCKED = a CONFIRMED foreign spar process holds the lock
+# (review #28). GATE_PENDING is deliberately EXCLUDED: it also covers a
+# DEAD headless process that exited leaving a gate pending (exit 10) — no
+# live run then, and the gate force-open (Task 2) already dominates the UI.
+_CHAT_BANNER_STATES = frozenset({RunnerState.RUNNING, RunnerState.LOCKED})
+
 
 def _short_action_label(cmd: str) -> str:
     """Pure: map a spawned command line to a short Polish action label for
@@ -158,7 +165,7 @@ class MainWindow(QMainWindow):
         from spar.gui.toolbar import _grill_availability  # reuse the resolver
         chat_side_cfg, chat_timeout, _reason = _grill_availability(self.project_dir)
         self.chat_panel = OrchestratorChatPanel(
-            self.project_dir, chat_side_cfg, chat_timeout, session=None
+            self.project_dir, chat_side_cfg, chat_timeout
         )
         self.right_column = RightColumn(self.side_pane, self.chat_panel, self)
 
@@ -354,6 +361,7 @@ class MainWindow(QMainWindow):
 
     def _on_state_changed(self, state: RunnerState) -> None:
         toolbar_mod.apply_state(self.toolbar, state, self._current_status())
+        self.chat_panel.set_running(state in _CHAT_BANNER_STATES)
 
     def _on_started(self, cmd: str) -> None:
         self.statusBar().showMessage(f"uruchomiono: {cmd}")
@@ -497,6 +505,10 @@ class MainWindow(QMainWindow):
         self.runner._poll.stop()
         self.side_pane._poll.stop()
         self.runner.stop()
+        # Tear down the orchestrator chat session too (idempotent; a mid-turn
+        # worker thread is abandoned via _ABANDONED_THREADS, never destroyed
+        # while running — review #2).
+        self.chat_panel.stop_session()
         super().closeEvent(event)
 
 
