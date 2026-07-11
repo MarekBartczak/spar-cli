@@ -1804,3 +1804,135 @@ class TestFilesViewSearchWiring:
         assert session._stopped is True   # closeEvent tore it down
         assert view.search_dialog.isVisible() is False  # dialog closed too
         qtbot.waitUntil(lambda: not session._thread.isRunning(), timeout=5000)
+
+
+class TestSearchFileMask:
+    """WebStorm-style file mask: checkbox + editable combo restricting the
+    searched file set (comma-separated basename globs, e.g. *.ts, *.tsx)."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_qsettings(self):
+        # Same convention as test_gui_app.py: QSettings caches its config
+        # path at first use, so the conftest HOME isolation is not enough —
+        # clear the shared spar/gui store so mask history is hermetic.
+        from PySide6.QtCore import QSettings
+
+        QSettings("spar", "gui").clear()
+        yield
+
+    def _write_fixture(self, tmp_path):
+        (tmp_path / "a.py").write_text("todo py\n", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("todo txt\n", encoding="utf-8")
+
+    def _panel(self, qtbot, tmp_path, session=None):
+        from spar.gui.files import SearchPanel
+
+        self._write_fixture(tmp_path)
+        panel = SearchPanel(tmp_path, session=session)
+        qtbot.addWidget(panel)
+        return panel
+
+    def test_fresh_panel_mask_unchecked_and_combo_disabled(self, qtbot, tmp_path):
+        # The checkbox state is NOT persisted — a fresh panel always
+        # starts unchecked, with the combo disabled until checked.
+        panel = self._panel(qtbot, tmp_path)
+        assert panel.mask_check.isChecked() is False
+        assert panel.mask_combo.isEnabled() is False
+        panel.mask_check.setChecked(True)
+        assert panel.mask_combo.isEnabled() is True
+
+    def test_masked_search_scans_only_matching_files(self, qtbot, tmp_path):
+        # Mask *.py → only a.py appears in the tree AND (spy) the
+        # non-matching b.txt is never even read — the mask filters the
+        # indexed file list BEFORE guards/engines.
+        import spar.gui.files as fmod
+        from spar.gui.files import SearchPanel, SearchSession
+
+        self._write_fixture(tmp_path)
+        seen: list[str] = []
+
+        def spy(root, rel, pattern, limit=None):
+            seen.append(rel)
+            return fmod.search_file(root, rel, pattern, limit=limit)
+
+        session = SearchSession(tmp_path, scan_file=spy)
+        panel = SearchPanel(tmp_path, session=session)
+        qtbot.addWidget(panel)
+        panel.mask_check.setChecked(True)
+        panel.mask_combo.setEditText("*.py")
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        assert panel.results.topLevelItemCount() == 1
+        assert panel.results.topLevelItem(0).text(0).startswith("a.py")
+        assert "b.txt" not in seen  # never scanned, not just filtered out
+
+    def test_unchecked_mask_combo_is_ignored(self, qtbot, tmp_path):
+        # A mask typed into the combo has NO effect while unchecked.
+        panel = self._panel(qtbot, tmp_path)
+        panel.mask_combo.setEditText("*.py")
+        assert panel.mask_check.isChecked() is False
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(
+            lambda: panel.results.topLevelItemCount() == 2, timeout=5000
+        )
+
+    def test_mask_drift_after_search_disables_replace(self, qtbot, tmp_path):
+        # Editing the mask after a search is spec drift, exactly like
+        # editing the query: replace disables with the existing tooltip.
+        panel = self._panel(qtbot, tmp_path)
+        panel.mask_check.setChecked(True)
+        panel.mask_combo.setEditText("*.py")
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        assert panel.replace_button.isEnabled() is True
+        panel.mask_combo.setEditText("*.txt")  # drift
+        assert panel.replace_button.isEnabled() is False
+        assert "nieaktualne" in panel.replace_button.toolTip()
+
+    def test_replace_honors_stored_mask_and_noops_on_drift(self, qtbot, tmp_path):
+        # Even a forced _apply_replace targets the STORED spec — a drifted
+        # mask means no file is touched.
+        panel = self._panel(qtbot, tmp_path)
+        panel.mask_check.setChecked(True)
+        panel.mask_combo.setEditText("*.py")
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        panel.replace.setText("done")
+        panel.mask_combo.setEditText("*.txt")  # drift from stored spec
+        panel._apply_replace()                 # guarded no-op
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "todo py\n"
+        assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "todo txt\n"
+
+    def test_mask_history_round_trip(self, qtbot, tmp_path):
+        # A successful masked dispatch persists the mask; a NEW panel loads
+        # it into the combo — but starts UNCHECKED (state not persisted).
+        from spar.gui.files import SearchPanel
+
+        panel = self._panel(qtbot, tmp_path)
+        panel.mask_check.setChecked(True)
+        panel.mask_combo.setEditText("*.py")
+        panel.query.setText("todo")
+        panel._run_search()
+        qtbot.waitUntil(lambda: panel._results_spec is not None, timeout=5000)
+        assert panel._mask_history() == ["*.py"]
+        panel2 = SearchPanel(tmp_path)
+        qtbot.addWidget(panel2)
+        items = [panel2.mask_combo.itemText(i)
+                 for i in range(panel2.mask_combo.count())]
+        assert items == ["*.py"]
+        assert panel2.mask_check.isChecked() is False  # not persisted
+
+    def test_mask_history_dedups_and_keeps_last_eight(self, qtbot, tmp_path):
+        panel = self._panel(qtbot, tmp_path)
+        for i in range(10):
+            panel._push_mask_history(f"*.m{i}")
+        panel._push_mask_history("*.m5")  # dedup: moves to front
+        hist = panel._mask_history()
+        assert len(hist) == 8
+        assert hist[0] == "*.m5"
+        assert hist.count("*.m5") == 1
+        assert "*.m0" not in hist and "*.m1" not in hist  # oldest dropped

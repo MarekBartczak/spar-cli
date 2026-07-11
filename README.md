@@ -179,6 +179,10 @@ Enter (or double-click) opens it in the Pliki view, Esc closes.
 **Find in files (Ctrl+Shift+F).** Opens a floating **Szukaj w plikach**
 window (non-modal, resizable — its size and position are remembered):
 type a query, toggle **Aa** (case), **.*** (regex) or **W** (whole word);
+an optional **Maska plików:** checkbox with an editable combo restricts
+the search to files whose names match comma-separated globs
+(WebStorm-style, e.g. `*.ts, *.tsx`; the last 8 used masks are
+remembered across sessions, the checkbox always starts unchecked);
 results group as file → matching lines with a per-file count, and clicking
 a line opens the file at that match and dismisses the window. A second
 Ctrl+Shift+F brings the window back to front; **Esc** (or the window's

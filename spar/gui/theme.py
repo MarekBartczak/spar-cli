@@ -147,6 +147,16 @@ def build_qss() -> str:
     #searchQuery[invalid="true"] {{
         border: 1px solid {t['gate']};
     }}
+    #searchMaskCheck {{
+        color: {t['text']};
+    }}
+    #searchMaskCombo {{
+        background-color: {t['panel-alt']};
+        color: {t['text']};
+        border: 1px solid {t['line']};
+        border-radius: 4px;
+        padding: 2px 6px;
+    }}
     #searchToggle {{
         color: {t['text']};
         background-color: {t['panel']};

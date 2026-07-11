@@ -8,6 +8,7 @@ FileFinderOverlay, ...) is only defined when PySide6 is importable.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -30,6 +31,8 @@ __all__ = [
     "build_file_index",
     "SearchSpec",
     "SearchMatch",
+    "parse_file_mask",
+    "matches_file_mask",
     "compile_search_pattern",
     "search_text",
     "_utf16_offset",
@@ -136,11 +139,36 @@ _SEARCH_BINARY_SNIFF = 8192
 
 @dataclass(frozen=True)
 class SearchSpec:
-    """One find-in-files query with its mode toggles. Pure/hashable."""
+    """One find-in-files query with its mode toggles. Pure/hashable.
+
+    ``file_mask`` (WebStorm-style "Maska plików") is a tuple of globs
+    matched against each file's BASENAME (``None`` = no mask). Being a
+    frozen-dataclass field, a mask change automatically counts as spec
+    drift in SearchPanel's replace gating."""
     query: str
     regex: bool = False
     case_sensitive: bool = False
     whole_word: bool = False
+    file_mask: "tuple[str, ...] | None" = None
+
+
+def parse_file_mask(text: str) -> "tuple[str, ...] | None":
+    """Parse a comma-separated mask string (``"*.ts, *.tsx"``) into a
+    glob tuple: split on commas, strip whitespace, drop empties. An
+    all-empty input (``""``, ``" , "``) yields ``None`` — no mask. Pure."""
+    globs = tuple(part.strip() for part in text.split(",") if part.strip())
+    return globs or None
+
+
+def matches_file_mask(rel_path: str, mask: "tuple[str, ...] | None") -> bool:
+    """True when *rel_path*'s BASENAME matches any glob in *mask*
+    (``fnmatch.fnmatch`` — case-sensitive on posix). ``None`` mask passes
+    everything. Matching the basename (not the whole path) mirrors
+    WebStorm's file-mask semantics. Pure."""
+    if mask is None:
+        return True
+    base = rel_path.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(base, glob) for glob in mask)
 
 
 @dataclass(frozen=True)
@@ -774,6 +802,8 @@ if _HAS_QT:
     )
     from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
         QDialog,
         QFileSystemModel,
         QHBoxLayout,
@@ -1626,6 +1656,17 @@ if _HAS_QT:
             self._scan_file = scan_file or search_file
             self._live_generation = 0
 
+        def _indexed_files(self, spec) -> "list[str]":
+            """build_file_index filtered by the spec's file mask. The
+            SINGLE point where the mask is applied — BEFORE guards and
+            engines — so the python reference and the rg accelerator
+            inherit the exact same file set and a masked-out file is
+            never even opened."""
+            return [
+                rel for rel in build_file_index(self._project_dir)
+                if matches_file_mask(rel, spec.file_mask)
+            ]
+
         @Slot(int, object)
         def run_turn(self, generation: int, spec) -> None:
             # review #2: NEVER write _live_generation here — the facade owns
@@ -1658,7 +1699,7 @@ if _HAS_QT:
             total_matches = 0
             total_files = 0
             truncated = False  # review #33: cap hit → flag, not silent stop
-            for rel in build_file_index(self._project_dir):
+            for rel in self._indexed_files(spec):
                 if generation != self._live_generation:
                     return
                 # review #23: fingerprint BEFORE the read — a file
@@ -1751,7 +1792,7 @@ if _HAS_QT:
             # reference applies (shared predicate), so rg never scans a
             # file search_file would skip.
             files = [
-                rel for rel in build_file_index(self._project_dir)
+                rel for rel in self._indexed_files(spec)
                 if passes_search_guards(self._project_dir, rel)
             ]
             if not files:
@@ -2097,6 +2138,41 @@ if _HAS_QT:
                 query_row.addWidget(tb)
             outer.addLayout(query_row)
 
+            # -- file-mask row (WebStorm "File mask") --
+            self._settings = QSettings("spar", "gui")
+            mask_row = QHBoxLayout()
+            self.mask_check = QCheckBox("Maska plików:", self)
+            self.mask_check.setObjectName("searchMaskCheck")
+            self.mask_check.setToolTip(
+                "Ogranicz szukanie do plików pasujących do masek "
+                "(np. *.ts, *.tsx)"
+            )
+            mask_row.addWidget(self.mask_check)
+            self.mask_combo = QComboBox(self)
+            self.mask_combo.setObjectName("searchMaskCombo")
+            self.mask_combo.setEditable(True)
+            # History is managed explicitly via QSettings (below) — never
+            # let Enter auto-insert into the item model.
+            self.mask_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            self.mask_combo.setEnabled(False)  # follows the checkbox
+            # Load persisted mask history (most-recent first) BEFORE any
+            # signal wiring; the checkbox state itself is NOT persisted —
+            # a fresh dialog always starts unchecked.
+            self.mask_combo.addItems(self._mask_history())
+            self.mask_combo.setEditText(self.mask_combo.currentText())
+            mask_row.addWidget(self.mask_combo, stretch=1)
+            outer.addLayout(mask_row)
+            # Toggling the mask re-runs like the other toggles; editing the
+            # mask text is spec drift, exactly like editing the query.
+            self.mask_check.toggled.connect(self.mask_combo.setEnabled)
+            self.mask_check.clicked.connect(self._run_search)
+            self.mask_combo.editTextChanged.connect(
+                self._update_replace_state
+            )
+            self.mask_combo.lineEdit().returnPressed.connect(
+                self._run_search
+            )
+
             # -- replace row --
             replace_row = QHBoxLayout()
             self.replace = QLineEdit(self)
@@ -2141,7 +2217,36 @@ if _HAS_QT:
                 regex=self.regex_toggle.isChecked(),
                 case_sensitive=self.case_toggle.isChecked(),
                 whole_word=self.word_toggle.isChecked(),
+                file_mask=(
+                    parse_file_mask(self.mask_combo.currentText())
+                    if self.mask_check.isChecked() else None
+                ),
             )
+
+        # -- mask history (QSettings "files/mask_history", last 8) --
+        def _mask_history(self) -> "list[str]":
+            hist = self._settings.value("files/mask_history")
+            if hist is None:
+                return []
+            if isinstance(hist, str):  # QSettings collapses 1-elem lists
+                return [hist]
+            return [str(h) for h in hist]
+
+        def _push_mask_history(self, text: str) -> None:
+            text = text.strip()
+            if not text:
+                return
+            hist = [text] + [h for h in self._mask_history() if h != text]
+            hist = hist[:8]  # keep the last 8 used masks
+            self._settings.setValue("files/mask_history", hist)
+            # Rebuild the combo items (most-recent first) without touching
+            # the edit text or firing drift signals.
+            self.mask_combo.blockSignals(True)
+            current = self.mask_combo.currentText()
+            self.mask_combo.clear()
+            self.mask_combo.addItems(hist)
+            self.mask_combo.setEditText(current)
+            self.mask_combo.blockSignals(False)
 
         def _mark_invalid(self, invalid: bool) -> None:
             self._invalid = invalid
@@ -2363,6 +2468,8 @@ if _HAS_QT:
             self._pending_spec = spec
             self._results_spec = None
             self._session.search(spec)
+            if spec.file_mask is not None:  # successful masked dispatch
+                self._push_mask_history(self.mask_combo.currentText())
             self._update_replace_state()
 
         def _on_batch(self, payload) -> None:

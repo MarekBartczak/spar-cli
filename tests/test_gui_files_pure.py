@@ -23,6 +23,8 @@ from spar.gui.files import (
     filter_paths,
     fuzzy_score,
     is_rg_compatible,
+    matches_file_mask,
+    parse_file_mask,
     parse_ripgrep_stream,
     passes_search_guards,
     pick_lexer,
@@ -461,3 +463,47 @@ class TestRipgrepParity:
         )
         with pytest.raises(_RipgrepParseError):
             list(parse_ripgrep_stream(proc.stdout.splitlines(), tmp_path))
+
+
+class TestFileMask:
+    # -- parse_file_mask --
+    def test_parse_splits_strips_and_tuples(self):
+        assert parse_file_mask("*.ts, *.tsx") == ("*.ts", "*.tsx")
+
+    def test_parse_single_glob(self):
+        assert parse_file_mask("*.py") == ("*.py",)
+
+    def test_parse_drops_empty_parts(self):
+        assert parse_file_mask(" *.ts ,, ,*.tsx ") == ("*.ts", "*.tsx")
+
+    def test_parse_all_empty_is_none(self):
+        assert parse_file_mask("") is None
+        assert parse_file_mask(" , ") is None
+
+    # -- matches_file_mask --
+    def test_none_mask_passes_everything(self):
+        assert matches_file_mask("any/where/at.all", None) is True
+
+    def test_matches_basename_not_full_path(self):
+        # The glob applies to the BASENAME (WebStorm semantics): a nested
+        # .py matches *.py, and a directory-shaped glob does NOT match.
+        assert matches_file_mask("deep/nested/mod.py", ("*.py",)) is True
+        assert matches_file_mask("src/mod.py", ("src/*",)) is False
+
+    def test_ts_does_not_match_tsx(self):
+        assert matches_file_mask("app/main.tsx", ("*.ts",)) is False
+        assert matches_file_mask("app/main.tsx", ("*.ts", "*.tsx")) is True
+
+    def test_case_sensitive_on_posix(self):
+        assert matches_file_mask("A.PY", ("*.py",)) is False
+
+    def test_no_glob_matches_is_false(self):
+        assert matches_file_mask("readme.md", ("*.ts", "*.tsx")) is False
+
+    # -- SearchSpec integration --
+    def test_searchspec_default_mask_is_none_and_drift_detected(self):
+        base = SearchSpec("q")
+        assert base.file_mask is None
+        masked = SearchSpec("q", file_mask=("*.py",))
+        assert base != masked            # mask change == spec drift
+        assert hash(masked)              # stays hashable
