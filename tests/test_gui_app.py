@@ -102,6 +102,61 @@ class TestMainWindow:
         assert marker.read_text() == "sigint"
 
 
+class TestRailsLayout:
+    """ADR 0005: JetBrains-style icon rails on both edges toggling the
+    collapsible right column, with a pending-gate attention icon."""
+
+    def test_has_left_and_right_rails(self, qtbot, tmp_path):
+        from spar.gui.rails import IconRail
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        rails = window.findChildren(IconRail)
+        assert len(rails) == 2
+        assert "files" in window.left_rail.buttons
+        assert set(window.right_rail.buttons) >= {"tasks", "chat", "gate"}
+        assert window.left_rail.buttons["files"].isEnabled() is False
+
+    def test_collapsing_both_right_panels_hides_column(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.right_rail.buttons["tasks"].setChecked(False)
+        window.right_rail.buttons["chat"].setChecked(False)
+        # isHidden() reflects the explicit setVisible(False) regardless of whether
+        # the (never-shown) window has been shown — unlike isVisible(), which is
+        # vacuously False pre-show and would pass even if the code did nothing
+        # (review #8).
+        assert window.right_column.isHidden() is True
+        # Re-open one panel -> column reappears (explicitly not hidden).
+        window.right_rail.buttons["tasks"].setChecked(True)
+        assert window.right_column.isHidden() is False
+
+    def test_rail_state_persists_via_qsettings(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.right_rail.buttons["chat"].setChecked(False)
+        assert window._settings.value("rails/chat_visible") in (False, "false", 0, "0")
+
+    def test_gate_icon_hidden_without_pending_gate(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        # Fresh dir: no pending gate -> Bramka icon explicitly hidden (isHidden(),
+        # not the vacuous pre-show isVisible(); review #8).
+        assert window.right_rail.buttons["gate"].isHidden() is True
+
+    def test_new_pending_gate_force_opens_taski(self, qtbot, tmp_path):
+        # Review #4: a new pending gate auto-opens Taski without resolving it.
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.right_rail.set_checked("tasks", False)
+        window._on_rail_toggled("tasks", False)
+        assert window.right_rail.buttons["tasks"].isChecked() is False
+        window._on_status_changed(
+            {"pending_gate": {"name": "consensus", "context": {"task_id": "t1"}}}
+        )
+        assert window.right_rail.buttons["tasks"].isChecked() is True
+        assert window.right_rail.buttons["gate"].isHidden() is False
+
+
 class TestStartupIndicator:
     """Task brief, fix 3: an indeterminate progress bar + label shown between
     a start and the process's first output line (or its finish)."""

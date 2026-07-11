@@ -18,6 +18,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -25,11 +26,15 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
+from spar.gui.orchestrator import OrchestratorChatPanel
+from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
 from spar.gui.sidepane import SidePane
 from spar.gui.stream import LiveLogTailer, StreamPane
@@ -80,6 +85,26 @@ class Toolbar(QToolBar):
             self.actions_by_label[label] = action
 
 
+class RightColumn(QWidget):
+    """Right-side tool column: SidePane (Taski + gate) over the chat panel."""
+
+    def __init__(self, side_pane, chat_panel, parent=None):
+        super().__init__(parent)
+        self.setObjectName("rightColumn")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(side_pane, stretch=3)
+        layout.addWidget(chat_panel, stretch=2)
+        self._side_pane = side_pane
+        self._chat_panel = chat_panel
+
+    def set_tasks_visible(self, visible: bool) -> None:
+        self._side_pane.setVisible(visible)
+
+    def set_chat_visible(self, visible: bool) -> None:
+        self._chat_panel.setVisible(visible)
+
+
 class MainWindow(QMainWindow):
     """Top-level window: toolbar + (stream | side) split + status bar."""
 
@@ -123,15 +148,24 @@ class MainWindow(QMainWindow):
         # The consensus "Accept → start exec" auto-chain must run the same
         # dirty-tree pre-flight as the toolbar button (live finding).
         self.side_pane.gate_panel.preflight_auto_exec = self._commit_if_dirty
-        # SidePane's own constructor already ran one refresh() before this
-        # connection existed; re-sync now so Plan/Diff reflect the current
-        # status immediately rather than waiting for the next 2s tick.
-        self.side_pane.refresh()
+        # NOTE (review #1): the single explicit initial side_pane.refresh() is
+        # deferred to the END of __init__ — because _on_status_changed now
+        # touches self.right_rail (gate icon + force-open), the rails, the
+        # right column and the central widget must ALL be built and wired
+        # first. Do not re-add a refresh() here.
+
+        # Chat panel needs the same claude side-config resolution the grill uses.
+        from spar.gui.toolbar import _grill_availability  # reuse the resolver
+        chat_side_cfg, chat_timeout, _reason = _grill_availability(self.project_dir)
+        self.chat_panel = OrchestratorChatPanel(
+            self.project_dir, chat_side_cfg, chat_timeout, session=None
+        )
+        self.right_column = RightColumn(self.side_pane, self.chat_panel, self)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.addWidget(self.stream_pane)
-        self.splitter.addWidget(self.side_pane)
+        self.splitter.addWidget(self.right_column)
         # QSplitter.setSizes() scales its request to the splitter's OWN
         # current size, which without a show()/layout pass is still Qt's
         # tiny default -- too small to honor the ratio once the side pane
@@ -141,7 +175,28 @@ class MainWindow(QMainWindow):
         # showing it).
         self.splitter.resize(sum(_SPLITTER_SIZES), 900)
         self.splitter.setSizes(list(_SPLITTER_SIZES))
-        self.setCentralWidget(self.splitter)
+
+        self.left_rail = IconRail(
+            [RailButtonSpec("files", "Pliki", "Pliki (wkrótce)", icon="🗀", enabled=False)],
+            self,
+        )
+        self.right_rail = IconRail(
+            [
+                RailButtonSpec("tasks", "Taski", "Panel zadań i bramki", icon="☰"),
+                RailButtonSpec("chat", "Czat", "Czat z orkiestratorem", icon="💬"),
+                RailButtonSpec("gate", "Bramka", "Otwórz oczekującą bramkę",
+                               icon="⚠", checkable=False),
+            ],
+            self,
+        )
+        central = QWidget(self)
+        central_layout = QHBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.left_rail)
+        central_layout.addWidget(self.splitter, stretch=1)
+        central_layout.addWidget(self.right_rail)
+        self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar(self))
 
@@ -163,6 +218,32 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("spar", "gui")
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
+
+        tasks_visible = self._settings.value("rails/tasks_visible", True, type=bool)
+        chat_visible = self._settings.value("rails/chat_visible", True, type=bool)
+        self.right_rail.set_checked("tasks", tasks_visible)
+        self.right_rail.set_checked("chat", chat_visible)
+        self.right_rail.set_button_visible("gate", False)
+        self.right_rail.toggled.connect(self._on_rail_toggled)
+        self.right_rail.clicked.connect(self._on_rail_clicked)
+        # Track the LOGICAL right-column visibility ourselves (review #3): before
+        # the top-level window is shown, every widget reports isVisible()==False,
+        # so _apply_rail_layout() must NOT read effective visibility to decide
+        # whether to restore the splitter ratio — seed the tracker from the
+        # restored settings so the first _apply_rail_layout() is a no-op that
+        # preserves the QSettings-restored splitter sizes.
+        self._column_shown = right_column_visibility(tasks_visible, chat_visible)
+        # Force-open bookkeeping for a pending gate (review #4): identity of the
+        # gate whose panel we last auto-opened, so only a genuinely NEW gate edge
+        # re-opens Taski (and only OPENS it — never resolves/hides it).
+        self._prev_gate_key = None
+        self._apply_rail_layout()
+
+        # The single explicit initial status synchronization (review #1): now
+        # safe to run — the rails/right column/central widget are built and
+        # wired, so _on_status_changed can drive the gate icon and, when a gate
+        # is already pending on startup, force-open Taski.
+        self.side_pane.refresh()
 
         self.runner.started.connect(self._on_started)
         self.runner.finished.connect(self._on_finished)
@@ -204,6 +285,63 @@ class MainWindow(QMainWindow):
             for task_id, task in tasks.items()
         }
         self.stream_pane.set_models({"sides": self._side_models, "tasks": task_models})
+
+        pending_gate = status.get("pending_gate")
+        pending = bool(pending_gate)
+        self.right_rail.set_button_visible("gate", pending)
+        self.right_rail.set_attention("gate", pending)
+        # ADR 0005: a pending gate force-opens its panel. Fire only on the edge to
+        # a genuinely new gate (identity = name + task_id + rounds) so a user who
+        # deliberately collapsed Taski for the SAME gate isn't fought on every 2s
+        # poll; a brand-new gate still reasserts the panel. This only ever OPENS
+        # Taski — it never resolves, hides or destroys the gate.
+        gate_key = self._gate_identity(pending_gate)
+        if pending and gate_key != self._prev_gate_key:
+            if not self.right_rail.buttons["tasks"].isChecked():
+                self.right_rail.set_checked("tasks", True)
+                self._on_rail_toggled("tasks", True)  # persists + re-applies layout
+        self._prev_gate_key = gate_key if pending else None
+
+    @staticmethod
+    def _gate_identity(pending_gate: "dict | None") -> "tuple | None":
+        if not pending_gate:
+            return None
+        ctx = pending_gate.get("context") or {}
+        return (pending_gate.get("name"), ctx.get("task_id"), ctx.get("rounds"))
+
+    def _rail_state(self) -> tuple[bool, bool]:
+        return (
+            self.right_rail.buttons["tasks"].isChecked(),
+            self.right_rail.buttons["chat"].isChecked(),
+        )
+
+    def _apply_rail_layout(self) -> None:
+        tasks_visible, chat_visible = self._rail_state()
+        self.right_column.set_tasks_visible(tasks_visible)
+        self.right_column.set_chat_visible(chat_visible)
+        show_column = right_column_visibility(tasks_visible, chat_visible)
+        # Review #3: compare against the tracked LOGICAL previous state, NOT
+        # self.right_column.isVisible(). Pre-show, isVisible() is always False,
+        # so the old check treated normal startup as a hidden→shown transition
+        # and clobbered the QSettings-restored splitter sizes with
+        # _SPLITTER_SIZES. Restore the 1.7:1 ratio only on a real collapsed→
+        # shown edge.
+        if show_column and not self._column_shown:
+            self.right_column.setVisible(True)
+            self.splitter.setSizes(list(_SPLITTER_SIZES))  # restore 1.7:1
+        else:
+            self.right_column.setVisible(show_column)
+        self._column_shown = show_column
+
+    def _on_rail_toggled(self, key: str, checked: bool) -> None:
+        self._settings.setValue(f"rails/{key}_visible", checked)
+        self._apply_rail_layout()
+
+    def _on_rail_clicked(self, key: str) -> None:
+        if key == "gate":
+            # Force-open Taski (which hosts the GatePanel); never discards it.
+            self.right_rail.set_checked("tasks", True)
+            self._on_rail_toggled("tasks", True)
 
     def _current_status(self) -> dict:
         try:

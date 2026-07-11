@@ -76,4 +76,27 @@ def build_qss() -> str:
     #sidePane {{
         background-color: {t['panel-alt']};
     }}
+
+    #iconRail {{
+        background-color: {t['panel']};
+        border: none;
+    }}
+    #iconRail QToolButton {{
+        color: {t['text']};
+        background-color: {t['panel']};
+        border: 1px solid {t['line']};
+        border-radius: 4px;
+        font-size: 18px;   /* large glyph face -> reads as an icon, not a text label */
+    }}
+    #iconRail QToolButton:checked {{
+        background-color: {t['panel-alt']};
+        border: 1px solid {t['claude']};
+    }}
+    #iconRail QToolButton:disabled {{
+        color: {t['muted']};
+    }}
+    #iconRail QToolButton[attention="true"] {{
+        border: 1px solid {t['warn']};
+        color: {t['warn']};
+    }}
     """
