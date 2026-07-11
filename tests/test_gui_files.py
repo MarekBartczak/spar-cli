@@ -1563,3 +1563,140 @@ class TestEditorFindBar:
         tab = self._tab(qtbot, tmp_path)
         tab.editor.set_match_selections([])
         assert len(tab.editor.extraSelections()) == 1  # current line only
+
+
+class TestFilesViewSearchWiring:
+    def _view(self, qtbot, tmp_path):
+        from spar.gui.files import FilesView
+
+        (tmp_path / "app.py").write_text("todo one\nplain\n", encoding="utf-8")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "HEAD").write_text("ref\n")
+        view = FilesView(tmp_path)
+        qtbot.addWidget(view)
+        return view
+
+    def test_open_search_shows_dock_and_focuses(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        assert view.search_panel.isHidden() is True  # hidden by default
+        view.open_search()
+        assert view.search_panel.isHidden() is False
+
+    def test_open_at_positions_cursor_and_selects_span(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_at(tmp_path / "app.py", 1, 0, 4)  # "todo"
+        ed = view.tabs.currentWidget().editor
+        assert ed.textCursor().selectedText() == "todo"
+
+    def test_search_open_location_opens_tab_at_line(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.search_panel.query.setText("plain")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        line_item = view.search_panel.results.topLevelItem(0).child(0)
+        view.search_panel._on_item_activated(line_item, 0)
+        assert view.tabs.currentWidget().path.name == "app.py"
+        assert view.tabs.currentWidget().editor.textCursor().selectedText() == "plain"
+
+    def test_read_only_disables_replace_keeps_search(self, qtbot, tmp_path):
+        from spar.gui.runner import RunnerState
+
+        view = self._view(qtbot, tmp_path)
+        # Give the panel live results so the replace button is not disabled
+        # purely on staleness grounds (review #5).
+        view.open_search()
+        view.search_panel.query.setText("todo")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        view.set_state(RunnerState.RUNNING)
+        assert view.search_panel.replace_button.isEnabled() is False
+        assert view.search_panel.query.isEnabled() is True
+        view.set_state(RunnerState.IDLE)
+        assert view.search_panel.replace_button.isEnabled() is True
+
+    def test_dirty_open_paths_reports_unsaved_tabs(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("dirty\n")
+        ed.document().setModified(True)  # #9
+        assert str(tmp_path / "app.py") in view.search_panel.dirty_open_paths()
+
+    def test_find_in_files_shortcut_wired(self, qtbot, tmp_path):
+        # emit-based pin (the Ctrl+S lesson): the QShortcut→open_search
+        # connection must be exercised even though offscreen never routes
+        # the real chord through the shortcut map.
+        view = self._view(qtbot, tmp_path)
+        view._find_in_files_shortcut.activated.emit()
+        assert view.search_panel.isHidden() is False
+
+    def test_ctrl_shift_f_real_chord_opens_search(self, qtbot, tmp_path):
+        # real-chord half: deliver Ctrl+Shift+F to an editor; the
+        # eventFilter bridge must open the dock offscreen.
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        view.show()
+        ed = view.tabs.currentWidget().editor
+        ed.setFocus()
+        qtbot.keyClick(
+            ed, Qt.Key.Key_F,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        )
+        assert view.search_panel.isHidden() is False
+
+    def test_find_in_editor_shortcut_wired(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        view._find_in_editor_shortcut.activated.emit()
+        assert view.tabs.currentWidget().find_bar.isHidden() is False
+
+    def test_ctrl_f_real_chord_opens_editor_find_bar(self, qtbot, tmp_path):
+        # review #7: the real-chord Ctrl+F half — the eventFilter bridge must
+        # open the editor find bar offscreen (mirrors the Ctrl+S lesson).
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        view.show()
+        ed = view.tabs.currentWidget().editor
+        ed.setFocus()
+        qtbot.keyClick(ed, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        assert view.tabs.currentWidget().find_bar.isHidden() is False
+
+    def test_replace_reloads_open_clean_tab(self, qtbot, tmp_path):
+        # review #11: replace-in-files rewrites disk; the open CLEAN tab must
+        # auto-reload via the watcher (real disk write, mirroring tranche A).
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")   # open + clean (not dirty)
+        ed = view.tabs.currentWidget().editor
+        view.open_search()
+        view.search_panel.query.setText("todo")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        view.search_panel.replace.setText("DONE")
+        view.search_panel._apply_replace()
+        # the watcher reload lands on a later event-loop turn
+        qtbot.waitUntil(lambda: "DONE" in ed.toPlainText(), timeout=5000)
+        assert "todo" not in ed.toPlainText()
+
+    def test_close_standalone_view_stops_search_thread(self, qtbot, tmp_path):
+        # review #21: closing a STANDALONE FilesView (no MainWindow) must
+        # stop the SearchPanel's QThread via closeEvent → stop_search();
+        # without it the started thread outlives the closed widget.
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.search_panel.query.setText("todo")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        session = view.search_panel._session
+        assert session._started is True   # the thread actually ran
+        view.close()
+        assert session._stopped is True   # closeEvent tore it down
+        qtbot.waitUntil(lambda: not session._thread.isRunning(), timeout=5000)

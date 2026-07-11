@@ -1062,6 +1062,11 @@ if _HAS_QT:
     class FilesView(QWidget):
         """Pliki module: project tree | tabbed Pygments editor (ADR 0006)."""
 
+        # ADR 0006 tranche B: re-emitted from SearchPanel after the view has
+        # opened the tab itself (review #9) — MainWindow only switches the
+        # centre stack on it.
+        open_location = Signal(str, int, int, int)  # rel, line, start, end
+
         def __init__(self, project_dir, parent=None):
             super().__init__(parent)
             self.setObjectName("filesView")
@@ -1127,10 +1132,28 @@ if _HAS_QT:
             self.splitter.addWidget(right)
             self.splitter.setStretchFactor(0, 1)
             self.splitter.setStretchFactor(1, 3)
-            outer.addWidget(self.splitter)
+
+            # -- find-in-files dock (ADR 0006 tranche B) --
+            self.search_panel = SearchPanel(self.project_dir, self)
+            self.search_panel.dirty_open_paths = self._dirty_open_paths
+            # review #9: FilesView itself performs the open (tab + cursor)
+            # AND re-emits open_location so MainWindow can switch the centre
+            # view. This makes a standalone FilesView work without MainWindow.
+            self.search_panel.open_location.connect(self._open_at_location)
+            self.search_panel.setVisible(False)
+
+            self.vsplit = QSplitter(Qt.Orientation.Vertical, self)
+            self.vsplit.setObjectName("filesVSplit")
+            self.vsplit.addWidget(self.splitter)   # tree | editor
+            self.vsplit.addWidget(self.search_panel)
+            self.vsplit.setStretchFactor(0, 4)
+            self.vsplit.setStretchFactor(1, 1)
+            outer.addWidget(self.vsplit)
 
             self._restore_split_state()
             self.splitter.splitterMoved.connect(self._save_split_state)
+            self._restore_search_split_state()
+            self.vsplit.splitterMoved.connect(self._save_search_split_state)
 
             # Ctrl+S saves the current tab (review #2). Scoped to this
             # widget so it only fires while Pliki has focus. It NO-OPS while
@@ -1147,6 +1170,26 @@ if _HAS_QT:
             )
             self._save_shortcut.activated.connect(self._save_current)
 
+            # Ctrl+Shift+F opens/focuses find-in-files; Ctrl+F the current
+            # tab's find bar. Same context (and the same eventFilter bridge
+            # below) as Ctrl+S.
+            self._find_in_files_shortcut = QShortcut(
+                QKeySequence("Ctrl+Shift+F"), self
+            )
+            self._find_in_files_shortcut.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+            self._find_in_files_shortcut.activated.connect(self.open_search)
+            self._find_in_editor_shortcut = QShortcut(
+                QKeySequence(QKeySequence.StandardKey.Find), self
+            )
+            self._find_in_editor_shortcut.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+            self._find_in_editor_shortcut.activated.connect(
+                self._open_find_in_current_tab
+            )
+
         # The QShortcut above is the real-display path (it consumes the chord
         # before it reaches any widget). Headless/offscreen — and any host
         # where the top-level window is never activated — never gives the
@@ -1156,12 +1199,22 @@ if _HAS_QT:
         # real display the shortcut has already eaten the event, so this
         # never double-fires.
         def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-            if (
-                event.type() == QEvent.Type.KeyPress
-                and event.matches(QKeySequence.StandardKey.Save)
-            ):
-                self._save_current()
-                return True
+            if event.type() == QEvent.Type.KeyPress:
+                if event.matches(QKeySequence.StandardKey.Save):
+                    self._save_current()
+                    return True
+                if event.matches(QKeySequence.StandardKey.Find):
+                    self._open_find_in_current_tab()
+                    return True
+                if (
+                    event.key() == Qt.Key.Key_F
+                    and event.modifiers() == (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.ShiftModifier
+                    )
+                ):
+                    self.open_search()
+                    return True
             return super().eventFilter(obj, event)
 
         # -- async tree population ----------------------------------------
@@ -1208,6 +1261,62 @@ if _HAS_QT:
                 lambda _mod, t=tab: self._refresh_tab_label(t)
             )
             self.tabs.setCurrentIndex(index)
+
+        # -- find-in-files / find-in-editor (ADR 0006 tranche B) -----------
+        def open_search(self) -> None:
+            self.search_panel.setVisible(True)
+            self.search_panel.focus_query()
+
+        def _open_find_in_current_tab(self) -> None:
+            tab = self.tabs.currentWidget()
+            if tab is None:
+                return
+            cursor = tab.editor.textCursor()
+            tab.open_find(cursor.selectedText())
+
+        def _open_at_location(self, rel: str, line: int, start: int, end: int) -> None:
+            # review #9: open here, then re-emit so MainWindow switches view.
+            self.open_at(self.project_dir / rel, line, start, end)
+            self.open_location.emit(rel, line, start, end)
+
+        def open_at(self, path, line: int, start: int, end: int) -> None:
+            self.open_file(path)
+            tab = self.tabs.currentWidget()
+            if tab is None:
+                return
+            ed = tab.editor
+            block = ed.document().findBlockByNumber(max(0, line - 1))
+            base = block.position()
+            line_text = block.text()
+            # review #8: start/end are code-point offsets within the line;
+            # QTextCursor counts UTF-16 units. Convert so non-BMP lines
+            # (e.g. an emoji before the match) select the right range.
+            cur = QTextCursor(block)
+            cur.setPosition(base + _utf16_offset(line_text, start))
+            cur.setPosition(
+                base + _utf16_offset(line_text, end),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            ed.setTextCursor(cur)
+            ed.centerCursor()
+
+        def stop_search(self) -> None:
+            # review #3: idempotent teardown, called from closeEvent (below)
+            # and MainWindow.closeEvent.
+            self.search_panel.stop_session()
+
+        def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+            # review #21: a STANDALONE FilesView (no MainWindow) must tear
+            # down the SearchPanel's QThread when it closes — nothing else
+            # routes through MainWindow.closeEvent in that case, so without
+            # this the search panel's thread would outlive the widget.
+            self.stop_search()
+            super().closeEvent(event)
+
+        def _dirty_open_paths(self) -> set:
+            return {
+                str(t.path) for t in self._tabs_by_path.values() if t.is_dirty()
+            }
 
         # -- saving --------------------------------------------------------
         def _save_current(self) -> bool:
@@ -1283,6 +1392,9 @@ if _HAS_QT:
             for tab in self._tabs_by_path.values():
                 tab.set_read_only(self._read_only)
             self._refresh_all_labels()
+            # ADR 0006 tranche B: the run owns the tree while read-only, so
+            # replace-in-files is gated too; search itself stays enabled.
+            self.search_panel.set_replace_enabled(not self._read_only)
 
         # -- unsaved guards -----------------------------------------------
         def has_unsaved(self) -> bool:
@@ -1332,6 +1444,14 @@ if _HAS_QT:
 
         def _save_split_state(self, *_args) -> None:
             self._settings.setValue("files/tree_split", self.splitter.saveState())
+
+        def _restore_search_split_state(self) -> None:
+            state = self._settings.value("files/search_split")
+            if state is not None:
+                self.vsplit.restoreState(state)
+
+        def _save_search_split_state(self, *_args) -> None:
+            self._settings.setValue("files/search_split", self.vsplit.saveState())
 
     _FINDER_STALE_SECONDS = 5.0
     _FINDER_MAX_RESULTS = 200

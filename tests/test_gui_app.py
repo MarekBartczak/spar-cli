@@ -840,6 +840,18 @@ class TestCentreSwitch:
         assert window.files_view.tabs.count() == 1
         assert window.files_view.tabs.tabText(0) == "hello.py"
 
+    def test_search_open_location_switches_to_files_and_opens(self, qtbot, tmp_path):
+        # review #9: drive the REAL wiring — FilesView opens the tab and
+        # positions the cursor; MainWindow only switches the centre view.
+        (tmp_path / "app.py").write_text("todo here\n", encoding="utf-8")
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.files_view.search_panel.open_location.emit("app.py", 1, 0, 4)
+        assert window.centre_stack.currentIndex() == 1  # Pliki
+        tab = window.files_view.tabs.currentWidget()
+        assert tab.path.name == "app.py"
+        assert tab.editor.textCursor().selectedText() == "todo"
+
     def test_start_exec_aborts_when_unsaved_editors_cancelled(self, qtbot, tmp_path):
         # review #3: the pre-spawn guard runs BEFORE _commit_if_dirty and
         # before the process spawns; a Cancel aborts the whole start.

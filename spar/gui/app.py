@@ -327,6 +327,9 @@ class MainWindow(QMainWindow):
         self.file_finder.file_chosen.connect(self._on_finder_chosen)
         self._double_shift = DoubleShiftFilter(self)
         self._double_shift.triggered.connect(self._open_finder)
+        # ADR 0006 tranche B: a find-in-files result opens the file in the
+        # Pliki view at the match line (mirrors the double-Shift finder).
+        self.files_view.open_location.connect(self._on_search_open_location)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self._double_shift)
@@ -463,6 +466,12 @@ class MainWindow(QMainWindow):
     def _on_finder_chosen(self, rel: str) -> None:
         self._set_centre_view("files")
         self.files_view.open_file(self.project_dir / rel)
+
+    def _on_search_open_location(self, rel: str, line: int, start: int, end: int) -> None:
+        # review #9: FilesView has ALREADY opened the tab and positioned the
+        # cursor (via _open_at_location); only switch the centre view here so
+        # the match becomes visible.
+        self._set_centre_view("files")
 
     def _ensure_editors_clean(self) -> bool:
         """Pre-spawn guard (review #3): a run start flips the editor
@@ -681,6 +690,7 @@ class MainWindow(QMainWindow):
         # worker thread is abandoned via _ABANDONED_THREADS, never destroyed
         # while running — review #2).
         self.chat_panel.stop_session()
+        self.files_view.stop_search()   # review #3: idempotent search-thread stop
         super().closeEvent(event)
 
 
