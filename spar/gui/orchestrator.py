@@ -9,7 +9,9 @@ adapter is ALWAYS constructed with ``readonly=True`` / ``side_name=
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
+from spar.gui.chat_store import ChatMeta, discard_chat, load_chat, save_chat
 from spar.gui.theme import TOKENS
 
 # Read-only advisor contract sent (prepended) on the FIRST turn of a session.
@@ -143,6 +145,8 @@ if _HAS_QT:
             )
             self._turn_count = 0
             self._is_running = False
+            # Lost-session banner state (Task 4): priority lost > running.
+            self._session_lost = False
             # Committed transcript bubbles (final HTML fragments, in order).
             self._bubbles: list[str] = []
             # In-flight bot bubble: arrival-ordered (kind, text) segments,
@@ -154,6 +158,17 @@ if _HAS_QT:
             self._injected_gate_key: str | None = None
             self._pending_opening = False
             self._pending_gate_key: str | None = None
+
+            # Persistence (Task 4): resume the previous chat session from
+            # .spar/chat.json. A resumed session already ran its opening —
+            # the dispatch helper therefore skips OPENING_PROMPT on resume.
+            self._chat_path = Path(project_dir) / ".spar" / "chat.json"
+            meta = load_chat(self._chat_path)
+            self._initial_session_id = meta.session_id if meta else None
+            if meta is not None:
+                self._turn_count = meta.turn_count
+                self._model = meta.model or self._model
+            self._opening_sent = meta is not None
 
             self._build_ui()
             self.set_header(self._model, self._turn_count)
@@ -223,7 +238,10 @@ if _HAS_QT:
             if not self._side_cfg:
                 return False
             self._session = OrchestratorSession(
-                self._project_dir, self._side_cfg, self._timeout_sec
+                self._project_dir,
+                self._side_cfg,
+                self._timeout_sec,
+                initial_session_id=self._initial_session_id,
             )
             self._wire_session()
             return True
@@ -241,7 +259,18 @@ if _HAS_QT:
         def set_running(self, is_running: bool) -> None:
             """Show/hide the LIVE-run read-only banner. Never disables input."""
             self._is_running = bool(is_running)
-            self.banner.setVisible(self._is_running)
+            self._update_banner()
+
+        def _update_banner(self) -> None:
+            """One banner label, priority lost > running (Task 4)."""
+            if self._session_lost:
+                self.banner.setText("sesja utracona — nowa zostanie utworzona")
+                self.banner.setVisible(True)
+            elif self._is_running:
+                self.banner.setText("run w toku — tylko odczyt")
+                self.banner.setVisible(True)
+            else:
+                self.banner.setVisible(False)
 
         # -- transcript rendering ---------------------------------------------
         def _render_transcript(self) -> None:
@@ -336,6 +365,12 @@ if _HAS_QT:
             self._pending_opening = needs_opening
             self._pending_gate_key = None
 
+            # Task 4: sending is what clears the lost state — the next turn
+            # starts the fresh session, so restore the normal banner priority.
+            if self._session_lost:
+                self._session_lost = False
+                self.set_running(self._is_running)
+
             self._session.send(prompt, reset=needs_opening)
 
         def _set_in_flight(self, in_flight: bool) -> None:
@@ -376,7 +411,8 @@ if _HAS_QT:
             # already-committed flags (mirroring _on_session_lost): the next
             # dispatch re-carries the opening contract with reset=True, and no
             # stale delivered-gate key survives (reviewer fix, Task 3).
-            if getattr(self._session, "session_id", None):
+            session_id = getattr(self._session, "session_id", None)
+            if session_id:
                 if self._pending_opening:
                     self._opening_sent = True
                 if self._pending_gate_key is not None:
@@ -387,6 +423,18 @@ if _HAS_QT:
             self._pending_opening = False
             self._pending_gate_key = None
             self._turn_count += 1
+            # Task 4 persistence: only a resumable (truthy-id) turn is worth
+            # keeping. A null-id turn must NOT write chat.json (never persist
+            # a null session id) and must DELETE any stale metadata from a
+            # previous launch (review #34) — otherwise the next GUI launch
+            # would resume a dead id with the opening treated as delivered.
+            if session_id:
+                save_chat(
+                    self._chat_path,
+                    ChatMeta(session_id, self._model, self._turn_count),
+                )
+            else:
+                discard_chat(self._chat_path)
             self.set_header(self._model, self._turn_count)
             self._set_in_flight(False)
             self._render_transcript()
@@ -406,12 +454,23 @@ if _HAS_QT:
             self._render_transcript()
 
         def _on_session_lost(self) -> None:
-            # Minimal handling here; Task 4 adds persistence/reset semantics.
+            # Task 4: FULL loss semantics. Review #16 — a loss can arrive
+            # MID-TURN with input/send disabled and half-built streaming
+            # state; apply the same cleanup/re-enable as _on_turn_failed or
+            # the chat is permanently bricked.
             self._streaming_segments = []
+            # Review #17: clear pendings WITHOUT promoting, and re-arm the
+            # committed flags — the shared session was reset, so the opening
+            # contract and any delivered gate context died with it.
             self._pending_opening = False
             self._pending_gate_key = None
             self._opening_sent = False
             self._injected_gate_key = None
+            # Review #34/#35: drop the stale persisted id best-effort — a
+            # deletion failure must not abort this recovery slot.
+            discard_chat(self._chat_path)
+            self._session_lost = True
+            self._update_banner()
             self._append_notice("⚠ sesja utracona — następna wiadomość rozpocznie nową")
             self._set_in_flight(False)
             self._render_transcript()

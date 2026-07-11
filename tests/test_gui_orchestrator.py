@@ -243,6 +243,221 @@ class TestOrchestratorChatPanel:
         assert "trzecie" in text
         assert reset is True                          # matches the worker's fresh start
 
+    # -- persistence + session-loss recovery (Task 4) ----------------------
+
+    def test_resumes_persisted_session_and_skips_opening_prompt(self, qtbot, tmp_path):
+        from spar.gui.chat_store import ChatMeta, save_chat
+        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-x", "opus", 4))
+        fake = FakeSession()
+        fake.session_id = "sess-x"  # simulate a session constructed with initial id
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("kontynuuj")
+        panel.send_button.click()
+        # A resumed session skips the opening prompt -> plain resume send.
+        assert fake.sends[0] == ("kontynuuj", False)
+
+    def test_turn_finished_persists_chat_json(self, qtbot, tmp_path):
+        from spar.gui.chat_store import load_chat
+        fake = FakeSession()
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("q")
+        panel.send_button.click()
+        fake.session_id = "sess-new"
+        fake.turn_finished.emit("ok", [])
+        meta = load_chat(tmp_path / ".spar" / "chat.json")
+        assert meta is not None and meta.session_id == "sess-new"
+        assert meta.turn_count == 1
+
+    def test_turn_with_none_session_id_rearms_opening_and_skips_persist(self, qtbot, tmp_path):
+        # Review #30: the adapter contract permits a successful turn with
+        # TurnResult.session_id = None. Such a turn is NON-RESUMABLE: promoting
+        # _opening_sent would make the next send a bare resume while the worker
+        # starts fresh (stranding the new session without the advisor contract),
+        # and persisting would write a null session id. So: no promotion, no
+        # chat.json, and the next send re-carries OPENING_PROMPT with reset=True.
+        from spar.gui.orchestrator import OPENING_PROMPT
+        fake = FakeSession()
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("pierwsze")
+        panel.send_button.click()
+        assert fake.session_id is None      # adapter yielded no session id
+        fake.turn_finished.emit("ok", [])
+        assert not (tmp_path / ".spar" / "chat.json").exists()  # nothing persisted
+        panel.input_edit.setPlainText("drugie")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[-1]
+        assert reset is True                                # fresh session again
+        assert OPENING_PROMPT.split("\n")[0] in sent_text   # opening re-armed
+        assert "drugie" in sent_text
+
+    def test_null_session_id_after_resume_deletes_stale_chat_json(self, qtbot, tmp_path):
+        # Review #34: skipping save_chat is NOT enough when the session was
+        # RESUMED from persisted metadata — the stale chat.json from the previous
+        # launch still exists. If the null-id branch leaves it in place, the next
+        # GUI launch reloads the dead id and treats the opening as already
+        # delivered (bare resume against a fresh worker session). The branch must
+        # DELETE the stale file so a fresh launch re-arms the opening.
+        from spar.gui.chat_store import ChatMeta, load_chat, save_chat
+        from spar.gui.orchestrator import OPENING_PROMPT
+        chat_path = tmp_path / ".spar" / "chat.json"
+        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4))
+        fake = FakeSession()
+        fake.session_id = "sess-stale"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("kontynuuj")
+        panel.send_button.click()
+        assert fake.sends[0] == ("kontynuuj", False)   # resumed: opening skipped
+        fake.session_id = None                          # resumed turn came back id-less
+        fake.turn_finished.emit("ok", [])
+        assert not chat_path.exists()                   # stale metadata removed
+        assert load_chat(chat_path) is None
+        # Next-launch equivalent: a fresh panel over the same project dir finds no
+        # metadata, so its first send must re-arm the opening contract.
+        fake2 = FakeSession()
+        panel2 = OrchestratorChatPanel(tmp_path, object(), 60, session=fake2)
+        qtbot.addWidget(panel2)
+        panel2.input_edit.setPlainText("znowu")
+        panel2.send_button.click()
+        sent_text, reset = fake2.sends[0]
+        assert reset is True
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+        assert "znowu" in sent_text
+
+    def test_discard_chat_swallows_oserror(self, tmp_path, monkeypatch):
+        # Review #35: deletion is best-effort — an OSError from unlink must not
+        # propagate out of the helper (it would abort the Qt recovery slot,
+        # leaving input disabled and flags stale).
+        from spar.gui.chat_store import discard_chat
+        chat_path = tmp_path / "chat.json"
+        chat_path.write_text("{}")
+
+        def boom(*a, **k):
+            raise OSError("read-only fs")
+
+        monkeypatch.setattr(type(chat_path), "unlink", boom)
+        discard_chat(chat_path)              # no raise
+        discard_chat(tmp_path / "missing")   # missing file: also no raise
+
+    def test_null_session_id_recovery_survives_deletion_failure(self, qtbot, tmp_path, monkeypatch):
+        # Review #35: even when discard_chat cannot delete the stale file, the
+        # recovery path must complete — input re-enabled, opening re-armed.
+        from pathlib import Path
+
+        from spar.gui.chat_store import ChatMeta, save_chat
+        from spar.gui.orchestrator import OPENING_PROMPT
+        chat_path = tmp_path / ".spar" / "chat.json"
+        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4))
+
+        def boom(*a, **k):
+            raise OSError("busy")
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        fake = FakeSession()
+        fake.session_id = "sess-stale"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("kontynuuj")
+        panel.send_button.click()
+        fake.session_id = None
+        fake.turn_finished.emit("ok", [])               # deletion fails inside — no crash
+        assert panel.input_edit.isEnabled()              # slot completed
+        assert panel.send_button.isEnabled()
+        panel.input_edit.setPlainText("dalej")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[-1]
+        assert reset is True                             # opening re-armed despite stale file
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+
+    def test_null_session_id_resets_opening_and_gate_fingerprint(self, qtbot, tmp_path):
+        # Review #37: a resumed panel seeded _opening_sent=True; a null-id turn
+        # must re-arm BOTH the opening contract and the delivered-gate key —
+        # the dead session took its delivered context with it. (Gate-context
+        # injection itself lands in a later task; here the delivered-gate key
+        # is seeded directly to prove the branch resets it.)
+        from spar.gui.chat_store import ChatMeta, save_chat
+        from spar.gui.orchestrator import OPENING_PROMPT
+        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-stale", "opus", 4))
+        fake = FakeSession()
+        fake.session_id = "sess-stale"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("co robić?")
+        panel.send_button.click()                        # resumed: opening skipped
+        assert panel._opening_sent is True
+        panel._injected_gate_key = "review_rounds:t1"    # as if delivered to dead session
+        fake.session_id = None
+        fake.turn_finished.emit("ok", [])                # non-resumable turn
+        assert panel._opening_sent is False              # review #37
+        assert panel._injected_gate_key is None          # review #37
+        panel.input_edit.setPlainText("no więc?")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[-1]
+        assert reset is True
+        assert OPENING_PROMPT.split("\n")[0] in sent_text  # opening re-delivered
+
+    def test_session_lost_recovery_survives_deletion_failure(self, qtbot, tmp_path, monkeypatch):
+        # Review #35/#36: the OTHER recovery path — _on_session_lost must also
+        # complete its re-enable/re-arm cleanup when discard_chat cannot delete.
+        from pathlib import Path
+
+        from spar.gui.chat_store import ChatMeta, save_chat
+        from spar.gui.orchestrator import OPENING_PROMPT
+        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-x", "opus", 2))
+
+        def boom(*a, **k):
+            raise OSError("busy")
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        fake = FakeSession()
+        fake.session_id = "sess-x"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("pytanie")
+        panel.send_button.click()                        # in-flight: input disabled
+        fake.session_lost.emit()                         # deletion fails inside — no crash
+        assert panel.input_edit.isEnabled()              # slot completed cleanup
+        assert panel.send_button.isEnabled()
+        panel.input_edit.setPlainText("retry")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[-1]
+        assert reset is True                             # fresh first turn re-armed
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+
+    def test_session_lost_mid_turn_reenables_then_fresh_first_turn(self, qtbot, tmp_path):
+        from spar.gui.orchestrator import OPENING_PROMPT
+        fake = FakeSession()
+        fake.session_id = "sess-x"
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.show()
+        # Simulate a resumed session (opening already ran) so we prove the LOSS
+        # re-arms the opening, not merely a first send.
+        panel._opening_sent = True
+        # Review #16: a loss can arrive mid-turn. Send first so input/send are
+        # disabled in flight; the loss must clear that disable, not brick the chat.
+        panel.input_edit.setPlainText("pierwsze")
+        panel.send_button.click()
+        assert panel.input_edit.isEnabled() is False   # in-flight disable
+        assert panel.send_button.isEnabled() is False
+        fake.session_lost.emit()
+        assert panel.banner.isVisible() is True
+        assert panel.input_edit.isEnabled() is True     # loss re-enabled input
+        assert panel.send_button.isEnabled() is True
+        panel.input_edit.setPlainText("znowu")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[-1]
+        # Review #5 + #17: the first send after a loss is a FRESH-session first
+        # turn — it must carry the read-only OPENING_PROMPT contract (advisor / no
+        # gate decisions / ```zadanie``` marker) with reset=True, not the bare
+        # user text (opening was re-armed because the lost turn never committed it).
+        assert reset is True
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+        assert "znowu" in sent_text
+
     def test_stop_session_stops_held_session_idempotently(self, qtbot, tmp_path):
         # Review #2 + #11: stop_session() stops whatever session the panel holds
         # (owned OR injected), and is safe to call twice.
