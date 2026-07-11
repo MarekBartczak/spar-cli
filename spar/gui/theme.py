@@ -106,4 +106,30 @@ def build_qss() -> str:
         border: 1px solid {t['warn']};
         color: {t['warn']};
     }}
+
+    #filesTree {{
+        background-color: {t['panel']};
+        border: none;
+    }}
+    #filesTabs::pane {{
+        border: 1px solid {t['line']};
+    }}
+    #filesReadOnlyBanner {{
+        color: {t['warn']};
+        background-color: {t['panel']};
+        border: 1px solid {t['warn']};
+        padding: 2px 6px;
+    }}
+    #diskBanner {{
+        background-color: {t['panel-alt']};
+        border: 1px solid {t['gate']};
+    }}
+    #fileFinder {{
+        background-color: {t['panel']};
+        border: 1px solid {t['line']};
+    }}
+    #finderList {{
+        background-color: {t['panel']};
+        color: {t['text']};
+    }}
     """

@@ -392,6 +392,14 @@ class TestTheme:
         hex_literals = set(re.findall(r"#[0-9a-fA-F]{6}", qss))
         assert hex_literals.issubset(set(theme.TOKENS.values()))
 
+    def test_qss_styles_files_widgets(self):
+        # The new Pliki widgets are themed (object names present); colour
+        # purity is already guarded by test_build_qss_uses_only_token_colors.
+        qss = theme.build_qss()
+        assert "#filesReadOnlyBanner" in qss
+        assert "#diskBanner" in qss
+        assert "#fileFinder" in qss
+
 
 def test_side_models_prefer_debate_model(tmp_path, monkeypatch):
     # The debate actually runs on debate_model (engine: debate_model or
