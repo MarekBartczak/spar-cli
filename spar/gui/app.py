@@ -173,6 +173,9 @@ class MainWindow(QMainWindow):
         # ALREADY pending when the GUI opens; connected after it, the chat
         # panel would miss the gate context until the next 2s poll.
         self.side_pane.status_changed.connect(self.chat_panel.on_status)
+        # Task 6: the green "Nowa debata z tym szkicem" button hands the
+        # orchestrator's task draft to a prefilled NewDebateDialog.
+        self.chat_panel.handoff_requested.connect(self._on_chat_handoff)
         self.right_column = RightColumn(self.side_pane, self.chat_panel, self)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -368,6 +371,12 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, state: RunnerState) -> None:
         toolbar_mod.apply_state(self.toolbar, state, self._current_status())
         self.chat_panel.set_running(state in _CHAT_BANNER_STATES)
+        # Task 6: the chat handoff button mirrors the NEW_DEBATE toolbar
+        # enablement — the engine is free exactly when a new debate could
+        # start from the toolbar.
+        self.chat_panel.set_engine_free(
+            self.toolbar.actions_by_label[toolbar_mod.NEW_DEBATE].isEnabled()
+        )
 
     def _on_started(self, cmd: str) -> None:
         self.statusBar().showMessage(f"uruchomiono: {cmd}")
@@ -389,17 +398,43 @@ class MainWindow(QMainWindow):
         self._startup_label.hide()
         self._startup_progress.hide()
 
-    def _on_new_debate(self) -> None:
+    def _new_debate_preflight(self) -> bool:
+        """Shared new-debate preflight (toolbar button AND chat handoff): ensure a
+        git repo, then seed .spar/config.toml (with a notice). Returns False when
+        the user declines the repo offer, in which case the caller must not spawn.
+
+        Review #7: the chat handoff must NOT skip the config step, or a first
+        debate started from chat runs without the starter .spar/config.toml.
+        """
         # Repo check comes FIRST — before the user invests time in typing the
         # task (live feedback: the create-repo question must not appear after
         # the form).
         if not self._ensure_git_repo():
-            return
+            return False
         if repo_mod.ensure_project_config(self.project_dir):
             self.stream_pane.append_notice(
                 "▶ utworzono .spar/config.toml — dostosuj modele i test_command do projektu"
             )
+        return True
+
+    def _on_new_debate(self) -> None:
+        if not self._new_debate_preflight():
+            return
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.runner.start_debate(**dialog.values())
+
+    def _on_chat_handoff(self, draft: str) -> None:
+        """Open a NewDebateDialog prefilled with the orchestrator's task draft.
+
+        Mirrors _on_new_debate exactly, via the shared preflight; the draft
+        prefill is the one difference.
+        """
+        if not self._new_debate_preflight():
+            return
+        dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
+        dialog.task_edit.setPlainText(draft)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.runner.start_debate(**dialog.values())

@@ -5,7 +5,7 @@ lives above the ``if _HAS_QT:`` guard in spar/gui/orchestrator.py.
 """
 from __future__ import annotations
 
-from spar.gui.orchestrator import build_gate_context
+from spar.gui.orchestrator import OPENING_PROMPT, build_gate_context, parse_task_draft
 
 
 class TestGateContext:
@@ -56,3 +56,23 @@ class TestGateContext:
             "open_remarks": [{"severity": "USER", "author": "a", "text": "y" * 5000}],
         }}
         assert build_gate_context(gate).count("y") <= 2000
+
+
+class TestParseTaskDraft:
+    def test_none_when_absent(self):
+        assert parse_task_draft("zwykła odpowiedź") is None
+
+    def test_opening_prompt_format_example_parses(self):
+        # Review #31: prompt/parser contract — the multiline format example
+        # embedded verbatim in OPENING_PROMPT must itself parse with
+        # parse_task_draft, so the prompt can never teach the model a
+        # draft format the parser rejects.
+        assert parse_task_draft(OPENING_PROMPT) == "<treść szkicu zadania>"
+
+    def test_extracts_fenced_block(self):
+        reply = "Oto szkic:\n\n```zadanie\nZbuduj X\n\n## Tasks\n- a\n```\ndaj znać"
+        assert parse_task_draft(reply) == "Zbuduj X\n\n## Tasks\n- a"
+
+    def test_last_block_wins(self):
+        reply = "```zadanie\nstary\n```\n...\n```zadanie\nnowy\n```"
+        assert parse_task_draft(reply) == "nowy"

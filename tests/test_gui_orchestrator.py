@@ -664,3 +664,61 @@ class TestOrchestratorSessionAdapter:
             assert captured["model"] == "opus"
         finally:
             session.stop()
+
+
+class TestHandoff:
+    def test_draft_reply_shows_green_button_when_engine_free(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(True)
+        fake.turn_finished.emit("```zadanie\nZbuduj X\n```", [])
+        assert panel.handoff_button.isVisible() is True
+        assert panel.handoff_button.isEnabled() is True
+
+    def test_button_hidden_when_no_draft(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(True)
+        fake.turn_finished.emit("zwykła odpowiedź", [])
+        assert panel.handoff_button.isVisible() is False
+
+    def test_button_disabled_when_engine_busy(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(False)
+        fake.turn_finished.emit("```zadanie\nZbuduj X\n```", [])
+        assert panel.handoff_button.isEnabled() is False
+
+    def test_set_engine_free_toggles_existing_button(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(False)
+        fake.turn_finished.emit("```zadanie\nZbuduj X\n```", [])
+        assert panel.handoff_button.isEnabled() is False
+        panel.set_engine_free(True)
+        assert panel.handoff_button.isEnabled() is True
+
+    def test_click_emits_handoff_requested_with_draft(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.set_engine_free(True)
+        fake.turn_finished.emit("```zadanie\nZbuduj X\n```", [])
+        seen = []
+        panel.handoff_requested.connect(seen.append)
+        panel.handoff_button.click()
+        assert seen == ["Zbuduj X"]
+
+    def test_next_send_hides_stale_draft_button(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.set_engine_free(True)
+        fake.turn_finished.emit("```zadanie\nZbuduj X\n```", [])
+        assert panel.handoff_button.isVisible() is True
+        panel.input_edit.setPlainText("kolejne pytanie")
+        panel.send_button.click()
+        assert panel.handoff_button.isVisible() is False

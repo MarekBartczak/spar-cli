@@ -35,6 +35,33 @@ ogrodzonym DOKŁADNIE w tym wielowierszowym formacie (linia otwierająca
 aby GUI mogło go przejąć."""
 
 
+_DRAFT_OPEN_RE = re.compile(r"^```zadanie\s*$")
+_DRAFT_CLOSE_RE = re.compile(r"^```\s*$")
+
+
+def parse_task_draft(reply_text: str) -> "str | None":
+    """Extract the LAST ```zadanie … ``` fenced block from a reply.
+
+    Pure and Qt-free (mirrors parse_options' last-block-wins semantics).
+    The fence opens on a line matching ``^```zadanie\\s*$`` (tolerant of
+    trailing spaces) and closes on ``^```\\s*$``. Returns the trimmed inner
+    text, or ``None`` when no complete block is present. An unterminated
+    trailing fence does not count — only closed blocks are drafts.
+    """
+    draft = None
+    inner: "list[str] | None" = None
+    for line in reply_text.splitlines():
+        if inner is None:
+            if _DRAFT_OPEN_RE.match(line):
+                inner = []
+        elif _DRAFT_CLOSE_RE.match(line):
+            draft = "\n".join(inner).strip()
+            inner = None
+        else:
+            inner.append(line)
+    return draft
+
+
 # Free-text bodies (summary, each remark text) are truncated to this many
 # chars, mirroring the engine's headless gate truncation.
 _GATE_TEXT_LIMIT = 2000
@@ -152,6 +179,7 @@ def _commit_bubble_html(segments: list, reply_text: str) -> str:
 
 
 try:  # pragma: no cover - exercised via the two interpreters
+    from PySide6.QtCore import Signal
     from PySide6.QtWidgets import (
         QHBoxLayout,
         QLabel,
@@ -190,6 +218,11 @@ if _HAS_QT:
     class OrchestratorChatPanel(QWidget):
         """Read-only advisor chat, docked at the bottom of the right column."""
 
+        # Task 6: emitted with the parsed task draft when the green handoff
+        # button is clicked. The panel does NOT construct the dialog itself —
+        # app.py owns the dialog/runner wiring.
+        handoff_requested = Signal(str)
+
         def __init__(self, project_dir, side_cfg, timeout_sec, parent=None, session=None):
             super().__init__(parent)
             self.setObjectName("orchestratorPanel")
@@ -221,6 +254,10 @@ if _HAS_QT:
             self._pending_gate_key: str | None = None
             # Latest pending gate from side_pane.status_changed (Task 5).
             self._pending_gate: dict | None = None
+            # Task 6: last parsed task draft + engine-free flag (pushed by
+            # MainWindow from the NEW_DEBATE toolbar enablement).
+            self._draft: str | None = None
+            self._engine_free = False
 
             # Persistence (Task 4): resume the previous chat session from
             # .spar/chat.json. A resumed session already ran its opening —
@@ -273,6 +310,18 @@ if _HAS_QT:
             self.options_layout.setContentsMargins(0, 0, 0, 0)
             self.options_layout.setSpacing(4)
             layout.addWidget(self.options_row)
+
+            # Task 6: green handoff button — shown only when the latest reply
+            # carried a ```zadanie draft; enabled only while the engine is
+            # free (mirrors the NEW_DEBATE toolbar enablement).
+            self.handoff_button = QPushButton("Nowa debata z tym szkicem", self)
+            self.handoff_button.setObjectName("handoffButton")
+            self.handoff_button.setStyleSheet(
+                f"background-color: {TOKENS['ok']}; padding: 6px 10px;"
+            )
+            self.handoff_button.setVisible(False)
+            self.handoff_button.clicked.connect(self._on_handoff_clicked)
+            layout.addWidget(self.handoff_button)
 
             input_row = QHBoxLayout()
             self.input_edit = _InputEdit(self._on_send_clicked, self)
@@ -449,6 +498,10 @@ if _HAS_QT:
             if in_flight:
                 self.header.setText(f"{self._header_text} · …myśli")
                 self._clear_options()
+                # Task 6: a stale draft must not linger across turns — the
+                # button re-appears only when a NEW reply carries a draft.
+                self._draft = None
+                self.handoff_button.setVisible(False)
             else:
                 self.header.setText(self._header_text)
 
@@ -522,6 +575,23 @@ if _HAS_QT:
             self._set_in_flight(False)
             self._render_transcript()
             self._render_options(options)
+            # Task 6: a reply carrying a ```zadanie draft surfaces the green
+            # handoff button — enabled only while the engine is free.
+            draft = parse_task_draft(reply_text)
+            if draft is not None:
+                self._draft = draft
+                self.handoff_button.setEnabled(self._engine_free)
+                self.handoff_button.setVisible(True)
+
+        # -- task-draft handoff (Task 6) -----------------------------------------
+        def set_engine_free(self, free: bool) -> None:
+            """Pushed by MainWindow from the NEW_DEBATE toolbar enablement."""
+            self._engine_free = bool(free)
+            self.handoff_button.setEnabled(self._engine_free)
+
+        def _on_handoff_clicked(self) -> None:
+            if self._draft is not None:
+                self.handoff_requested.emit(self._draft)
 
         def _on_turn_failed(self, message: str) -> None:
             # Review #13: retryable — drop the half-built bubble, surface the
