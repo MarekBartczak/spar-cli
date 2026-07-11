@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
+from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
@@ -165,11 +167,19 @@ class MainWindow(QMainWindow):
         self.runner = SparRunner(self.project_dir, self)
 
         self.stream_pane = StreamPane(self)
+        # ADR 0006: the centre is a switched stack (Strumień | Pliki). FilesView
+        # is built here — before the splitter and before the END-of-__init__
+        # side_pane.refresh() — so _on_state_changed (via _sync_toolbar) can push
+        # the read-only matrix into it (init-order constraint).
+        self.files_view = FilesView(self.project_dir, self)
         self.side_pane = SidePane(self.project_dir, self.runner, self)
         self.side_pane.status_changed.connect(self._on_status_changed)
         # The consensus "Accept → start exec" auto-chain must run the same
         # dirty-tree pre-flight as the toolbar button (live finding).
         self.side_pane.gate_panel.preflight_auto_exec = self._commit_if_dirty
+        # review #3: the gate's OWN resume paths also run the pre-spawn
+        # unsaved-editor guard.
+        self.side_pane.gate_panel.preflight_resume = self._ensure_editors_clean
         # NOTE (review #1): the single explicit initial side_pane.refresh() is
         # deferred to the END of __init__ — because _on_status_changed now
         # touches self.right_rail (gate icon + force-open), the rails, the
@@ -193,9 +203,14 @@ class MainWindow(QMainWindow):
         self.chat_panel.handoff_requested.connect(self._on_chat_handoff)
         self.right_column = RightColumn(self.side_pane, self.chat_panel, self)
 
+        self.centre_stack = QStackedWidget(self)
+        self.centre_stack.setObjectName("centreStack")
+        self.centre_stack.addWidget(self.stream_pane)   # index 0 — Strumień
+        self.centre_stack.addWidget(self.files_view)    # index 1 — Pliki
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.setObjectName("mainSplitter")
-        self.splitter.addWidget(self.stream_pane)
+        self.splitter.addWidget(self.centre_stack)
         self.splitter.addWidget(self.right_column)
         # QSplitter.setSizes() scales its request to the splitter's OWN
         # current size, which without a show()/layout pass is still Qt's
@@ -208,7 +223,10 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes(list(_SPLITTER_SIZES))
 
         self.left_rail = IconRail(
-            [RailButtonSpec("files", "Pliki", "Pliki (wkrótce)", icon="🗀", enabled=False)],
+            [
+                RailButtonSpec("stream", "Strumień", "Podgląd przebiegu", icon="▤"),
+                RailButtonSpec("files", "Pliki", "Przeglądaj i edytuj pliki", icon="🗀"),
+            ],
             self,
         )
         self.right_rail = IconRail(
@@ -251,6 +269,14 @@ class MainWindow(QMainWindow):
         self.splitter.splitterMoved.connect(self._save_splitter_state)
         self._restore_right_split_state()
         self.right_column.splitter.splitterMoved.connect(self._save_right_split_state)
+
+        # ADR 0006: restore the persisted centre view (Strumień | Pliki) and
+        # wire the left-rail toggles.
+        centre_view = self._settings.value("rails/centre_view", "stream", type=str)
+        if centre_view not in ("stream", "files"):
+            centre_view = "stream"
+        self._set_centre_view(centre_view, persist=False)
+        self.left_rail.toggled.connect(self._on_left_rail_toggled)
 
         tasks_visible = self._settings.value("rails/tasks_visible", True, type=bool)
         chat_visible = self._settings.value("rails/chat_visible", True, type=bool)
@@ -295,6 +321,16 @@ class MainWindow(QMainWindow):
         self.tailer.lines.connect(self._on_first_stream_lines)
         self.tailer.start()
 
+        # ADR 0006: double-Shift fuzzy file finder → opens the chosen file in
+        # the Pliki view (switching the centre stack).
+        self.file_finder = FileFinderOverlay(self.project_dir, self)
+        self.file_finder.file_chosen.connect(self._on_finder_chosen)
+        self._double_shift = DoubleShiftFilter(self)
+        self._double_shift.triggered.connect(self._open_finder)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self._double_shift)
+
     # ------------------------------------------------------------------
     # Runner wiring
     # ------------------------------------------------------------------
@@ -302,7 +338,7 @@ class MainWindow(QMainWindow):
         actions = self.toolbar.actions_by_label
         actions[toolbar_mod.NEW_DEBATE].triggered.connect(self._on_new_debate)
         actions[toolbar_mod.START_EXEC].triggered.connect(self._on_start_exec)
-        actions[toolbar_mod.RESUME].triggered.connect(lambda: self.runner.resume(None))
+        actions[toolbar_mod.RESUME].triggered.connect(self._on_resume)
         actions[toolbar_mod.STOP].triggered.connect(self.runner.stop)
         actions["Plan"].triggered.connect(self.side_pane.show_plan)
         actions["Diff"].triggered.connect(self.side_pane.show_diff)
@@ -387,6 +423,9 @@ class MainWindow(QMainWindow):
 
     def _on_state_changed(self, state: RunnerState) -> None:
         toolbar_mod.apply_state(self.toolbar, state, self._current_status())
+        # ADR 0006: the read-only matrix follows the runner state — the tree
+        # belongs to the engine during RUNNING/GATE_PENDING/LOCKED.
+        self.files_view.set_state(state)
         self.chat_panel.set_running(state in _CHAT_BANNER_STATES)
         # Task 6: the chat handoff button mirrors the NEW_DEBATE toolbar
         # enablement — the engine is free exactly when a new debate could
@@ -395,7 +434,58 @@ class MainWindow(QMainWindow):
             self.toolbar.actions_by_label[toolbar_mod.NEW_DEBATE].isEnabled()
         )
 
+    # ------------------------------------------------------------------
+    # Centre view (Strumień | Pliki) + finder + pre-spawn guard
+    # ------------------------------------------------------------------
+    def _set_centre_view(self, key: str, persist: bool = True) -> None:
+        self.centre_stack.setCurrentIndex(0 if key == "stream" else 1)
+        self.left_rail.set_checked("stream", key == "stream")
+        self.left_rail.set_checked("files", key == "files")
+        if persist:
+            self._settings.setValue("rails/centre_view", key)
+
+    def _on_left_rail_toggled(self, key: str, checked: bool) -> None:
+        if not checked:
+            # Exactly one view is always active: an attempt to uncheck the
+            # active toggle bounces straight back.
+            self.left_rail.set_checked(key, True)
+            return
+        if key == "stream" and self.files_view.has_unsaved():
+            if not self.files_view.confirm_discard_if_dirty():
+                # Cancelled: keep Pliki active.
+                self._set_centre_view("files", persist=False)
+                return
+        self._set_centre_view(key)
+
+    def _open_finder(self) -> None:
+        self.file_finder.popup()
+
+    def _on_finder_chosen(self, rel: str) -> None:
+        self._set_centre_view("files")
+        self.files_view.open_file(self.project_dir / rel)
+
+    def _ensure_editors_clean(self) -> bool:
+        """Pre-spawn guard (review #3): a run start flips the editor
+        read-only, so any unsaved buffer would be stranded (unsavable during
+        the run) and invisible to git dirty-tree preflights. Prompt
+        save/discard/cancel BEFORE the spawn; return False (abort the spawn)
+        only on Cancel. Invoked by EVERY spawn initiator — _on_started runs
+        AFTER QProcess.start() and can no longer prompt."""
+        return self.files_view.confirm_discard_if_dirty()
+
+    def _on_resume(self) -> None:
+        # Toolbar RESUME: guard unsaved editors, then resume (review #3).
+        if not self._ensure_editors_clean():
+            return
+        self.runner.resume(None)
+
     def _on_started(self, cmd: str) -> None:
+        # ADR 0006: any run start (exec/resume/new-debate AND the gate
+        # auto-exec chain, all funnelled through runner.started) forces the
+        # centre back to Strumień. A pending gate does NOT — it never reaches
+        # here. The unsaved-editor prompt already happened pre-spawn
+        # (review #3, _ensure_editors_clean); this method never prompts.
+        self._set_centre_view("stream")
         self.statusBar().showMessage(f"uruchomiono: {cmd}")
         self._startup_label.show()
         self._startup_progress.show()
@@ -435,6 +525,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_new_debate(self) -> None:
+        if not self._ensure_editors_clean():   # review #3
+            return
         if not self._new_debate_preflight():
             return
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
@@ -448,6 +540,8 @@ class MainWindow(QMainWindow):
         Mirrors _on_new_debate exactly, via the shared preflight; the draft
         prefill is the one difference.
         """
+        if not self._ensure_editors_clean():   # review #3
+            return
         if not self._new_debate_preflight():
             return
         dialog = toolbar_mod.NewDebateDialog(self.project_dir, self)
@@ -465,6 +559,8 @@ class MainWindow(QMainWindow):
         A dirty tree now gets a confirm-and-commit offer instead of a dead
         end; a clean tree proceeds exactly as before with no dialog.
         """
+        if not self._ensure_editors_clean():   # review #3
+            return
         if not self._commit_if_dirty():
             return
         self.runner.start_exec()
@@ -564,6 +660,13 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        # ADR 0006: never lose unsaved editor buffers on window close.
+        if not self.files_view.confirm_discard_if_dirty():
+            event.ignore()
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._double_shift)
         self._save_splitter_state()
         self._save_right_split_state()
         self.tailer.stop()

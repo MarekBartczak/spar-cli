@@ -610,8 +610,19 @@ class GatePanel(QWidget):
     # Optional pre-flight for auto-exec accepts (wired by MainWindow): must
     # return True to proceed. None = no pre-flight (tests, standalone use).
     preflight_auto_exec = None
+    # review #3: MainWindow sets this to _ensure_editors_clean so the gate's
+    # OWN resume paths (accept/abort/extend/fix/remarks) also run the
+    # pre-spawn unsaved-editor guard. None = no guard (tests, standalone use).
+    preflight_resume = None
+
+    def _guard_resume(self) -> bool:
+        """Return False (abort) when the host's pre-spawn guard vetoes the
+        resume (unsaved editor buffers, user cancelled)."""
+        return self.preflight_resume is None or self.preflight_resume()
 
     def _on_accept(self, spec: ButtonSpec) -> None:
+        if not self._guard_resume():
+            return
         if spec.auto_exec and self.preflight_auto_exec is not None:
             if not self.preflight_auto_exec():
                 return  # user cancelled the pre-flight; gate stays actionable
@@ -619,6 +630,8 @@ class GatePanel(QWidget):
         self._runner.resume("accept", auto_exec=spec.auto_exec)
 
     def _on_abort(self) -> None:
+        if not self._guard_resume():
+            return
         reply = QMessageBox.question(
             self,
             "Abort",
@@ -632,6 +645,8 @@ class GatePanel(QWidget):
         self._runner.resume("abort")
 
     def _on_extend(self, spin: QSpinBox) -> None:
+        if not self._guard_resume():
+            return
         self._disable_all()
         self._runner.resume(f"extend:{spin.value()}")
 
@@ -643,6 +658,8 @@ class GatePanel(QWidget):
         ``context``); cancelling or an empty entry leaves the gate actionable
         (no ``_disable_all`` until a real command is submitted).
         """
+        if not self._guard_resume():
+            return
         context = (self._pending_gate or {}).get("context") or {}
         current = context.get("command", "")
         text, ok = QInputDialog.getText(
@@ -658,6 +675,8 @@ class GatePanel(QWidget):
         self._runner.resume(f"fix:{text.strip()}")
 
     def _on_remarks(self, text_edit: QPlainTextEdit) -> None:
+        if not self._guard_resume():
+            return
         self._disable_all()
         self._runner.resume_with_remarks(text_edit.toPlainText())
 

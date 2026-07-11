@@ -16,6 +16,19 @@ from spar.gui.app import MainWindow, SidePane, StreamPane, Toolbar, _short_actio
 _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Diff"]
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_qsettings():
+    """QSettings caches its config-file path at first use, so the autouse
+    HOME isolation (conftest) does NOT give each test a fresh gui.conf —
+    persisted rail/centre-view state leaks across tests in-process. Clear
+    the shared ``spar/gui`` store before every test so defaults apply and
+    the order-dependent centre-view assertions are hermetic."""
+    from PySide6.QtCore import QSettings
+
+    QSettings("spar", "gui").clear()
+    yield
+
+
 class TestMainWindow:
     def test_constructs_with_three_panes(self, qtbot, tmp_path):
         window = MainWindow(tmp_path)
@@ -169,9 +182,11 @@ class TestRailsLayout:
         qtbot.addWidget(window)
         rails = window.findChildren(IconRail)
         assert len(rails) == 2
-        assert "files" in window.left_rail.buttons
+        # ADR 0006: the left rail now carries two exclusive view toggles.
+        assert set(window.left_rail.buttons) == {"stream", "files"}
+        assert window.left_rail.buttons["files"].isEnabled() is True
+        assert window.left_rail.buttons["stream"].isCheckable() is True
         assert set(window.right_rail.buttons) >= {"tasks", "chat", "gate"}
-        assert window.left_rail.buttons["files"].isEnabled() is False
 
     def test_collapsing_both_right_panels_hides_column(self, qtbot, tmp_path):
         window = MainWindow(tmp_path)
@@ -729,3 +744,137 @@ class TestEnsureProjectConfig:
         assert first is True
         assert second is False
         assert config_path.read_text(encoding="utf-8") == "# mutated after first call\n"
+
+
+class TestCentreSwitch:
+    def test_centre_is_a_stack_with_stream_and_files(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QStackedWidget
+        from spar.gui.files import FilesView
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        assert isinstance(window.centre_stack, QStackedWidget)
+        assert window.centre_stack.widget(0) is window.stream_pane
+        assert isinstance(window.centre_stack.widget(1), FilesView)
+
+    def test_default_view_is_stream(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        assert window.centre_stack.currentIndex() == 0
+        assert window.left_rail.buttons["stream"].isChecked() is True
+        assert window.left_rail.buttons["files"].isChecked() is False
+
+    def test_toggling_files_switches_and_is_exclusive(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.left_rail.buttons["files"].setChecked(True)
+        assert window.centre_stack.currentIndex() == 1
+        assert window.left_rail.buttons["stream"].isChecked() is False
+        assert window.left_rail.buttons["files"].isChecked() is True
+
+    def test_unchecking_active_bounces_back(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        # Clicking the already-active Strumień toggle must not leave zero
+        # active — exactly one is always on.
+        window.left_rail.buttons["stream"].setChecked(False)
+        assert window.left_rail.buttons["stream"].isChecked() is True
+
+    def test_centre_view_persists_via_qsettings(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.left_rail.buttons["files"].setChecked(True)
+        assert window._settings.value("rails/centre_view") == "files"
+        window2 = MainWindow(tmp_path)
+        qtbot.addWidget(window2)
+        assert window2.centre_stack.currentIndex() == 1
+
+    def test_run_start_auto_switches_to_stream(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.left_rail.buttons["files"].setChecked(True)
+        assert window.centre_stack.currentIndex() == 1
+        # runner.started (covers exec/resume/new-debate AND the gate
+        # auto-exec chain) forces Strumień.
+        window._on_started("python -m spar.cli exec --headless --quiet")
+        assert window.centre_stack.currentIndex() == 0
+        assert window.left_rail.buttons["stream"].isChecked() is True
+
+    def test_state_changed_drives_files_read_only(self, qtbot, tmp_path):
+        from spar.gui.runner import RunnerState
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        calls = []
+        window.files_view.set_state = lambda s: calls.append(s)
+        window._on_state_changed(RunnerState.RUNNING)
+        assert calls[-1] == RunnerState.RUNNING
+
+    def test_switch_to_stream_with_unsaved_can_cancel(self, qtbot, tmp_path, monkeypatch):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.left_rail.buttons["files"].setChecked(True)
+        # Pretend there are unsaved changes and the user cancels.
+        window.files_view.has_unsaved = lambda: True
+        window.files_view.confirm_discard_if_dirty = lambda: False
+        window.left_rail.buttons["stream"].setChecked(True)
+        # Cancel keeps Pliki active and on-screen.
+        assert window.centre_stack.currentIndex() == 1
+        assert window.left_rail.buttons["files"].isChecked() is True
+
+    def test_finder_choice_opens_file_in_pliki(self, qtbot, tmp_path):
+        _init_repo(tmp_path)
+        (tmp_path / "hello.py").write_text("print(1)\n", encoding="utf-8")
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window._on_finder_chosen("hello.py")
+        assert window.centre_stack.currentIndex() == 1
+        assert window.files_view.tabs.count() == 1
+        assert window.files_view.tabs.tabText(0) == "hello.py"
+
+    def test_start_exec_aborts_when_unsaved_editors_cancelled(self, qtbot, tmp_path):
+        # review #3: the pre-spawn guard runs BEFORE _commit_if_dirty and
+        # before the process spawns; a Cancel aborts the whole start.
+        _init_repo(tmp_path)
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.files_view.confirm_discard_if_dirty = lambda: False  # user cancels
+        spawned = []
+        window.runner.start_exec = lambda: spawned.append(1)
+        window._on_start_exec()
+        assert spawned == []
+
+    def test_resume_aborts_when_unsaved_editors_cancelled(self, qtbot, tmp_path):
+        # review #3: the toolbar RESUME is wrapped in _on_resume, which runs
+        # the guard before runner.resume.
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.files_view.confirm_discard_if_dirty = lambda: False
+        resumed = []
+        window.runner.resume = lambda *a, **k: resumed.append(1)
+        window._on_resume()
+        assert resumed == []
+
+    def test_new_debate_aborts_when_unsaved_editors_cancelled(self, qtbot, tmp_path):
+        # review #3: guard is the first line of _on_new_debate, before the
+        # repo/config preflight and before any dialog.
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window.files_view.confirm_discard_if_dirty = lambda: False
+        started = []
+        window.runner.start_debate = lambda **k: started.append(1)
+        window._on_new_debate()
+        assert started == []
+
+    def test_gate_resume_runs_pre_spawn_guard(self, qtbot, tmp_path):
+        # review #3: the gate panel's own resume paths honour the guard via
+        # GatePanel.preflight_resume (wired to _ensure_editors_clean).
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        gate = window.side_pane.gate_panel
+        assert gate.preflight_resume == window._ensure_editors_clean
+        gate.preflight_resume = lambda: False  # veto
+        resumed = []
+        window.runner.resume = lambda *a, **k: resumed.append(1)
+        gate._on_abort()
+        assert resumed == []
