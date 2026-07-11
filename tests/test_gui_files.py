@@ -423,3 +423,126 @@ class TestFilesView:
         view._save_shortcut.activated.emit()
         assert (tmp_path / "app.py").read_text(encoding="utf-8") == "via activated\n"
         assert view.has_unsaved() is False
+
+
+class TestFileFinder:
+    def test_filters_list_by_query(self, qtbot, tmp_path):
+        from spar.gui.files import FileFinderOverlay
+
+        (tmp_path / "spar").mkdir()
+        (tmp_path / "spar" / "app.py").write_text("x")
+        (tmp_path / "README.md").write_text("y")
+        overlay = FileFinderOverlay(tmp_path)
+        qtbot.addWidget(overlay)
+        overlay.refresh_index(force=True)
+        overlay.query.setText("app")
+        model = overlay.list.model()
+        rows = [model.index(r, 0).data() for r in range(model.rowCount())]
+        assert rows == ["spar/app.py"]
+
+    def test_enter_in_query_emits_relative_path(self, qtbot, tmp_path):
+        # review #8: exercise Enter via REAL Qt delivery to the QLineEdit
+        # (qtbot.keyClick), not by calling _accept_current() directly — the
+        # bug is that the line edit consumes Return, so returnPressed is the
+        # only reliable trigger.
+        from PySide6.QtCore import Qt
+        from spar.gui.files import FileFinderOverlay
+
+        (tmp_path / "app.py").write_text("x")
+        overlay = FileFinderOverlay(tmp_path)
+        qtbot.addWidget(overlay)
+        overlay.refresh_index(force=True)
+        overlay.query.setText("app")
+        chosen = []
+        overlay.file_chosen.connect(chosen.append)
+        overlay.list.setCurrentIndex(overlay.list.model().index(0, 0))
+        qtbot.keyClick(overlay.query, Qt.Key.Key_Return)
+        assert chosen == ["app.py"]
+
+    def test_stale_index_rebuilds_on_popup(self, qtbot, tmp_path):
+        from spar.gui.files import FileFinderOverlay
+
+        overlay = FileFinderOverlay(tmp_path)
+        qtbot.addWidget(overlay)
+        overlay.refresh_index(force=True)
+        (tmp_path / "new.py").write_text("z")
+        overlay._indexed_at = 0.0  # force staleness
+        overlay.refresh_index()
+        assert "new.py" in overlay._index
+
+
+class TestDoubleShift:
+    def test_two_bare_shifts_within_window_trigger(self, qtbot):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+
+        def shift():
+            return QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Shift,
+                Qt.KeyboardModifier.NoModifier,
+            )
+
+        filt._now = lambda: 0.0
+        filt.eventFilter(None, shift())
+        filt._now = lambda: 0.2  # 200 ms later
+        filt.eventFilter(None, shift())
+        assert fired == [1]
+
+    def test_other_key_between_resets(self, qtbot):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+        filt._now = lambda: 0.0
+        filt.eventFilter(None, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift, Qt.KeyboardModifier.NoModifier))
+        filt.eventFilter(None, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier))
+        filt._now = lambda: 0.2
+        filt.eventFilter(None, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift, Qt.KeyboardModifier.NoModifier))
+        assert fired == []
+
+    def test_too_slow_does_not_trigger(self, qtbot):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+        filt._now = lambda: 0.0
+        filt.eventFilter(None, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift, Qt.KeyboardModifier.NoModifier))
+        filt._now = lambda: 1.0  # 1 s later, outside the 400 ms window
+        filt.eventFilter(None, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Shift, Qt.KeyboardModifier.NoModifier))
+        assert fired == []
+
+    def test_shift_with_other_modifier_held_does_not_trigger(self, qtbot):
+        # review #7: two Shift presses while Ctrl is held (e.g. a
+        # double-tapped Ctrl+Shift shortcut) must NOT open the finder — only
+        # a BARE double Shift does.
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+
+        def ctrl_shift():
+            return QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Shift,
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.ShiftModifier,
+            )
+
+        filt._now = lambda: 0.0
+        filt.eventFilter(None, ctrl_shift())
+        filt._now = lambda: 0.2
+        filt.eventFilter(None, ctrl_shift())
+        assert fired == []

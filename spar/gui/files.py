@@ -9,6 +9,7 @@ FileFinderOverlay, ...) is only defined when PySide6 is importable.
 from __future__ import annotations
 
 import os
+import time as _time
 from pathlib import Path
 
 from pygments.lexers import get_lexer_for_filename
@@ -391,14 +392,18 @@ if _HAS_QT:
         QDir,
         QEvent,
         QEventLoop,
+        QObject,
         QSettings,
         QSortFilterProxyModel,
+        QStringListModel,
     )
     from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import (
         QFileSystemModel,
         QHBoxLayout,
         QLabel,
+        QLineEdit,
+        QListView,
         QPushButton,
         QSplitter,
         QTabWidget,
@@ -748,3 +753,114 @@ if _HAS_QT:
 
         def _save_split_state(self, *_args) -> None:
             self._settings.setValue("files/tree_split", self.splitter.saveState())
+
+    _FINDER_STALE_SECONDS = 5.0
+    _FINDER_MAX_RESULTS = 200
+    _DOUBLE_SHIFT_WINDOW = 0.4  # seconds
+
+    class FileFinderOverlay(QWidget):
+        """Frameless double-Shift fuzzy file finder (ADR 0006 item 5)."""
+
+        file_chosen = Signal(str)
+
+        def __init__(self, project_dir, parent=None):
+            super().__init__(parent)
+            self.project_dir = Path(project_dir)
+            self.setObjectName("fileFinder")
+            self.setWindowFlags(Qt.WindowType.Popup)
+            self._index: list[str] = []
+            self._indexed_at = 0.0
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            self.query = QLineEdit(self)
+            self.query.setObjectName("finderQuery")
+            self.query.setPlaceholderText("Szukaj pliku… (Esc zamyka)")
+            self.query.textChanged.connect(self._on_query_changed)
+            # review #8: focus lives in the QLineEdit, which CONSUMES Return
+            # before the overlay's keyPressEvent sees it. Wire the line
+            # edit's own returnPressed so Enter reliably accepts.
+            self.query.returnPressed.connect(self._accept_current)
+            layout.addWidget(self.query)
+            self.list = QListView(self)
+            self.list.setObjectName("finderList")
+            self._model = QStringListModel(self)
+            self.list.setModel(self._model)
+            self.list.doubleClicked.connect(lambda _idx: self._accept_current())
+            layout.addWidget(self.list)
+            self.resize(560, 360)
+
+        def refresh_index(self, force: bool = False) -> None:
+            if force or (_time.monotonic() - self._indexed_at) > _FINDER_STALE_SECONDS:
+                self._index = build_file_index(self.project_dir)
+                self._indexed_at = _time.monotonic()
+
+        def popup(self) -> None:
+            self.refresh_index()
+            self.query.clear()
+            self._on_query_changed("")
+            parent = self.parentWidget()
+            if parent is not None:
+                center = parent.mapToGlobal(parent.rect().center())
+                self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+            self.show()
+            self.query.setFocus()
+
+        def _on_query_changed(self, text: str) -> None:
+            matches = filter_paths(text, self._index)[:_FINDER_MAX_RESULTS]
+            self._model.setStringList(matches)
+            if matches:
+                self.list.setCurrentIndex(self._model.index(0, 0))
+
+        def _accept_current(self) -> None:
+            idx = self.list.currentIndex()
+            if not idx.isValid():
+                return
+            self.file_chosen.emit(idx.data())
+            self.close()
+
+        def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+            # Enter is handled by query.returnPressed (review #8); here we
+            # only need Escape to dismiss the overlay.
+            if event.key() == Qt.Key.Key_Escape:
+                self.close()
+                return
+            super().keyPressEvent(event)
+
+    class DoubleShiftFilter(QObject):
+        """Application-level event filter firing on two bare Shift presses
+        within 400 ms with no intervening non-Shift key (ADR 0006 item 5).
+        ``_now`` is injectable for deterministic tests."""
+
+        triggered = Signal()
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._last_shift = None
+            self._now = _time.monotonic
+
+        def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+            if event.type() == QEvent.Type.KeyPress:
+                if getattr(event, "isAutoRepeat", lambda: False)():
+                    return False
+                if event.key() == Qt.Key.Key_Shift:
+                    # review #7: require a BARE Shift. On the Shift keypress
+                    # the only modifier that may legitimately be reported is
+                    # ShiftModifier itself; Ctrl/Alt/Meta held alongside must
+                    # NOT count (e.g. Ctrl+Shift shortcuts double-tapped).
+                    mods = event.modifiers()
+                    if mods not in (
+                        Qt.KeyboardModifier.NoModifier,
+                        Qt.KeyboardModifier.ShiftModifier,
+                    ):
+                        self._last_shift = None
+                        return False
+                    now = self._now()
+                    if self._last_shift is not None and (now - self._last_shift) <= _DOUBLE_SHIFT_WINDOW:
+                        self._last_shift = None
+                        self.triggered.emit()
+                    else:
+                        self._last_shift = now
+                else:
+                    self._last_shift = None  # any other key breaks the pair
+            return False  # never consume the event
