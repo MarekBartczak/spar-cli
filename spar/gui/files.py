@@ -9,7 +9,10 @@ FileFinderOverlay, ...) is only defined when PySide6 is importable.
 from __future__ import annotations
 
 import os
+import re
+import shutil  # noqa: F401  (used by later tranche-B tasks; kept per plan)
 import time as _time
+from dataclasses import dataclass
 from pathlib import Path
 
 from pygments.lexers import get_lexer_for_filename
@@ -21,6 +24,14 @@ __all__ = [
     "fuzzy_score",
     "filter_paths",
     "build_file_index",
+    "SearchSpec",
+    "SearchMatch",
+    "compile_search_pattern",
+    "search_text",
+    "passes_search_guards",
+    "search_file",
+    "search_paths",
+    "replace_in_text",
 ]
 
 # Directories never walked for the finder index (ADR 0006). ``.git`` is also
@@ -106,6 +117,141 @@ def build_file_index(
             out.append(Path(dirpath, name).relative_to(root).as_posix())
     out.sort()
     return out
+
+
+_SEARCH_MAX_BYTES = 2 * 1024 * 1024
+_SEARCH_BINARY_SNIFF = 8192
+
+
+@dataclass(frozen=True)
+class SearchSpec:
+    """One find-in-files query with its mode toggles. Pure/hashable."""
+    query: str
+    regex: bool = False
+    case_sensitive: bool = False
+    whole_word: bool = False
+
+
+@dataclass(frozen=True)
+class SearchMatch:
+    """One match: project-relative POSIX path, 1-based line, full line
+    text, and the CHARACTER span [start, end) of the match in that line."""
+    path: str
+    line: int
+    text: str
+    start: int
+    end: int
+
+
+def compile_search_pattern(spec: "SearchSpec") -> "re.Pattern[str]":
+    """Compile *spec* into a regex. Literal queries are re.escape'd; a
+    whole-word query is wrapped in ``\\b(?:...)\\b``; case-insensitive
+    unless spec.case_sensitive. Raises ``re.error`` on an invalid regex —
+    the caller validates and disables search."""
+    flags = 0 if spec.case_sensitive else re.IGNORECASE
+    body = spec.query if spec.regex else re.escape(spec.query)
+    if spec.whole_word:
+        body = rf"\b(?:{body})\b"
+    return re.compile(body, flags)
+
+
+def search_text(
+    rel: str, text: str, pattern, limit: "int | None" = None
+) -> "list[SearchMatch]":
+    """Scan already-decoded *text* line by line. Zero-length matches are
+    skipped so an accidental empty pattern yields nothing. review #37:
+    *limit* stops the scan as soon as that many matches are collected —
+    never materialize a pathological file's full match list. review #39:
+    a non-positive *limit* returns [] immediately (it must not behave as
+    unbounded). Pure."""
+    if limit is not None and limit <= 0:
+        return []
+    out: list[SearchMatch] = []
+    for lineno, line in enumerate(text.split("\n"), start=1):
+        for m in pattern.finditer(line):
+            if m.start() == m.end():
+                continue
+            out.append(SearchMatch(rel, lineno, line, m.start(), m.end()))
+            if limit is not None and len(out) == limit:
+                return out
+    return out
+
+
+def passes_search_guards(root, rel: str) -> bool:
+    """True when ``root/rel`` passes the python engine's file guards:
+    size <= 2 MB and no NUL byte in the first 8 KB. Any OSError => False.
+    review #19: this is the SINGLE guard predicate — search_file uses it
+    AND the ripgrep path prefilters its file list with it, so rg never
+    sees a file the python reference would skip (rg's own binary
+    detection differs from the NUL-in-first-8KB rule)."""
+    p = Path(root) / rel
+    try:
+        if p.stat().st_size > _SEARCH_MAX_BYTES:
+            return False
+        with p.open("rb") as fh:
+            sniff = fh.read(_SEARCH_BINARY_SNIFF)
+    except OSError:
+        return False
+    return b"\x00" not in sniff
+
+
+def search_file(
+    root, rel: str, pattern, limit: "int | None" = None
+) -> "list[SearchMatch]":
+    """Read ``root/rel`` and scan it. Applies passes_search_guards (size +
+    binary, review #19); decodes utf-8 errors='replace'. Any OSError ⇒ no
+    matches. review #37: *limit* is forwarded to search_text so scanning
+    stops at the cap (caller infers truncation via ``len == limit``).
+    Touches the filesystem, no Qt."""
+    if not passes_search_guards(root, rel):
+        return []
+    try:
+        data = (Path(root) / rel).read_bytes()
+    except OSError:
+        return []
+    return search_text(
+        rel, data.decode("utf-8", errors="replace"), pattern, limit=limit
+    )
+
+
+def search_paths(root, rel_paths, pattern) -> "list[SearchMatch]":
+    """Reference python content search over *rel_paths*, sorted by
+    (path, line, start). This is the shape ripgrep must reproduce."""
+    out: list[SearchMatch] = []
+    for rel in rel_paths:
+        out.extend(search_file(root, rel, pattern))
+    out.sort(key=lambda m: (m.path, m.line, m.start))
+    return out
+
+
+def replace_in_text(text: str, pattern, replacement: str, *, regex: bool):
+    """Return ``(new_text, count)``. Mirrors search_text's match semantics
+    exactly. review #40: scans per-LINE (``text.split("\\n")``) like
+    search_text — a whole-file finditer would let ``foo\\s+bar`` replace
+    across ``foo\\nbar`` though the search never displayed it. review #38:
+    within each line, replaces ONLY non-zero-length matches — the same
+    skip search_text applies — so a pattern like ``a*`` never edits the
+    zero-width positions the results tree never displayed. Manual
+    per-line finditer splice (no bare ``pattern.subn``): regex mode
+    expands backrefs via ``m.expand(replacement)`` (may raise ``re.error``
+    on a bad replacement — the caller catches); literal mode splices
+    *replacement* verbatim (``\\1`` is not a backref). *count* is the
+    total of per-line replaced non-zero matches."""
+    new_lines: list[str] = []
+    count = 0
+    for line in text.split("\n"):
+        pieces: list[str] = []
+        pos = 0
+        for m in pattern.finditer(line):
+            if m.start() == m.end():
+                continue
+            pieces.append(line[pos:m.start()])
+            pieces.append(m.expand(replacement) if regex else replacement)
+            pos = m.end()
+            count += 1
+        pieces.append(line[pos:])
+        new_lines.append("".join(pieces))
+    return "\n".join(new_lines), count
 
 
 try:  # pragma: no cover - exercised via the two interpreters
