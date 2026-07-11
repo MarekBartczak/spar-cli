@@ -176,10 +176,14 @@ you do, so nothing is silently clobbered).
 **Double Shift** opens a fuzzy file finder overlay — type part of a path,
 Enter (or double-click) opens it in the Pliki view, Esc closes.
 
-**Find in files (Ctrl+Shift+F).** Opens a search dock at the bottom of the
-Pliki view: type a query, toggle **Aa** (case), **.*** (regex) or **W**
-(whole word); results group as file → matching lines with a per-file count,
-and clicking a line opens the file at that match. Search runs off the UI
+**Find in files (Ctrl+Shift+F).** Opens a floating **Szukaj w plikach**
+window (non-modal, resizable — its size and position are remembered):
+type a query, toggle **Aa** (case), **.*** (regex) or **W** (whole word);
+results group as file → matching lines with a per-file count, and clicking
+a line opens the file at that match and dismisses the window. A second
+Ctrl+Shift+F brings the window back to front; **Esc** (or the window's
+close button) closes it — reopening restores the last query and results.
+Search runs off the UI
 thread and a new query cancels the previous one (ripgrep, when on PATH,
 accelerates only case-sensitive literal non-whole-word searches; every
 other search — case-insensitive, whole-word or regex — uses the built-in

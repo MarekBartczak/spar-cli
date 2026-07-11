@@ -1576,11 +1576,84 @@ class TestFilesViewSearchWiring:
         qtbot.addWidget(view)
         return view
 
-    def test_open_search_shows_dock_and_focuses(self, qtbot, tmp_path):
+    def test_open_search_shows_dialog_and_focuses(self, qtbot, tmp_path):
         view = self._view(qtbot, tmp_path)
-        assert view.search_panel.isHidden() is True  # hidden by default
+        assert view.search_dialog.isVisible() is False  # hidden by default
         view.open_search()
-        assert view.search_panel.isHidden() is False
+        assert view.search_dialog.isVisible() is True
+        assert view.search_dialog.windowTitle() == "Szukaj w plikach"
+        assert view.search_dialog.isModal() is False
+        # the query field gets focus (with any existing text preselected)
+        assert view.search_dialog.focusWidget() is view.search_panel.query
+
+    def test_open_search_preselects_existing_query_text(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.search_panel.query.setText("todo")
+        view.open_search()
+        assert view.search_panel.query.selectedText() == "todo"
+
+    def test_second_open_search_is_not_a_toggle(self, qtbot, tmp_path):
+        # a second Ctrl+Shift+F raises/focuses the dialog; it must NOT close
+        # it (Esc closes).
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.open_search()
+        assert view.search_dialog.isVisible() is True
+
+    def test_esc_hides_dialog_without_stopping_session(self, qtbot, tmp_path):
+        from PySide6.QtCore import Qt
+
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.search_panel.query.setText("todo")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        session = view.search_panel._session
+        assert session._started is True
+        qtbot.keyClick(view.search_dialog, Qt.Key.Key_Escape)
+        assert view.search_dialog.isVisible() is False
+        # the session/thread stays alive for reopen — teardown belongs to
+        # the owning FilesView, not the dialog.
+        assert session._stopped is False
+        assert session._thread.isRunning() is True
+        # reopen + a NEW search still works on the same session
+        view.open_search()
+        assert view.search_dialog.isVisible() is True
+        view.search_panel.query.setText("plain")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        item = view.search_panel.results.topLevelItem(0)
+        assert item.childCount() == 1
+
+    def test_result_activation_hides_dialog(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.search_panel.query.setText("plain")
+        view.search_panel._run_search()
+        qtbot.waitUntil(
+            lambda: view.search_panel.results.topLevelItemCount() == 1, timeout=5000
+        )
+        line_item = view.search_panel.results.topLevelItem(0).child(0)
+        view.search_panel._on_item_activated(line_item, 0)
+        assert view.tabs.currentWidget().path.name == "app.py"
+        assert view.search_dialog.isVisible() is False
+
+    def test_dialog_geometry_round_trips_via_settings(self, qtbot, tmp_path):
+        from spar.gui.files import FilesView
+
+        view = self._view(qtbot, tmp_path)
+        view.open_search()
+        view.search_dialog.resize(640, 420)
+        view.search_dialog.hide()  # hide persists geometry
+        other = FilesView(tmp_path)
+        qtbot.addWidget(other)
+        other.open_search()
+        assert other.search_dialog.width() == 640
+        assert other.search_dialog.height() == 420
 
     def test_open_at_positions_cursor_and_selects_span(self, qtbot, tmp_path):
         view = self._view(qtbot, tmp_path)
@@ -1633,11 +1706,11 @@ class TestFilesViewSearchWiring:
         # the real chord through the shortcut map.
         view = self._view(qtbot, tmp_path)
         view._find_in_files_shortcut.activated.emit()
-        assert view.search_panel.isHidden() is False
+        assert view.search_dialog.isVisible() is True
 
     def test_ctrl_shift_f_real_chord_opens_search(self, qtbot, tmp_path):
         # real-chord half: deliver Ctrl+Shift+F to an editor; the
-        # eventFilter bridge must open the dock offscreen.
+        # eventFilter bridge must open the dialog offscreen.
         view = self._view(qtbot, tmp_path)
         view.open_file(tmp_path / "app.py")
         view.show()
@@ -1647,7 +1720,7 @@ class TestFilesViewSearchWiring:
             ed, Qt.Key.Key_F,
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
         )
-        assert view.search_panel.isHidden() is False
+        assert view.search_dialog.isVisible() is True
 
     def test_find_in_editor_shortcut_wired(self, qtbot, tmp_path):
         view = self._view(qtbot, tmp_path)
@@ -1699,4 +1772,5 @@ class TestFilesViewSearchWiring:
         assert session._started is True   # the thread actually ran
         view.close()
         assert session._stopped is True   # closeEvent tore it down
+        assert view.search_dialog.isVisible() is False  # dialog closed too
         qtbot.waitUntil(lambda: not session._thread.isRunning(), timeout=5000)

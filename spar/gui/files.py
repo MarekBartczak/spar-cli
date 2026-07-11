@@ -774,6 +774,7 @@ if _HAS_QT:
     )
     from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import (
+        QDialog,
         QFileSystemModel,
         QHBoxLayout,
         QLabel,
@@ -1059,6 +1060,42 @@ if _HAS_QT:
             self.editor.reload_from_disk()
             self._hide_disk_banner()
 
+    class SearchDialog(QDialog):
+        """Floating find-in-files window (WebStorm-style Find in Path).
+
+        Hosts the existing SearchPanel widget — this is a re-hosting, all
+        search/replace machinery lives in the panel. Non-modal so the user
+        can glance at the editor underneath. Esc (QDialog's default reject)
+        and the window close button only HIDE the dialog: the search
+        session's QThread stays alive for reopen and is torn down with the
+        owning FilesView (stop_search / closeEvent), exactly as before.
+        """
+
+        def __init__(self, panel, parent=None):
+            super().__init__(parent)
+            self.setObjectName("searchDialog")
+            self.setWindowTitle("Szukaj w plikach")
+            self.setModal(False)
+            self.panel = panel
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            panel.setParent(self)
+            layout.addWidget(panel)
+            self._settings = QSettings("spar", "gui")
+            self.resize(700, 500)
+            geo = self._settings.value("files/search_dialog_geometry")
+            if geo is not None:
+                self.restoreGeometry(geo)
+
+        def hideEvent(self, event) -> None:  # noqa: N802 (Qt override)
+            # Persist geometry on every hide (Esc, close button, result
+            # activation) so the next open — this process or the next —
+            # comes back at the same size/position.
+            self._settings.setValue(
+                "files/search_dialog_geometry", self.saveGeometry()
+            )
+            super().hideEvent(event)
+
     class FilesView(QWidget):
         """Pliki module: project tree | tabbed Pygments editor (ADR 0006)."""
 
@@ -1133,27 +1170,21 @@ if _HAS_QT:
             self.splitter.setStretchFactor(0, 1)
             self.splitter.setStretchFactor(1, 3)
 
-            # -- find-in-files dock (ADR 0006 tranche B) --
-            self.search_panel = SearchPanel(self.project_dir, self)
+            outer.addWidget(self.splitter)
+
+            # -- find-in-files floating dialog (ADR 0006 tranche B) --
+            self.search_panel = SearchPanel(self.project_dir)
             self.search_panel.dirty_open_paths = self._dirty_open_paths
             # review #9: FilesView itself performs the open (tab + cursor)
             # AND re-emits open_location so MainWindow can switch the centre
             # view. This makes a standalone FilesView work without MainWindow.
             self.search_panel.open_location.connect(self._open_at_location)
-            self.search_panel.setVisible(False)
-
-            self.vsplit = QSplitter(Qt.Orientation.Vertical, self)
-            self.vsplit.setObjectName("filesVSplit")
-            self.vsplit.addWidget(self.splitter)   # tree | editor
-            self.vsplit.addWidget(self.search_panel)
-            self.vsplit.setStretchFactor(0, 4)
-            self.vsplit.setStretchFactor(1, 1)
-            outer.addWidget(self.vsplit)
+            # The dialog reparents the panel into itself; it stays hidden
+            # until Ctrl+Shift+F / open_search().
+            self.search_dialog = SearchDialog(self.search_panel, self)
 
             self._restore_split_state()
             self.splitter.splitterMoved.connect(self._save_split_state)
-            self._restore_search_split_state()
-            self.vsplit.splitterMoved.connect(self._save_search_split_state)
 
             # Ctrl+S saves the current tab (review #2). Scoped to this
             # widget so it only fires while Pliki has focus. It NO-OPS while
@@ -1264,7 +1295,13 @@ if _HAS_QT:
 
         # -- find-in-files / find-in-editor (ADR 0006 tranche B) -----------
         def open_search(self) -> None:
-            self.search_panel.setVisible(True)
+            # hidden → show; visible → raise/focus. A second Ctrl+Shift+F is
+            # NOT a toggle-close (Esc closes the dialog).
+            if self.search_dialog.isVisible():
+                self.search_dialog.raise_()
+                self.search_dialog.activateWindow()
+            else:
+                self.search_dialog.show()
             self.search_panel.focus_query()
 
         def _open_find_in_current_tab(self) -> None:
@@ -1278,6 +1315,9 @@ if _HAS_QT:
             # review #9: open here, then re-emit so MainWindow switches view.
             self.open_at(self.project_dir / rel, line, start, end)
             self.open_location.emit(rel, line, start, end)
+            # WebStorm behaviour: activating a result dismisses the floating
+            # search window so the opened file is in view.
+            self.search_dialog.hide()
 
         def open_at(self, path, line: int, start: int, end: int) -> None:
             self.open_file(path)
@@ -1311,6 +1351,7 @@ if _HAS_QT:
             # routes through MainWindow.closeEvent in that case, so without
             # this the search panel's thread would outlive the widget.
             self.stop_search()
+            self.search_dialog.close()
             super().closeEvent(event)
 
         def _dirty_open_paths(self) -> set:
@@ -1444,14 +1485,6 @@ if _HAS_QT:
 
         def _save_split_state(self, *_args) -> None:
             self._settings.setValue("files/tree_split", self.splitter.saveState())
-
-        def _restore_search_split_state(self) -> None:
-            state = self._settings.value("files/search_split")
-            if state is not None:
-                self.vsplit.restoreState(state)
-
-        def _save_search_split_state(self, *_args) -> None:
-            self._settings.setValue("files/search_split", self.vsplit.saveState())
 
     _FINDER_STALE_SECONDS = 5.0
     _FINDER_MAX_RESULTS = 200
@@ -1998,8 +2031,8 @@ if _HAS_QT:
             self.finished.emit(total_matches, total_files, truncated)
 
     class SearchPanel(QWidget):
-        """Find/replace-in-files dock (ADR 0006 tranche B). Replace UI is
-        added in Task 4; this task builds search + results + status."""
+        """Find/replace-in-files panel (ADR 0006 tranche B), hosted in the
+        floating SearchDialog. Holds all search/replace machinery."""
 
         open_location = Signal(str, int, int, int)  # rel, line, start, end
 
