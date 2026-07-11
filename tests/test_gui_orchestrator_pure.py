@@ -58,6 +58,33 @@ class TestGateContext:
         assert build_gate_context(gate).count("y") <= 2000
 
 
+class TestOpeningPromptConversational:
+    """Live smoke defect 2: the prompt must ask for a NORMAL conversation —
+    no self-introduction, no volunteered lettered menus on every reply."""
+
+    def test_instructs_natural_conversation(self):
+        assert "Prowadź NORMALNĄ rozmowę" in OPENING_PROMPT
+        assert "NIE przedstawiaj się" in OPENING_PROMPT
+        assert "NIE proponuj menu opcji z własnej inicjatywy" in OPENING_PROMPT
+        # Greetings get a one-line greeting back, nothing more.
+        assert "jednym zdaniem" in OPENING_PROMPT
+
+    def test_options_reserved_for_genuine_choices_only(self):
+        assert "rezerwuj WYŁĄCZNIE" in OPENING_PROMPT
+        assert "wybrał między konkretnymi alternatywami" in OPENING_PROMPT
+        # The lettered format itself survives (the GUI renders buttons off it).
+        assert "LITERAMI" in OPENING_PROMPT and "A., B., C." in OPENING_PROMPT
+
+    def test_no_always_offer_options_instruction(self):
+        # The old wording made the model answer even "cześć" with an A/B/C
+        # menu. It must be gone.
+        assert "proponujesz opcje, oznaczaj je" not in OPENING_PROMPT
+
+    def test_read_only_contract_untouched(self):
+        assert "TYLKO-DO-ODCZYTU" in OPENING_PROMPT
+        assert "NIGDY nie podejmujesz decyzji" in OPENING_PROMPT
+
+
 class TestParseTaskDraft:
     def test_none_when_absent(self):
         assert parse_task_draft("zwykła odpowiedź") is None
