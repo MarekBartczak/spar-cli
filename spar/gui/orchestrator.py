@@ -35,6 +35,67 @@ ogrodzonym DOKŁADNIE w tym wielowierszowym formacie (linia otwierająca
 aby GUI mogło go przejąć."""
 
 
+# Free-text bodies (summary, each remark text) are truncated to this many
+# chars, mirroring the engine's headless gate truncation.
+_GATE_TEXT_LIMIT = 2000
+
+
+def build_gate_context(pending_gate: dict | None) -> str:
+    """Render the COMPLETE pending-gate payload as a read-only text block.
+
+    Pure and Qt-free. Mirrors SidePane._render_context's field set (review
+    #10): task_id, rounds, reason, summary, artifact, command, then every
+    remark from ``open_remarks`` or ``nice_backlog`` — the failing per-task
+    test output lives in ``open_remarks[*].text``, never in a top-level
+    summary. Only lines whose field is present are emitted.
+    """
+    if not pending_gate:
+        return ""
+    context = pending_gate.get("context") or {}
+    lines = ["[KONTEKST BRAMKI — tylko do wglądu, NIE podejmuj decyzji]"]
+    lines.append(f"typ: {pending_gate.get('name', '?')}")
+    meta = []
+    if context.get("task_id") is not None:
+        meta.append(f"task: {context['task_id']}")
+    if context.get("rounds") is not None:
+        meta.append(f"rundy: {context['rounds']}")
+    if context.get("reason"):
+        meta.append(f"powód: {context['reason']}")
+    if meta:
+        lines.append("  ".join(meta))
+    summary = context.get("summary")
+    if summary:
+        lines.append("podsumowanie:")
+        lines.append(str(summary)[:_GATE_TEXT_LIMIT])
+    if context.get("artifact"):
+        lines.append(f"plan: {context['artifact']}")
+    if context.get("command"):
+        lines.append(f"komenda: {context['command']}")
+    remarks = context.get("open_remarks") or context.get("nice_backlog") or []
+    if remarks:
+        lines.append("uwagi:")
+        for remark in remarks:
+            severity = remark.get("severity", "")
+            author = remark.get("author", "")
+            text = str(remark.get("text", ""))
+            # Truncate the WHOLE rendered line to the limit so the remark
+            # body never exceeds it even after the [severity]/(author) prefix.
+            lines.append(f"[{severity}] ({author}) {text}"[:_GATE_TEXT_LIMIT])
+    return "\n".join(lines)
+
+
+def _gate_fingerprint(pending_gate: dict | None) -> str:
+    """Dedup identity of a pending gate = its complete rendered context.
+
+    Reviews #6 + #10: neither ``(name, task_id)`` nor a tuple over
+    name/task_id/rounds/summary/command is a valid identity — a re-reached
+    gate whose only change is remark text (the failing-test evidence) must
+    re-inject. The rendered block folds in every field, so any change yields
+    a new fingerprint, while a 2s re-poll of the same gate stays identical.
+    """
+    return build_gate_context(pending_gate)
+
+
 _TERMINAL_RE = re.compile(r"^done \(.*\)$")
 
 
@@ -158,6 +219,8 @@ if _HAS_QT:
             self._injected_gate_key: str | None = None
             self._pending_opening = False
             self._pending_gate_key: str | None = None
+            # Latest pending gate from side_pane.status_changed (Task 5).
+            self._pending_gate: dict | None = None
 
             # Persistence (Task 4): resume the previous chat session from
             # .spar/chat.json. A resumed session already ran its opening —
@@ -349,7 +412,14 @@ if _HAS_QT:
             parts = []
             if needs_opening:
                 parts.append(OPENING_PROMPT)
-            # (Task 5 inserts the pending-gate context block here.)
+            # Task 5: silently carry the pending-gate context — once per gate
+            # fingerprint (the complete rendered block, reviews #6 + #10).
+            gate_key = None
+            if self._pending_gate is not None:
+                fingerprint = _gate_fingerprint(self._pending_gate)
+                if fingerprint != self._injected_gate_key:
+                    parts.append(build_gate_context(self._pending_gate))
+                    gate_key = fingerprint
             parts.append(user_text)
             prompt = "\n\n".join(p for p in parts if p)
 
@@ -363,7 +433,7 @@ if _HAS_QT:
             # Review #17: record what THIS turn carries; commit only on a
             # successful resumable turn (_on_turn_finished promotes).
             self._pending_opening = needs_opening
-            self._pending_gate_key = None
+            self._pending_gate_key = gate_key
 
             # Task 4: sending is what clears the lost state — the next turn
             # starts the fresh session, so restore the normal banner priority.
@@ -381,6 +451,19 @@ if _HAS_QT:
                 self._clear_options()
             else:
                 self.header.setText(self._header_text)
+
+        # -- status (pending gate) ----------------------------------------------
+        def on_status(self, status: dict) -> None:
+            """Track the pending gate from side_pane.status_changed (Task 5)."""
+            pending_gate = status.get("pending_gate")
+            self._pending_gate = pending_gate
+            if not pending_gate:
+                # Gate cleared: reset BOTH keys (review #22). Clearing only
+                # _injected_gate_key would let an in-flight turn's stale
+                # _pending_gate_key be promoted AFTER the clear, wrongly
+                # deduping the same gate when it is re-reached.
+                self._injected_gate_key = None
+                self._pending_gate_key = None
 
         # -- session signal handlers --------------------------------------------
         def _on_chunk(self, text: str) -> None:

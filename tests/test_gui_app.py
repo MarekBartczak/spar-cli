@@ -117,6 +117,30 @@ class TestMainWindow:
         window._on_state_changed(RunnerState.DONE)
         assert calls == [True, False, True, False]
 
+    def test_startup_pending_gate_reaches_chat_panel(self, qtbot, tmp_path):
+        # Review #29: a gate ALREADY pending when the GUI starts is delivered by
+        # the single initial side_pane.refresh() (synchronous status_changed).
+        # The on_status connection must exist BEFORE that refresh — otherwise
+        # the first chat turn misses the gate context until the next 2s poll.
+        from spar.state import DebateState, StateStore
+
+        spar_dir = tmp_path / ".spar"
+        spar_dir.mkdir()
+        state = DebateState()
+        state.pending_gate = {"name": "consensus", "options": ["accept", "abort"],
+                              "context": {"summary": "STARTUP-GATE"}}
+        StateStore(spar_dir).save(state)
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        # Delivered at construction time — no poll tick, no manual refresh here.
+        # (A bare tmp project has no chat_side_cfg, so the panel holds no real
+        # session and its input is disabled — the ordering proof is the stored
+        # gate itself; the "next send carries it" half is pinned at panel level
+        # in test_gui_orchestrator.py, where a fake session can be injected.)
+        assert window.chat_panel._pending_gate is not None
+        assert window.chat_panel._pending_gate["name"] == "consensus"
+
     def test_mainwindow_close_stops_chat_session(self, qtbot, tmp_path):
         # Review #11: drives MainWindow.close() through closeEvent and asserts
         # the chat session is stopped (the earlier retention test never

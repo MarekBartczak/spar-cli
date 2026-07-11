@@ -167,6 +167,12 @@ class MainWindow(QMainWindow):
         self.chat_panel = OrchestratorChatPanel(
             self.project_dir, chat_side_cfg, chat_timeout
         )
+        # Review #29: connected BEFORE the single initial side_pane.refresh()
+        # at the end of __init__ — that refresh fires status_changed
+        # SYNCHRONOUSLY and is the only startup delivery of a gate that is
+        # ALREADY pending when the GUI opens; connected after it, the chat
+        # panel would miss the gate context until the next 2s poll.
+        self.side_pane.status_changed.connect(self.chat_panel.on_status)
         self.right_column = RightColumn(self.side_pane, self.chat_panel, self)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)

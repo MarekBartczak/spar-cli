@@ -375,9 +375,9 @@ class TestOrchestratorChatPanel:
     def test_null_session_id_resets_opening_and_gate_fingerprint(self, qtbot, tmp_path):
         # Review #37: a resumed panel seeded _opening_sent=True; a null-id turn
         # must re-arm BOTH the opening contract and the delivered-gate key —
-        # the dead session took its delivered context with it. (Gate-context
-        # injection itself lands in a later task; here the delivered-gate key
-        # is seeded directly to prove the branch resets it.)
+        # the dead session took its delivered context with it. End-to-end via
+        # on_status (Task 5): the gate context is really injected, promoted by
+        # a resumable turn, then a null-id turn re-arms so it re-injects.
         from spar.gui.chat_store import ChatMeta, save_chat
         from spar.gui.orchestrator import OPENING_PROMPT
         save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-stale", "opus", 4))
@@ -385,19 +385,29 @@ class TestOrchestratorChatPanel:
         fake.session_id = "sess-stale"
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
         qtbot.addWidget(panel)
+        gate = {"name": "review_rounds",
+                "context": {"task_id": "t1", "summary": "EVIDENCE"}}
+        panel.on_status({"pending_gate": gate})
         panel.input_edit.setPlainText("co robić?")
         panel.send_button.click()                        # resumed: opening skipped
         assert panel._opening_sent is True
-        panel._injected_gate_key = "review_rounds:t1"    # as if delivered to dead session
+        assert "EVIDENCE" in fake.sends[0][0]            # gate context injected
+        fake.turn_finished.emit("ok", [])                # truthy id: key promoted
+        assert panel._injected_gate_key is not None      # delivered to LIVE session
         fake.session_id = None
+        panel.input_edit.setPlainText("dalej")
+        panel.send_button.click()
+        assert "EVIDENCE" not in fake.sends[1][0]        # deduped while delivered
         fake.turn_finished.emit("ok", [])                # non-resumable turn
         assert panel._opening_sent is False              # review #37
         assert panel._injected_gate_key is None          # review #37
+        panel.on_status({"pending_gate": gate})          # same gate still pending
         panel.input_edit.setPlainText("no więc?")
         panel.send_button.click()
         sent_text, reset = fake.sends[-1]
         assert reset is True
         assert OPENING_PROMPT.split("\n")[0] in sent_text  # opening re-delivered
+        assert "EVIDENCE" in sent_text  # re-injected: dead session took delivery
 
     def test_session_lost_recovery_survives_deletion_failure(self, qtbot, tmp_path, monkeypatch):
         # Review #35/#36: the OTHER recovery path — _on_session_lost must also
@@ -473,6 +483,145 @@ class TestOrchestratorChatPanel:
         panel.stop_session()
         panel.stop_session()  # idempotent — safe to call twice
         assert calls == ["stop", "stop"]
+
+
+class TestGateInjection:
+    def test_next_send_injects_gate_context_silently(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.on_status({"pending_gate": {"name": "consensus",
+                                          "context": {"task_id": "t1", "summary": "OUT"}}})
+        panel.input_edit.setPlainText("co byś wybrał?")
+        panel.send_button.click()
+        sent_text, _reset = fake.sends[0]
+        assert "co byś wybrał?" in sent_text
+        assert "consensus" in sent_text and "OUT" in sent_text  # context injected
+        # The visible transcript shows only the user's words, not the context.
+        assert "consensus" not in panel.transcript.toPlainText()
+
+    def test_gate_pending_before_first_send_is_injected(self, qtbot, tmp_path):
+        # Review #29 (panel half): a gate delivered via on_status BEFORE any
+        # send — the startup case — must be injected into the first turn.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.on_status({"pending_gate": {"name": "consensus",
+                                          "context": {"summary": "STARTUP-GATE"}}})
+        panel.input_edit.setPlainText("co z bramką?")
+        panel.send_button.click()
+        assert "STARTUP-GATE" in fake.sends[0][0]
+
+    def test_failed_turn_reinjects_gate_context(self, qtbot, tmp_path):
+        # Review #17: a gate context whose turn FAILS was never delivered, so
+        # its fingerprint must NOT be recorded — the retry has to re-inject it.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        gate = {"name": "consensus", "context": {"summary": "OUT"}}
+        panel.on_status({"pending_gate": gate})
+        panel.input_edit.setPlainText("q1")
+        panel.send_button.click()
+        assert "OUT" in fake.sends[0][0]  # injected on the first (doomed) send
+        fake.turn_failed.emit("boom")     # turn failed -> not committed
+        panel.on_status({"pending_gate": gate})  # same gate still pending
+        panel.input_edit.setPlainText("q2")
+        panel.send_button.click()
+        assert "OUT" in fake.sends[-1][0]  # re-injected: never counted delivered
+
+    def test_context_injected_once_per_gate(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        gate = {"name": "consensus", "context": {"summary": "OUT"}}
+        panel.on_status({"pending_gate": gate})
+        panel.input_edit.setPlainText("q1")
+        panel.send_button.click()
+        fake.session_id = "sess-1"  # review #33: resumable turn promotes the gate fingerprint
+        fake.turn_finished.emit("ok", [])
+        panel.on_status({"pending_gate": gate})  # same gate still pending
+        panel.input_edit.setPlainText("q2")
+        panel.send_button.click()
+        assert "OUT" in fake.sends[0][0]
+        assert "OUT" not in fake.sends[1][0]  # not re-injected same gate
+
+    def test_rereached_gate_with_new_output_reinjects(self, qtbot, tmp_path):
+        # Review #6: the SAME task/gate after extend/retry carries NEW output;
+        # (name, task_id) would wrongly dedup it. A changed payload fingerprint
+        # must re-inject so the advisor sees the fresh output.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.on_status({"pending_gate": {"name": "review_rounds",
+                                          "context": {"task_id": "t1", "rounds": 2,
+                                                      "summary": "FAIL v1"}}})
+        panel.input_edit.setPlainText("q1")
+        panel.send_button.click()
+        assert "FAIL v1" in fake.sends[0][0]
+        # Review #25: complete the first turn — otherwise the panel stays
+        # disabled in-flight and the second send never dispatches.
+        # Review #33: truthy id so the fingerprint is PROMOTED — the re-inject
+        # below then proves the CHANGED payload, not a never-recorded one.
+        fake.session_id = "sess-1"
+        fake.turn_finished.emit("ok", [])
+        # gate clears, then the same task re-reaches the gate with new output
+        panel.on_status({"pending_gate": None})
+        panel.on_status({"pending_gate": {"name": "review_rounds",
+                                          "context": {"task_id": "t1", "rounds": 4,
+                                                      "summary": "FAIL v2"}}})
+        panel.input_edit.setPlainText("q2")
+        panel.send_button.click()
+        assert "FAIL v2" in fake.sends[1][0]  # re-injected: fingerprint changed
+
+    def test_rereached_gate_with_only_changed_remark_text_reinjects(self, qtbot, tmp_path):
+        # Review #10: same name/task_id/rounds but the failing-test evidence in
+        # open_remarks changed. A fingerprint over name/task_id/rounds/summary/
+        # command alone would MISS this; fingerprinting the complete rendered
+        # context (incl. open_remarks text) re-injects.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        base = {"name": "review_rounds",
+                "context": {"task_id": "t1", "rounds": 3,
+                            "open_remarks": [{"severity": "USER", "author": "per-task-test",
+                                              "text": "OUTPUT v1"}]}}
+        panel.on_status({"pending_gate": base})
+        panel.input_edit.setPlainText("q1")
+        panel.send_button.click()
+        assert "OUTPUT v1" in fake.sends[0][0]
+        # Review #25: complete the first turn — otherwise the panel stays
+        # disabled in-flight and the second send never dispatches.
+        # Review #33: truthy id -> fingerprint promoted; re-inject proves the
+        # changed remark text, not a skipped promotion.
+        fake.session_id = "sess-1"
+        fake.turn_finished.emit("ok", [])
+        panel.on_status({"pending_gate": None})
+        changed = {"name": "review_rounds",
+                   "context": {"task_id": "t1", "rounds": 3,
+                               "open_remarks": [{"severity": "USER", "author": "per-task-test",
+                                                 "text": "OUTPUT v2"}]}}
+        panel.on_status({"pending_gate": changed})
+        panel.input_edit.setPlainText("q2")
+        panel.send_button.click()
+        assert "OUTPUT v2" in fake.sends[1][0]  # re-injected: remark text differs
+
+    def test_gate_cleared_mid_turn_does_not_corrupt_dedup(self, qtbot, tmp_path):
+        # Review #22: a gate clears WHILE its context-bearing turn is still in
+        # flight. on_status must invalidate the pending promotion so the later
+        # turn_finished cannot promote a stale fingerprint. If it did, the SAME
+        # gate re-reached afterwards would be wrongly deduped and never re-inject.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        gate = {"name": "consensus", "context": {"summary": "OUT"}}
+        panel.on_status({"pending_gate": gate})
+        panel.input_edit.setPlainText("q1")
+        panel.send_button.click()
+        assert "OUT" in fake.sends[0][0]          # injected; fingerprint pending
+        panel.on_status({"pending_gate": None})   # gate clears mid-turn
+        # Review #33: truthy id so turn_finished takes the RESUMABLE branch —
+        # the branch that would wrongly promote the stale fingerprint if
+        # on_status had not invalidated it (the very bug of review #22).
+        fake.session_id = "sess-1"
+        fake.turn_finished.emit("ok", [])         # turn completes AFTER the clear
+        # Same gate re-reached: must re-inject (pending promotion was invalidated).
+        panel.on_status({"pending_gate": gate})
+        panel.input_edit.setPlainText("q2")
+        panel.send_button.click()
+        assert "OUT" in fake.sends[1][0]          # re-injected, not stale-deduped
 
 
 class TestOrchestratorSessionAdapter:
