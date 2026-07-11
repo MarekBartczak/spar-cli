@@ -1570,11 +1570,21 @@ if _HAS_QT:
             super().__init__(parent)
             self._last_shift = None
             self._now = _time.monotonic
+            self._last_event_sig = None
 
         def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
             if event.type() == QEvent.Type.KeyPress:
                 if getattr(event, "isAutoRepeat", lambda: False)():
                     return False
+                # A bare Shift is not consumed by the focused widget, so Qt
+                # re-delivers the SAME event object up the parent chain and an
+                # application-level filter sees every hop. Without dedup one
+                # physical press counts as several presses → the finder fired
+                # on a SINGLE Shift (live finding). Dedup by event identity.
+                sig = (id(event), event.timestamp())
+                if sig == self._last_event_sig:
+                    return False
+                self._last_event_sig = sig
                 if event.key() == Qt.Key.Key_Shift:
                     # review #7: require a BARE Shift. On the Shift keypress
                     # the only modifier that may legitimately be reported is

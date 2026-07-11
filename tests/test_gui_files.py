@@ -493,6 +493,36 @@ class TestDoubleShift:
         filt.eventFilter(None, shift())
         assert fired == [1]
 
+    def test_propagated_same_event_counts_as_one_press(self, qtbot):
+        # Live finding: a bare Shift is not consumed by the focused widget,
+        # so Qt re-delivers the SAME QKeyEvent up the parent chain and the
+        # application-level filter sees each hop — without identity dedup a
+        # SINGLE physical press fired the finder.
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from spar.gui.files import DoubleShiftFilter
+
+        filt = DoubleShiftFilter()
+        fired = []
+        filt.triggered.connect(lambda: fired.append(1))
+        filt._now = lambda: 0.0
+        ev = QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Shift,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        # One physical press delivered to several objects in the chain.
+        for target in (None, None, None):
+            filt.eventFilter(target, ev)
+        assert fired == []  # single press must NOT trigger
+        # A genuinely new second press (new event object) still triggers.
+        filt._now = lambda: 0.2
+        ev2 = QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Shift,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        filt.eventFilter(None, ev2)
+        assert fired == [1]
+
     def test_other_key_between_resets(self, qtbot):
         from PySide6.QtCore import QEvent, Qt
         from PySide6.QtGui import QKeyEvent
