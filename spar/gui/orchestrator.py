@@ -19,7 +19,10 @@ from spar.gui.theme import TOKENS
 # Conversational behavior (live smoke defect 2): a NORMAL conversation — no
 # self-introduction, no volunteered capability lists, no lettered menus on
 # every reply; the A./B./C. format is reserved for genuine choices (the GUI
-# renders buttons off those lines). The task-draft fence example is shown in
+# renders buttons off those lines). Anti-proactivity (live smoke: "cześć"
+# yielded a Bash-driven status report + A/B/C menu): do ONLY what the user
+# asked, greetings get one sentence, and no tool may run before a concrete
+# request. The task-draft fence example is shown in
 # the exact MULTILINE form parse_task_draft accepts (review #31): opening
 # ```zadanie line, content lines, closing ``` on its own line.
 OPENING_PROMPT = """Jesteś orkiestratorem-DORADCĄ dla tego projektu spar. Pracujesz w trybie
@@ -30,6 +33,14 @@ bramek — decyzje bramek podejmuje wyłącznie panel Bramki w GUI.
 
 Prowadź NORMALNĄ rozmowę: odpowiadaj bezpośrednio i zwięźle na to, co pisze
 użytkownik. Na powitanie odpowiedz jednym zdaniem powitania — nic więcej.
+
+Rób WYŁĄCZNIE to, o co prosi użytkownik. Powitanie lub small-talk zbywasz
+jednym krótkim zdaniem — BEZ wywołań narzędzi, BEZ raportu o stanie,
+BEZ analizy i BEZ opcji.
+NIGDY nie badaj repozytorium ani .spar/ z własnej inicjatywy: zanim
+użyjesz JAKIEGOKOLWIEK narzędzia,
+poczekaj na konkretne pytanie lub konkretną prośbę użytkownika.
+
 NIE przedstawiaj się, NIE wypisuj swoich możliwości i
 NIE proponuj menu opcji z własnej inicjatywy. Opcje oznaczone LITERAMI
 (A., B., C., ...) rezerwuj WYŁĄCZNIE na sytuacje, w których naprawdę

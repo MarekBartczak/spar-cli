@@ -90,6 +90,29 @@ class TestOpeningPromptConversational:
         assert "NIGDY nie podejmujesz decyzji" in OPENING_PROMPT
 
 
+class TestOpeningPromptNoProactivity:
+    """Live smoke defect: a bare "cześć" produced a proactive status report
+    with Bash tool calls and an A/B/C menu. The prompt must forbid ALL
+    unprompted work — tools, analysis, status reports."""
+
+    def test_do_only_what_user_asked(self):
+        assert "WYŁĄCZNIE to, o co prosi użytkownik" in OPENING_PROMPT
+
+    def test_greeting_gets_one_sentence_no_tools_no_report(self):
+        assert "small-talk" in OPENING_PROMPT
+        assert "BEZ wywołań narzędzi" in OPENING_PROMPT
+        assert "BEZ raportu o stanie" in OPENING_PROMPT
+        assert "BEZ analizy" in OPENING_PROMPT
+        assert "BEZ opcji" in OPENING_PROMPT
+
+    def test_never_investigates_repo_unprompted(self):
+        assert "NIGDY nie badaj repozytorium ani .spar/ z własnej inicjatywy" in OPENING_PROMPT
+
+    def test_waits_for_concrete_request_before_any_tool(self):
+        assert "JAKIEGOKOLWIEK narzędzia" in OPENING_PROMPT
+        assert "poczekaj na konkretne pytanie lub konkretną prośbę" in OPENING_PROMPT
+
+
 class TestOpeningPromptHash:
     def test_is_sha256_prefix_of_current_prompt(self):
         import hashlib
