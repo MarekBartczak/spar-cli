@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
 if _HAS_QT:
 
     _RAIL_BUTTON_SIZE = 34   # fixed square face -> a real icon rail, not a text column
-    _ATTENTION_DOT = "#e6b800"  # yellow attention dot (mirrors TOKENS['warn'])
+    _ATTENTION_DOT = "#e6b800"  # saturated yellow, deliberately hotter than TOKENS['warn'] (#e0b154)
 
     class _RailButton(QToolButton):
         """Square glyph button that paints a yellow attention dot top-right.
