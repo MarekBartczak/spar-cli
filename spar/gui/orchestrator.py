@@ -8,6 +8,7 @@ adapter is ALWAYS constructed with ``readonly=True`` / ``side_name=
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -45,6 +46,19 @@ ogrodzonym DOKŁADNIE w tym wielowierszowym formacie (linia otwierająca
 ```
 
 aby GUI mogło go przejąć."""
+
+
+def opening_prompt_hash() -> str:
+    """Short fingerprint (sha256 prefix) of the CURRENT opening prompt.
+
+    Persisted alongside the chat session id (Task: prompt-hash invalidation).
+    A resumed session carries the OPENING_PROMPT it was opened with forever —
+    when the prompt changes between versions, the stored hash mismatches and
+    load_chat treats the file as no-session, so the panel starts fresh with
+    the new prompt instead of resuming the old behavior. Lives here (not in
+    chat_store) so chat_store stays generic.
+    """
+    return hashlib.sha256(OPENING_PROMPT.encode("utf-8")).hexdigest()[:16]
 
 
 _DRAFT_OPEN_RE = re.compile(r"^```zadanie\s*$")
@@ -275,7 +289,9 @@ if _HAS_QT:
             # .spar/chat.json. A resumed session already ran its opening —
             # the dispatch helper therefore skips OPENING_PROMPT on resume.
             self._chat_path = Path(project_dir) / ".spar" / "chat.json"
-            meta = load_chat(self._chat_path)
+            # Prompt-hash invalidation: metadata persisted under a DIFFERENT
+            # opening prompt (or none — legacy file) is treated as no-session.
+            meta = load_chat(self._chat_path, expected_prompt_hash=opening_prompt_hash())
             self._initial_session_id = meta.session_id if meta else None
             if meta is not None:
                 self._turn_count = meta.turn_count
@@ -592,7 +608,8 @@ if _HAS_QT:
             if session_id:
                 save_chat(
                     self._chat_path,
-                    ChatMeta(session_id, self._model, self._turn_count),
+                    ChatMeta(session_id, self._model, self._turn_count,
+                             opening_prompt_hash()),
                 )
             else:
                 discard_chat(self._chat_path)

@@ -5,7 +5,12 @@ lives above the ``if _HAS_QT:`` guard in spar/gui/orchestrator.py.
 """
 from __future__ import annotations
 
-from spar.gui.orchestrator import OPENING_PROMPT, build_gate_context, parse_task_draft
+from spar.gui.orchestrator import (
+    OPENING_PROMPT,
+    build_gate_context,
+    opening_prompt_hash,
+    parse_task_draft,
+)
 
 
 class TestGateContext:
@@ -83,6 +88,18 @@ class TestOpeningPromptConversational:
     def test_read_only_contract_untouched(self):
         assert "TYLKO-DO-ODCZYTU" in OPENING_PROMPT
         assert "NIGDY nie podejmujesz decyzji" in OPENING_PROMPT
+
+
+class TestOpeningPromptHash:
+    def test_is_sha256_prefix_of_current_prompt(self):
+        import hashlib
+        expected = hashlib.sha256(OPENING_PROMPT.encode("utf-8")).hexdigest()[:16]
+        assert opening_prompt_hash() == expected
+
+    def test_stable_and_short(self):
+        h = opening_prompt_hash()
+        assert h == opening_prompt_hash()               # deterministic
+        assert len(h) == 16 and all(c in "0123456789abcdef" for c in h)
 
 
 class TestParseTaskDraft:

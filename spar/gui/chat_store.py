@@ -11,10 +11,22 @@ class ChatMeta:
     session_id: str
     model: str
     turn_count: int
+    # Hash of the opening prompt the session was STARTED with (empty on
+    # legacy files). The caller decides whether to check it — chat_store
+    # stays generic.
+    prompt_hash: str = ""
 
 
-def load_chat(path: "str | Path") -> "ChatMeta | None":
-    """Load chat metadata; None on missing/unreadable/malformed/no session_id."""
+def load_chat(
+    path: "str | Path", expected_prompt_hash: "str | None" = None
+) -> "ChatMeta | None":
+    """Load chat metadata; None on missing/unreadable/malformed/no session_id.
+
+    When ``expected_prompt_hash`` is given, a stored hash that is missing or
+    differs from it also yields None — the persisted session was opened with
+    a DIFFERENT opening prompt, so the caller must start fresh. ``None``
+    skips the check entirely (generic callers, legacy behavior).
+    """
     try:
         raw = Path(path).read_text(encoding="utf-8")
         obj = json.loads(raw)
@@ -27,7 +39,13 @@ def load_chat(path: "str | Path") -> "ChatMeta | None":
         return None
     model = obj.get("model") if isinstance(obj.get("model"), str) else ""
     turn_count = obj.get("turn_count") if isinstance(obj.get("turn_count"), int) else 0
-    return ChatMeta(session_id=session_id, model=model, turn_count=turn_count)
+    prompt_hash = obj.get("prompt_hash") if isinstance(obj.get("prompt_hash"), str) else ""
+    if expected_prompt_hash is not None and prompt_hash != expected_prompt_hash:
+        return None
+    return ChatMeta(
+        session_id=session_id, model=model, turn_count=turn_count,
+        prompt_hash=prompt_hash,
+    )
 
 
 def save_chat(path: "str | Path", meta: ChatMeta) -> None:
@@ -38,7 +56,7 @@ def save_chat(path: "str | Path", meta: ChatMeta) -> None:
         p.write_text(
             json.dumps(
                 {"session_id": meta.session_id, "model": meta.model,
-                 "turn_count": meta.turn_count}
+                 "turn_count": meta.turn_count, "prompt_hash": meta.prompt_hash}
             ),
             encoding="utf-8",
         )

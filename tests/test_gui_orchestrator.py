@@ -247,7 +247,9 @@ class TestOrchestratorChatPanel:
 
     def test_resumes_persisted_session_and_skips_opening_prompt(self, qtbot, tmp_path):
         from spar.gui.chat_store import ChatMeta, save_chat
-        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-x", "opus", 4))
+        from spar.gui.orchestrator import opening_prompt_hash
+        save_chat(tmp_path / ".spar" / "chat.json",
+                  ChatMeta("sess-x", "opus", 4, opening_prompt_hash()))
         fake = FakeSession()
         fake.session_id = "sess-x"  # simulate a session constructed with initial id
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
@@ -257,8 +259,9 @@ class TestOrchestratorChatPanel:
         # A resumed session skips the opening prompt -> plain resume send.
         assert fake.sends[0] == ("kontynuuj", False)
 
-    def test_turn_finished_persists_chat_json(self, qtbot, tmp_path):
+    def test_turn_finished_persists_chat_json_with_prompt_hash(self, qtbot, tmp_path):
         from spar.gui.chat_store import load_chat
+        from spar.gui.orchestrator import opening_prompt_hash
         fake = FakeSession()
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
         qtbot.addWidget(panel)
@@ -269,6 +272,45 @@ class TestOrchestratorChatPanel:
         meta = load_chat(tmp_path / ".spar" / "chat.json")
         assert meta is not None and meta.session_id == "sess-new"
         assert meta.turn_count == 1
+        # The CURRENT prompt's hash is persisted, so a restart with the same
+        # prompt resumes and a restart after a prompt change starts fresh.
+        assert meta.prompt_hash == opening_prompt_hash()
+
+    def test_persisted_meta_with_old_prompt_hash_starts_fresh(self, qtbot, tmp_path):
+        # Live smoke defect: OPENING_PROMPT changed, but restarted GUIs resumed
+        # the OLD session carrying the OLD prompt with no way out. A stored
+        # hash that mismatches the current prompt's must be treated as
+        # no-session: fresh first turn with the NEW opening prompt.
+        from spar.gui.chat_store import ChatMeta, save_chat
+        save_chat(tmp_path / ".spar" / "chat.json",
+                  ChatMeta("sess-old", "opus", 7, prompt_hash="0ld0ld0ld0ld0ld0"))
+        fake = FakeSession()
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        assert panel._initial_session_id is None       # not resumed
+        assert "tura 0" in panel.header.text()         # stale turn count dropped
+        panel.input_edit.setPlainText("hej")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[0]
+        assert reset is True                           # fresh first turn
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
+        assert "hej" in sent_text
+
+    def test_persisted_meta_without_prompt_hash_starts_fresh(self, qtbot, tmp_path):
+        # Backward compat: chat.json written by a pre-hash version -> fresh.
+        import json
+        chat_path = tmp_path / ".spar" / "chat.json"
+        chat_path.parent.mkdir(parents=True)
+        chat_path.write_text(json.dumps({"session_id": "sess-old", "model": "opus",
+                                         "turn_count": 7}), encoding="utf-8")
+        fake = FakeSession()
+        panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
+        qtbot.addWidget(panel)
+        panel.input_edit.setPlainText("hej")
+        panel.send_button.click()
+        sent_text, reset = fake.sends[0]
+        assert reset is True
+        assert OPENING_PROMPT.split("\n")[0] in sent_text
 
     def test_turn_with_none_session_id_rearms_opening_and_skips_persist(self, qtbot, tmp_path):
         # Review #30: the adapter contract permits a successful turn with
@@ -301,9 +343,9 @@ class TestOrchestratorChatPanel:
         # delivered (bare resume against a fresh worker session). The branch must
         # DELETE the stale file so a fresh launch re-arms the opening.
         from spar.gui.chat_store import ChatMeta, load_chat, save_chat
-        from spar.gui.orchestrator import OPENING_PROMPT
+        from spar.gui.orchestrator import OPENING_PROMPT, opening_prompt_hash
         chat_path = tmp_path / ".spar" / "chat.json"
-        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4))
+        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4, opening_prompt_hash()))
         fake = FakeSession()
         fake.session_id = "sess-stale"
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
@@ -348,9 +390,9 @@ class TestOrchestratorChatPanel:
         from pathlib import Path
 
         from spar.gui.chat_store import ChatMeta, save_chat
-        from spar.gui.orchestrator import OPENING_PROMPT
+        from spar.gui.orchestrator import OPENING_PROMPT, opening_prompt_hash
         chat_path = tmp_path / ".spar" / "chat.json"
-        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4))
+        save_chat(chat_path, ChatMeta("sess-stale", "opus", 4, opening_prompt_hash()))
 
         def boom(*a, **k):
             raise OSError("busy")
@@ -379,8 +421,9 @@ class TestOrchestratorChatPanel:
         # on_status (Task 5): the gate context is really injected, promoted by
         # a resumable turn, then a null-id turn re-arms so it re-injects.
         from spar.gui.chat_store import ChatMeta, save_chat
-        from spar.gui.orchestrator import OPENING_PROMPT
-        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-stale", "opus", 4))
+        from spar.gui.orchestrator import OPENING_PROMPT, opening_prompt_hash
+        save_chat(tmp_path / ".spar" / "chat.json",
+                  ChatMeta("sess-stale", "opus", 4, opening_prompt_hash()))
         fake = FakeSession()
         fake.session_id = "sess-stale"
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
@@ -415,8 +458,9 @@ class TestOrchestratorChatPanel:
         from pathlib import Path
 
         from spar.gui.chat_store import ChatMeta, save_chat
-        from spar.gui.orchestrator import OPENING_PROMPT
-        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-x", "opus", 2))
+        from spar.gui.orchestrator import OPENING_PROMPT, opening_prompt_hash
+        save_chat(tmp_path / ".spar" / "chat.json",
+                  ChatMeta("sess-x", "opus", 2, opening_prompt_hash()))
 
         def boom(*a, **k):
             raise OSError("busy")
@@ -568,7 +612,9 @@ class TestClearChat:
         # clearing must drop it or the lazily rebuilt session would resume the
         # very session the user just cleared.
         from spar.gui.chat_store import ChatMeta, save_chat
-        save_chat(tmp_path / ".spar" / "chat.json", ChatMeta("sess-old", "opus", 4))
+        from spar.gui.orchestrator import opening_prompt_hash
+        save_chat(tmp_path / ".spar" / "chat.json",
+                  ChatMeta("sess-old", "opus", 4, opening_prompt_hash()))
         fake = FakeSession()
         fake.session_id = "sess-old"
         panel = OrchestratorChatPanel(tmp_path, object(), 60, session=fake)
