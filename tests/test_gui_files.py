@@ -4,6 +4,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
+
 from spar.gui.files import FileEditor
 
 
@@ -202,3 +204,207 @@ class TestFileEditor:
         ed.reload_from_disk()
         assert ed.toPlainText() == "disk\n"
         assert ed.is_dirty() is False
+
+
+class TestFilesView:
+    def _view(self, qtbot, tmp_path):
+        from spar.gui.files import FilesView
+
+        (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "HEAD").write_text("ref\n")
+        (tmp_path / ".spar").mkdir()
+        (tmp_path / ".spar" / "config.toml").write_text("# c\n")
+        view = FilesView(tmp_path)
+        qtbot.addWidget(view)
+        return view
+
+    def test_tree_hides_dot_git(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        root = view.tree.rootIndex()
+        model = view.tree.model()
+        # QFileSystemModel populates ASYNCHRONOUSLY (review #10): reading
+        # rowCount() immediately is flaky. Wait until the root directory has
+        # actually been listed (app.py + .spar → at least 2 visible rows).
+        qtbot.waitUntil(lambda: model.rowCount(root) >= 2, timeout=3000)
+        names = {
+            model.index(r, 0, root).data()
+            for r in range(model.rowCount(root))
+        }
+        assert ".git" not in names
+        assert ".spar" in names  # shown (collapsed by default)
+        assert "app.py" in names
+
+    def test_open_file_adds_tab(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        assert view.tabs.count() == 1
+        assert view.tabs.tabText(0) == "app.py"
+
+    def test_reopen_focuses_existing_tab(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        (tmp_path / "b.py").write_text("y\n", encoding="utf-8")
+        view.open_file(tmp_path / "app.py")
+        view.open_file(tmp_path / "b.py")
+        view.open_file(tmp_path / "app.py")  # already open
+        assert view.tabs.count() == 2
+        assert view.tabs.currentWidget().path.name == "app.py"
+
+    def test_dirty_marker_in_tab_text(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        tab = view.tabs.currentWidget()
+        # review #9: setPlainText resets the modified flag (and would fire
+        # modificationChanged(False)); force the dirty state explicitly so
+        # the label-refresh actually sees a modified document.
+        tab.editor.setPlainText("x = 2\n")
+        tab.editor.document().setModified(True)
+        assert view.tabs.tabText(0).startswith("• ")
+
+    def test_read_only_matrix_locks_editor_banner_and_tab(self, qtbot, tmp_path):
+        from spar.gui.runner import RunnerState
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        view.set_state(RunnerState.RUNNING)
+        assert view.tabs.currentWidget().editor.isReadOnly() is True
+        assert view.read_only_banner.isHidden() is False
+        assert "🔒" in view.tabs.tabText(0)
+        view.set_state(RunnerState.IDLE)
+        assert view.tabs.currentWidget().editor.isReadOnly() is False
+        assert view.read_only_banner.isHidden() is True
+        assert "🔒" not in view.tabs.tabText(0)
+
+    def test_close_clean_tab_removes_it(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        view._close_tab(0)
+        assert view.tabs.count() == 0
+
+    def test_close_dirty_tab_prompts_and_cancel_keeps_it(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("dirty\n")
+        ed.document().setModified(True)  # review #9
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel),
+        )
+        view._close_tab(0)
+        assert view.tabs.count() == 1  # cancelled
+
+    def test_confirm_discard_saves_all_on_save(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("saved via prompt\n")
+        ed.document().setModified(True)  # review #9
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Save),
+        )
+        assert view.confirm_discard_if_dirty() is True
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "saved via prompt\n"
+        assert view.has_unsaved() is False
+
+    def test_confirm_discard_on_discard_reverts_buffers(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("unwanted edit\n")
+        ed.document().setModified(True)  # review #9
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Discard),
+        )
+        assert view.confirm_discard_if_dirty() is True
+        # review #5: Discard must actually revert — buffer reloaded from
+        # disk, nothing written, no longer dirty, and a second call does not
+        # re-prompt (nothing is dirty to prompt about).
+        assert view.has_unsaved() is False
+        assert ed.toPlainText() == "x = 1\n"
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert view.confirm_discard_if_dirty() is True
+
+    def test_ctrl_s_saves_current_tab(self, qtbot, tmp_path):
+        from PySide6.QtGui import QKeySequence
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("via ctrl s\n")
+        ed.document().setModified(True)  # review #9
+        # review #2: the shortcut is bound to the platform Save sequence.
+        assert view._save_shortcut.key() == QKeySequence(
+            QKeySequence.StandardKey.Save
+        )
+        # review #13: deliver the REAL key chord through Qt so the
+        # QShortcut connection itself is exercised, not _save_current().
+        view.show()
+        ed.setFocus()
+        qtbot.keyClick(ed, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+        qtbot.waitUntil(
+            lambda: (tmp_path / "app.py").read_text(encoding="utf-8")
+            == "via ctrl s\n"
+        )
+        assert view.has_unsaved() is False
+
+    def test_ctrl_s_noops_while_read_only(self, qtbot, tmp_path):
+        from spar.gui.runner import RunnerState
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("blocked\n")
+        ed.document().setModified(True)  # review #9
+        view.set_state(RunnerState.RUNNING)
+        # review #4: Ctrl+S is a no-op while read-only — nothing written,
+        # buffer stays dirty, the read-only banner is up.
+        assert view._save_current() is False
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert view.has_unsaved() is True
+        assert view.read_only_banner.isHidden() is False
+
+    def test_read_only_close_prompt_omits_save(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+        from spar.gui.runner import RunnerState
+
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("dirty\n")
+        ed.document().setModified(True)  # review #9
+        view.set_state(RunnerState.RUNNING)
+        seen = {}
+
+        def _q(parent, title, text, buttons, default):
+            seen["buttons"] = buttons
+            return QMessageBox.StandardButton.Cancel
+
+        monkeypatch.setattr(QMessageBox, "question", staticmethod(_q))
+        view._close_tab(0)
+        # review #4: read-only close prompt offers Discard/Cancel only.
+        assert not (seen["buttons"] & QMessageBox.StandardButton.Save)
+        assert seen["buttons"] & QMessageBox.StandardButton.Discard
+
+    def test_disk_conflict_shows_per_tab_banner_with_reload(self, qtbot, tmp_path):
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        tab = view.tabs.currentWidget()
+        tab.editor.setPlainText("local\n")
+        tab.editor.document().setModified(True)  # review #9
+        with qtbot.waitSignal(tab.editor.disk_conflict, timeout=3000):
+            # write INSIDE the block so the real watcher signal can't fire
+            # before we start waiting for it.
+            (tmp_path / "app.py").write_text("engine\n", encoding="utf-8")
+        assert tab.disk_banner.isHidden() is False
+        tab._on_reload_clicked()  # the "Przeładuj" button
+        assert tab.editor.toPlainText() == "engine\n"
+        assert tab.disk_banner.isHidden() is True

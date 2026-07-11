@@ -384,3 +384,367 @@ if _HAS_QT:
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
             self.setExtraSelections([selection])
+
+    from PySide6.QtCore import (
+        QCoreApplication,
+        QDeadlineTimer,
+        QDir,
+        QEvent,
+        QEventLoop,
+        QSettings,
+        QSortFilterProxyModel,
+    )
+    from PySide6.QtGui import QKeySequence, QShortcut
+    from PySide6.QtWidgets import (
+        QFileSystemModel,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QSplitter,
+        QTabWidget,
+        QTreeView,
+        QVBoxLayout,
+    )
+
+    from spar.gui.runner import RunnerState
+
+    # States in which the tree is being mutated by the engine → read-only
+    # editor (ADR 0006 item 4). Everything else (IDLE/DONE/RESUMABLE/ERROR/
+    # ABORTED) is editable.
+    _READ_ONLY_STATES = frozenset(
+        {RunnerState.RUNNING, RunnerState.GATE_PENDING, RunnerState.LOCKED}
+    )
+
+    class _TreeFilterProxy(QSortFilterProxyModel):
+        """Hides ``.git`` entirely (ADR 0006 item 2). Everything else,
+        including hidden dotfiles and ``.spar`` (collapsed), passes."""
+
+        def filterAcceptsRow(self, row, parent):  # noqa: N802 (Qt override)
+            src = self.sourceModel()
+            idx = src.index(row, 0, parent)
+            return src.fileName(idx) != ".git"
+
+    class EditorTab(QWidget):
+        """One tab page: a per-tab "changed on disk" banner over a
+        FileEditor. Keeps FileEditor a pure QPlainTextEdit subclass."""
+
+        def __init__(self, path, parent=None):
+            super().__init__(parent)
+            self.path = Path(path)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+
+            self.disk_banner = QWidget(self)
+            self.disk_banner.setObjectName("diskBanner")
+            banner_row = QHBoxLayout(self.disk_banner)
+            banner_row.setContentsMargins(6, 2, 6, 2)
+            label = QLabel("plik zmienił się na dysku", self.disk_banner)
+            self.reload_button = QPushButton("Przeładuj", self.disk_banner)
+            self.reload_button.clicked.connect(self._on_reload_clicked)
+            banner_row.addWidget(label, stretch=1)
+            banner_row.addWidget(self.reload_button)
+            self.disk_banner.setVisible(False)
+            layout.addWidget(self.disk_banner)
+
+            self.editor = FileEditor(self.path, self)
+            self.editor.load_from_disk()
+            self.editor.disk_conflict.connect(self._show_disk_banner)
+            self.editor.disk_reloaded.connect(self._hide_disk_banner)
+            layout.addWidget(self.editor, stretch=1)
+
+        def is_dirty(self) -> bool:
+            return self.editor.is_dirty()
+
+        def save(self) -> bool:
+            ok = self.editor.save()
+            if ok:
+                self._hide_disk_banner()
+            return ok
+
+        def set_read_only(self, ro: bool) -> None:
+            self.editor.set_read_only(ro)
+
+        def _show_disk_banner(self) -> None:
+            self.disk_banner.setVisible(True)
+
+        def _hide_disk_banner(self) -> None:
+            self.disk_banner.setVisible(False)
+
+        def _on_reload_clicked(self) -> None:
+            self.editor.reload_from_disk()
+            self._hide_disk_banner()
+
+    class FilesView(QWidget):
+        """Pliki module: project tree | tabbed Pygments editor (ADR 0006)."""
+
+        def __init__(self, project_dir, parent=None):
+            super().__init__(parent)
+            self.setObjectName("filesView")
+            self.project_dir = Path(project_dir)
+            self._read_only = False
+            self._settings = QSettings("spar", "gui")
+            self._tabs_by_path: dict[str, EditorTab] = {}
+
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            self.splitter = QSplitter(self)
+            self.splitter.setObjectName("filesSplitter")
+
+            # -- tree --
+            self.model = QFileSystemModel(self)
+            self.model.setFilter(
+                QDir.Filter.AllEntries | QDir.Filter.Hidden
+                | QDir.Filter.NoDotAndDotDot
+            )
+            # QFileSystemModel populates ASYNCHRONOUSLY (review #10): its
+            # directory listing arrives on a later event loop turn. A plain
+            # QSortFilterProxyModel index mapped BEFORE the project dir is
+            # listed is unstable — as the source fills in, the proxy rebuilds
+            # its mappings and the plain index silently reseats onto a
+            # different node (observed: the root slid up to the parent dir)
+            # or dangles (use-after-free → segfault while a caller polls
+            # ``rowCount(root)``). Block briefly until the project directory
+            # has been listed, THEN map the root, so ``tree.rootIndex()`` is
+            # correct and stable the moment construction returns.
+            self._dir_loaded = False
+            self.model.directoryLoaded.connect(self._on_dir_loaded)
+            self.model.setRootPath(str(self.project_dir))
+            self.proxy = _TreeFilterProxy(self)
+            self.proxy.setSourceModel(self.model)
+            self._wait_dir_loaded()
+            self.tree = QTreeView(self.splitter)
+            self.tree.setObjectName("filesTree")
+            self.tree.setModel(self.proxy)
+            self.tree.setRootIndex(
+                self.proxy.mapFromSource(self.model.index(str(self.project_dir)))
+            )
+            for col in (1, 2, 3):  # size / type / date-modified
+                self.tree.hideColumn(col)
+            self.tree.setHeaderHidden(True)
+            self.tree.doubleClicked.connect(self._on_tree_double_clicked)
+
+            # -- editor side (banner over tabs) --
+            right = QWidget(self.splitter)
+            right_layout = QVBoxLayout(right)
+            right_layout.setContentsMargins(0, 0, 0, 0)
+            right_layout.setSpacing(0)
+            self.read_only_banner = QLabel("run w toku — tylko podgląd", right)
+            self.read_only_banner.setObjectName("filesReadOnlyBanner")
+            self.read_only_banner.setVisible(False)
+            right_layout.addWidget(self.read_only_banner)
+            self.tabs = QTabWidget(right)
+            self.tabs.setObjectName("filesTabs")
+            self.tabs.setTabsClosable(True)
+            self.tabs.tabCloseRequested.connect(self._close_tab)
+            right_layout.addWidget(self.tabs, stretch=1)
+
+            self.splitter.addWidget(self.tree)
+            self.splitter.addWidget(right)
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 3)
+            outer.addWidget(self.splitter)
+
+            self._restore_split_state()
+            self.splitter.splitterMoved.connect(self._save_split_state)
+
+            # Ctrl+S saves the current tab (review #2). Scoped to this
+            # widget so it only fires while Pliki has focus. It NO-OPS while
+            # the read-only matrix is engaged (review #4) — the read-only
+            # banner is the user feedback.
+            self._save_shortcut = QShortcut(
+                QKeySequence(QKeySequence.StandardKey.Save), self
+            )
+            # WidgetWithChildren so the chord fires whenever the tree or any
+            # editor tab (a descendant) holds focus, without depending on
+            # top-level window activation (review #13).
+            self._save_shortcut.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+            self._save_shortcut.activated.connect(self._save_current)
+
+        # The QShortcut above is the real-display path (it consumes the chord
+        # before it reaches any widget). Headless/offscreen — and any host
+        # where the top-level window is never activated — never gives the
+        # focus widget the shortcut map needs, so the chord is delivered to
+        # the editor as a plain key event instead. This filter catches that
+        # case and routes the SAME chord to _save_current (review #13). On a
+        # real display the shortcut has already eaten the event, so this
+        # never double-fires.
+        def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
+            if (
+                event.type() == QEvent.Type.KeyPress
+                and event.matches(QKeySequence.StandardKey.Save)
+            ):
+                self._save_current()
+                return True
+            return super().eventFilter(obj, event)
+
+        # -- async tree population ----------------------------------------
+        def _on_dir_loaded(self, path) -> None:
+            if Path(path) == self.project_dir:
+                self._dir_loaded = True
+
+        def _wait_dir_loaded(self, timeout_ms: int = 2000) -> None:
+            """Pump the event loop until the project directory has been
+            listed (or a bounded deadline elapses so a slow/vanished path
+            can't hang construction). Needed so the mapped tree root is
+            stable before it is handed out (see the tree comment above)."""
+            if self._dir_loaded:
+                return
+            deadline = QDeadlineTimer(timeout_ms)
+            app = QCoreApplication.instance()
+            while not self._dir_loaded and not deadline.hasExpired():
+                if app is not None:
+                    app.processEvents(
+                        QEventLoop.ProcessEventsFlag.AllEvents, 10
+                    )
+                else:  # pragma: no cover - a QApplication always exists here
+                    break
+
+        # -- opening -------------------------------------------------------
+        def _on_tree_double_clicked(self, proxy_index) -> None:
+            src = self.proxy.mapToSource(proxy_index)
+            if self.model.isDir(src):
+                return
+            self.open_file(self.model.filePath(src))
+
+        def open_file(self, path) -> None:
+            key = str(Path(path))
+            existing = self._tabs_by_path.get(key)
+            if existing is not None:
+                self.tabs.setCurrentWidget(existing)
+                return
+            tab = EditorTab(path, self.tabs)
+            tab.set_read_only(self._read_only)
+            tab.editor.installEventFilter(self)  # Ctrl+S bridge (review #13)
+            index = self.tabs.addTab(tab, self._tab_label(tab))
+            self._tabs_by_path[key] = tab
+            tab.editor.document().modificationChanged.connect(
+                lambda _mod, t=tab: self._refresh_tab_label(t)
+            )
+            self.tabs.setCurrentIndex(index)
+
+        # -- saving --------------------------------------------------------
+        def _save_current(self) -> bool:
+            """Ctrl+S handler: save the active tab. NO-OP while read-only
+            (review #4) — the engine owns the tree during a run; the
+            read_only_banner is already the visible cue, so we just refuse
+            and leave the buffer dirty."""
+            if self._read_only:
+                self.read_only_banner.setVisible(True)  # ensure the cue is up
+                return False
+            tab = self.tabs.currentWidget()
+            if tab is None:
+                return False
+            return tab.save()
+
+        def _dirty_prompt_buttons(self):
+            """Buttons for an unsaved-changes prompt. While read-only
+            (review #4) Save is NOT offered — a write is refused in that
+            state, so only Discard/Cancel make sense."""
+            if self._read_only:
+                return (
+                    QMessageBox.StandardButton.Discard
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+            return (
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+
+        # -- tab labels ----------------------------------------------------
+        def _tab_label(self, tab: EditorTab) -> str:
+            marker = "• " if tab.is_dirty() else ""
+            lock = " 🔒" if self._read_only else ""
+            return f"{marker}{tab.path.name}{lock}"
+
+        def _refresh_tab_label(self, tab: EditorTab) -> None:
+            idx = self.tabs.indexOf(tab)
+            if idx != -1:
+                self.tabs.setTabText(idx, self._tab_label(tab))
+
+        def _refresh_all_labels(self) -> None:
+            for i in range(self.tabs.count()):
+                self.tabs.setTabText(i, self._tab_label(self.tabs.widget(i)))
+
+        # -- closing -------------------------------------------------------
+        def _close_tab(self, index: int) -> None:
+            tab = self.tabs.widget(index)
+            if tab is None:
+                return
+            if tab.is_dirty():
+                buttons, default = self._dirty_prompt_buttons()  # review #4
+                reply = QMessageBox.question(
+                    self, "Niezapisane zmiany",
+                    f"Plik {tab.path.name} ma niezapisane zmiany. Zapisać?",
+                    buttons, default,
+                )
+                if reply == QMessageBox.StandardButton.Cancel:
+                    return
+                if reply == QMessageBox.StandardButton.Save and not tab.save():
+                    return  # save failed → keep the tab open
+                # Discard falls through: the tab (and its buffer) is dropped.
+            self.tabs.removeTab(index)
+            self._tabs_by_path.pop(str(tab.path), None)
+            tab.deleteLater()
+
+        # -- read-only matrix ---------------------------------------------
+        def set_state(self, state) -> None:
+            self._read_only = state in _READ_ONLY_STATES
+            self.read_only_banner.setVisible(self._read_only)
+            for tab in self._tabs_by_path.values():
+                tab.set_read_only(self._read_only)
+            self._refresh_all_labels()
+
+        # -- unsaved guards -----------------------------------------------
+        def has_unsaved(self) -> bool:
+            return any(t.is_dirty() for t in self._tabs_by_path.values())
+
+        def confirm_discard_if_dirty(self) -> bool:
+            if not self.has_unsaved():
+                return True
+            buttons, default = self._dirty_prompt_buttons()  # review #4
+            reply = QMessageBox.question(
+                self, "Niezapisane zmiany",
+                "W edytorze są niezapisane zmiany. Zapisać przed przełączeniem?",
+                buttons, default,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return False
+            if reply == QMessageBox.StandardButton.Save:
+                for tab in self._tabs_by_path.values():
+                    if tab.is_dirty() and not tab.save():
+                        return False
+                return True
+            # Discard (review #5): returning True is NOT enough — the dirty
+            # buffers survive in memory, so the edits reappear and the prompt
+            # fires again on the next switch. Actually revert each dirty tab:
+            # reload it from disk, or drop the tab if its file vanished.
+            for tab in list(self._tabs_by_path.values()):
+                if not tab.is_dirty():
+                    continue
+                if tab.path.exists():
+                    tab.editor.reload_from_disk()  # clears the modified flag
+                else:
+                    self._drop_tab(tab)
+            return True
+
+        def _drop_tab(self, tab) -> None:
+            idx = self.tabs.indexOf(tab)
+            if idx != -1:
+                self.tabs.removeTab(idx)
+            self._tabs_by_path.pop(str(tab.path), None)
+            tab.deleteLater()
+
+        # -- splitter persistence -----------------------------------------
+        def _restore_split_state(self) -> None:
+            state = self._settings.value("files/tree_split")
+            if state is not None:
+                self.splitter.restoreState(state)
+
+        def _save_split_state(self, *_args) -> None:
+            self._settings.setValue("files/tree_split", self.splitter.saveState())
