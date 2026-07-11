@@ -263,3 +263,17 @@ is constructed with `readonly=True` (allowedTools = Read only), the opening
 prompt states the read-only contract, and chat exposes NO gate actions —
 GatePanel remains the only decision pilot. Deferred (ADR 0005 consequences):
 left-rail Pliki/editor and git tranches. Suite: 823 passed, 2 skipped.
+
+## Orchestrator chat — live smoke PASSED (2026-07-11, `2316211..6fe69ae`)
+Post-merge smoke found and fixed: (1) no height adjustment between Taski and
+chat → vertical QSplitter with a visible 6px handle, sizes in QSettings
+`rails/right_split`; (2) opening prompt produced grill-style A/B/C menus and
+proactive repo analysis on a bare greeting → prompt rewritten (natural
+conversation, options only for genuine choices, no unprompted tools/analysis);
+(3) old persisted sessions kept the old prompt forever → "Wyczyść" button
+(fresh session on demand) + prompt-hash invalidation in chat.json (any
+OPENING_PROMPT change auto-invalidates persisted sessions). Suite 847 passed.
+Final smoke: greeting → one line; "czym się zajmujesz?" → concise answer, no
+tools; config question → read-only Bash/Read then accurate answer incl. the
+empty test_command catch. User verdict: "świetnie wygląda ok".
+Remaining: README screenshot TODO (docs/img/gui-chat.png) after user captures.
