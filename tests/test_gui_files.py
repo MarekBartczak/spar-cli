@@ -408,3 +408,18 @@ class TestFilesView:
         tab._on_reload_clicked()  # the "Przeładuj" button
         assert tab.editor.toPlainText() == "engine\n"
         assert tab.disk_banner.isHidden() is True
+
+    def test_save_shortcut_activated_is_wired_to_save_current(self, qtbot, tmp_path):
+        # Offscreen CI never routes the real chord through the QShortcut (the
+        # eventFilter bridge handles it there), so the
+        # activated -> _save_current connection itself would otherwise be
+        # untested — deleting it would stay green here while breaking Ctrl+S
+        # on a real display. Emit the signal directly to pin the wiring.
+        view = self._view(qtbot, tmp_path)
+        view.open_file(tmp_path / "app.py")
+        ed = view.tabs.currentWidget().editor
+        ed.setPlainText("via activated\n")
+        ed.document().setModified(True)  # review #9
+        view._save_shortcut.activated.emit()
+        assert (tmp_path / "app.py").read_text(encoding="utf-8") == "via activated\n"
+        assert view.has_unsaved() is False
