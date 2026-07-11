@@ -371,12 +371,19 @@ if _HAS_QT:
             self._streaming_segments = []
             # Review #30: promote the pending flags ONLY when the turn is
             # resumable (truthy session id). A None-id success is non-resumable
-            # — the next dispatch must re-carry the opening contract.
+            # — the worker cleared its session id and will start a FRESH claude
+            # session on the next run_turn, so the panel must also RESET the
+            # already-committed flags (mirroring _on_session_lost): the next
+            # dispatch re-carries the opening contract with reset=True, and no
+            # stale delivered-gate key survives (reviewer fix, Task 3).
             if getattr(self._session, "session_id", None):
                 if self._pending_opening:
                     self._opening_sent = True
                 if self._pending_gate_key is not None:
                     self._injected_gate_key = self._pending_gate_key
+            else:
+                self._opening_sent = False
+                self._injected_gate_key = None
             self._pending_opening = False
             self._pending_gate_key = None
             self._turn_count += 1

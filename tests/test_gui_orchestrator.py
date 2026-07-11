@@ -214,6 +214,35 @@ class TestOrchestratorChatPanel:
         assert OPENING_PROMPT.split("\n")[0] in retry_text
         assert retry_reset is True
 
+    def test_mid_conversation_null_id_rearms_opening_contract(self, qtbot, tmp_path):
+        # Reviewer finding (Task 3): a null-id SUCCESS mid-conversation clears
+        # the worker's session id (conversation.py run_turn), so the next
+        # run_turn starts a FRESH claude session. The panel must mirror that:
+        # RESET the already-committed flags (like _on_session_lost), not just
+        # skip promotion — otherwise the next dispatch sends bare user text
+        # with reset=False and the fresh session never gets the read-only
+        # advisor contract.
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.input_edit.setPlainText("pierwsze")
+        panel.send_button.click()
+        fake.session_id = "sess-1"  # resumable: opening promoted
+        fake.turn_finished.emit("ok", [])
+        assert panel._opening_sent is True
+        panel._injected_gate_key = "gate-abc"  # simulate a delivered gate context
+        panel.input_edit.setPlainText("drugie")
+        panel.send_button.click()
+        fake.session_id = None  # non-resumable success: worker id cleared
+        fake.turn_finished.emit("ok", [])
+        assert panel._opening_sent is False           # re-armed
+        assert panel._injected_gate_key is None       # delivered-gate key reset
+        panel.input_edit.setPlainText("trzecie")
+        panel.send_button.click()
+        text, reset = fake.sends[-1]
+        assert OPENING_PROMPT.split("\n")[0] in text  # contract re-carried
+        assert "trzecie" in text
+        assert reset is True                          # matches the worker's fresh start
+
     def test_stop_session_stops_held_session_idempotently(self, qtbot, tmp_path):
         # Review #2 + #11: stop_session() stops whatever session the panel holds
         # (owned OR injected), and is safe to call twice.
