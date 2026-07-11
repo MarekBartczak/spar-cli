@@ -147,6 +147,31 @@ Prerequisite: the user's `claude` CLI with a grill-with-docs skill
 installed (`~/.claude/skills`); the grill runs on the claude side's
 `debate_model`.
 
+The main window has vertical **icon rails** on both edges (JetBrains-style
+tool windows). The right rail toggles the **Taski** panel (task board +
+gate) and the **Czat** panel, and has a **Bramka** icon that lights up with
+an attention dot while a gate is pending and force-opens the Taski panel —
+collapsing the panel never discards the pending decision. The left rail
+holds a disabled **Pliki** placeholder for a future tranche. Collapse state
+persists across restarts (QSettings); with everything collapsed the live
+stream takes the full window width.
+
+Docked under the task board is the **orchestrator chat** — a persistent,
+**read-only advisor** (chat bubbles, lettered options as buttons, free-text
+always available). It reads the repo and `.spar/` state but never edits
+files, never holds the run lock, and **never makes gate decisions** — the
+gate panel stays the only pilot. The conversation persists across GUI
+restarts via `.spar/chat.json`. During a live run the chat shows a
+"run w toku — tylko odczyt" banner and stays available for questions;
+while a gate pends, the chat silently receives the gate context, so you
+can ask e.g. "co byś wybrał i dlaczego?". When a reply contains a task
+draft in a ` ```zadanie ` fenced block, a green **"Nowa debata z tym
+szkicem"** button appears (enabled when the engine is free) and opens the
+new-debate form pre-filled with the draft. Flow:
+`pytanie → czat (advisor) → szkic w bloku ```zadanie``` → „Nowa debata z tym szkicem" → prefilled formularz`.
+
+<!-- TODO: screenshot gui-chat.png po manualnym smoke -->
+
 ## Agent mode (headless)
 
 spar is designed to be **driven by a host agent** (Claude Code / Codex) — see

@@ -8,6 +8,10 @@ Accepted. Amends [0004](0004-gui-dashboard-pilot-with-grill-module.md)
 (dashboard-pilot boundary stays in force; this ADR generalises its grill
 module and settles the main-window layout).
 
+Implementation: implemented 2026-07-11 (`c3a7710..9428be8`) in
+`spar/gui/{conversation,orchestrator,rails,chat_store}.py`; left-rail
+Pliki/Git remain future tranches.
+
 ## Context
 
 The GrillPane shipped as a modal chat driving a host-agent CLI session

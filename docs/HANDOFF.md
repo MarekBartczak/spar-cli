@@ -238,3 +238,28 @@ failing test and re-pended forever — pend reason now persisted in the
 pending-gate context, resume-accept merges on override, extend:N re-enters
 the test loop (`f77410d`); preflight false-positived on POSIX builtins like
 `. venv/bin/activate && …` — allowlist widened (`5f51a72`). Suite 750 passed.
+
+## Orchestrator chat + tool-window rails (2026-07-11, `c3a7710..9428be8`)
+ADR 0005 implemented across six commits. (1) `GrillSession` refactored into a
+shared `ConversationSession` (adapter-backed multi-turn chat: resume, option
+parsing, generation-token signal suppression, session-lost recovery,
+abandoned-thread retention); grill is a thin subclass and its suite stayed
+green untouched (`c3a7710`). (2) Icon rails on both window edges with the
+collapse state machine: right rail Taski/Czat plus a Bramka icon with a
+painted attention dot that force-opens Taski while a gate pends (never
+resolving/hiding it); left rail is a disabled Pliki placeholder; collapse
+state in QSettings, all-collapsed → full-width stream (`a4da5de`). (3) The
+docked orchestrator chat — a read-only advisor with bubbles, dim `tool:`
+lines, lettered-option buttons, free-text, and a "run w toku — tylko odczyt"
+banner for RUNNING/LOCKED (`4f1c0be`, null-session-id hardening `706f021`).
+(4) Session persistence in `.spar/chat.json` with resume on restart,
+corrupt/missing → fresh, loss → banner + fresh next send (`ff277cc`).
+(5) Silent pending-gate context injection (full payload fingerprint, once
+per gate, re-injects on changed output) so the advisor can answer "co byś
+wybrał" (`a5b5637`). (6) ` ```zadanie ` task-draft handoff: green "Nowa
+debata z tym szkicem" button, engine-free gating via the toolbar signal,
+prefilled NewDebateDialog (`9428be8`). Read-only boundary: the chat adapter
+is constructed with `readonly=True` (allowedTools = Read only), the opening
+prompt states the read-only contract, and chat exposes NO gate actions —
+GatePanel remains the only decision pilot. Deferred (ADR 0005 consequences):
+left-rail Pliki/editor and git tranches. Suite: 823 passed, 2 skipped.
