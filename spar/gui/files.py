@@ -8,9 +8,10 @@ FileFinderOverlay, ...) is only defined when PySide6 is importable.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
-import shutil  # noqa: F401  (used by later tranche-B tasks; kept per plan)
+import shutil
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,11 @@ __all__ = [
     "search_file",
     "search_paths",
     "replace_in_text",
+    "_RipgrepParseError",
+    "ripgrep_available",
+    "is_rg_compatible",
+    "build_ripgrep_argv",
+    "parse_ripgrep_stream",
 ]
 
 # Directories never walked for the finder index (ADR 0006). ``.git`` is also
@@ -252,6 +258,121 @@ def replace_in_text(text: str, pattern, replacement: str, *, regex: bool):
         pieces.append(line[pos:])
         new_lines.append("".join(pieces))
     return "\n".join(new_lines), count
+
+
+_RIPGREP_BATCH = 2000  # files per rg invocation (secondary bound)
+_RIPGREP_ARGV_BUDGET = 128 * 1024  # review #34: primary argv BYTE bound
+
+
+class _RipgrepParseError(Exception):
+    """rg reported a non-UTF-8 ("bytes") member — the accelerator cannot
+    reproduce the python reference shape, so the worker falls back to the
+    python scan (review #4)."""
+
+
+def ripgrep_available() -> bool:
+    """True when the ``rg`` binary is on PATH (opportunistic accelerator)."""
+    return shutil.which("rg") is not None
+
+
+def is_rg_compatible(spec: "SearchSpec") -> bool:
+    """True only for specs whose rg semantics provably match the python
+    reference: LITERAL, case-SENSITIVE, non-whole-word (review #19).
+    rg's ``-i`` unicode case-folding and ``-w`` word boundaries diverge
+    from python ``re`` (as do the regex dialects), so every other spec
+    runs the python path. The ONE place this predicate is encoded."""
+    return (not spec.regex) and spec.case_sensitive and not spec.whole_word
+
+
+def build_ripgrep_argv(root, spec: "SearchSpec", files) -> "list[str]":
+    """Argv for ``rg --json`` over an EXPLICIT list of *files* (project-
+    relative paths from build_file_index), resolved against *root*. Only
+    ever called for an ``is_rg_compatible`` spec (review #19), so the
+    flag set is fixed: always ``-F``, never ``-i``/``-w``.
+
+    review #13: handing rg the exact file set the python reference scans —
+    rather than a directory root — guarantees the two engines never diverge
+    on filesystem semantics (symlinked files, .gitignore, hidden files,
+    skip-dirs). The index already applied every skip rule, so no
+    ``--no-ignore``/``--hidden``/``-g`` flags are needed. review #19: the
+    caller prefilters *files* with ``passes_search_guards`` (size + binary),
+    so rg never sees a file python would skip; ``--max-filesize`` stays as
+    defence-in-depth. review #41: ``--text`` because the guard only checks
+    the FIRST 8KB for NUL — a file whose first NUL falls after that window
+    is scanned in full by the python engine, while rg without ``--text``
+    stops at the NUL and loses any later match. The caller batches *files*
+    via ``_rg_batches`` to respect ARG_MAX."""
+    root = Path(root)
+    argv = ["rg", "--json", "--no-messages",
+            "--max-filesize", str(_SEARCH_MAX_BYTES), "-F", "--text"]
+    argv += ["-e", spec.query, "--"]
+    argv += [str(root / rel) for rel in files]
+    return argv
+
+
+def _rg_batches(root, files):
+    """Split *files* into rg argv batches (review #34): primary bound is
+    an estimated argv byte budget (capped at _RIPGREP_ARGV_BUDGET ≈
+    128 KB — far below Linux's ~2 MB ARG_MAX, leaving room for the fixed
+    flags and the environment), secondary bound _RIPGREP_BATCH files.
+    review #36: the budget counts what rg's argv ACTUALLY carries —
+    build_ripgrep_argv passes ``str(root / rel)``, so each entry is
+    estimated as ``len(os.fsencode(str(root / rel))) + 1`` (NUL); budgeting
+    the bare relatives omitted the absolute prefix (a deep *root* times
+    thousands of files could silently violate the bound). Best-effort: a
+    SINGLE pathological path over the budget still ships alone, and an
+    E2BIG at exec surfaces as OSError from Popen, which the caller
+    already turns into the python-reference fallback (review #4)."""
+    root = Path(root)
+    batch: list = []
+    size = 0
+    for rel in files:
+        n = len(os.fsencode(str(root / rel))) + 1
+        if batch and (
+            size + n > _RIPGREP_ARGV_BUDGET or len(batch) >= _RIPGREP_BATCH
+        ):
+            yield batch
+            batch, size = [], 0
+        batch.append(rel)
+        size += n
+    if batch:
+        yield batch
+
+
+def parse_ripgrep_stream(lines, root):
+    """Parse ``rg --json`` stdout *lines*, yielding SearchMatch with the
+    SAME shape as search_paths. rg reports byte offsets into each line;
+    remap them to CHARACTER offsets so spans match the python reference."""
+    root = Path(root)
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "match":
+            continue
+        data = event["data"]
+        # Non-UTF-8 content → rg emits a "bytes" member instead of "text".
+        # We cannot reproduce the python reference shape; signal fallback.
+        if "text" not in data.get("path", {}) or "text" not in data.get("lines", {}):
+            raise _RipgrepParseError("non-UTF-8 rg match (bytes member)")
+        abs_path = Path(data["path"]["text"])
+        try:
+            rel = abs_path.relative_to(root).as_posix()
+        except ValueError:
+            rel = abs_path.as_posix()
+        line_no = data["line_number"]
+        line_text = data["lines"]["text"]
+        if line_text.endswith("\n"):
+            line_text = line_text[:-1]
+        line_bytes = line_text.encode("utf-8", errors="replace")
+        for sm in data.get("submatches", []):
+            start = len(line_bytes[: sm["start"]].decode("utf-8", errors="replace"))
+            end = len(line_bytes[: sm["end"]].decode("utf-8", errors="replace"))
+            yield SearchMatch(rel, line_no, line_text, start, end)
 
 
 try:  # pragma: no cover - exercised via the two interpreters
