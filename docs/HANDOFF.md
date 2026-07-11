@@ -8,7 +8,7 @@ merged into the target master as `b5e3850`).
 
 ## Files module tranche A (2026-07-11, `6f4ea8a..da3f87e`)
 
-Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-tranche-a.md`):
+Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-module-tranche-a.md`):
 the Pliki left-rail view replaces the disabled placeholder. Centre `QStackedWidget`
 carries `Strumień` (live stream) and `Pliki` views, driven by two exclusive
 toggles in `rails/centre_view` QSettings key; run-start and resume auto-switch to
