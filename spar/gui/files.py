@@ -32,6 +32,7 @@ __all__ = [
     "SearchMatch",
     "compile_search_pattern",
     "search_text",
+    "_utf16_offset",
     "passes_search_guards",
     "search_file",
     "search_paths",
@@ -185,6 +186,13 @@ def search_text(
             if limit is not None and len(out) == limit:
                 return out
     return out
+
+
+def _utf16_offset(text: str, char_index: int) -> int:
+    """Map a Python code-point offset into *text* to a UTF-16 code-unit
+    offset (what QTextCursor.setPosition counts). Non-BMP chars occupy two
+    UTF-16 units, so the two indices diverge without this (review #8)."""
+    return len(text[:char_index].encode("utf-16-le")) // 2
 
 
 def passes_search_guards(root, rel: str) -> bool:
@@ -464,6 +472,7 @@ if _HAS_QT:
         QPainter,
         QSyntaxHighlighter,
         QTextCharFormat,
+        QTextCursor,
         QTextFormat,
     )
     from PySide6.QtWidgets import (
@@ -569,6 +578,12 @@ if _HAS_QT:
             mono = QFont("Monospace")
             mono.setStyleHint(QFont.StyleHint.TypeWriter)
             self.setFont(mono)
+
+            # Merged ExtraSelections state (review #10): current-line band
+            # kept separately from find-match highlights; both applied in one
+            # setExtraSelections call, current-line FIRST, matches AFTER.
+            self._current_line_selection: "list[QTextEdit.ExtraSelection]" = []
+            self._match_selections: "list[QTextEdit.ExtraSelection]" = []
 
             self._gutter = _LineNumberArea(self)
             self.blockCountChanged.connect(self._update_gutter_width)
@@ -708,13 +723,41 @@ if _HAS_QT:
                 number += 1
             painter.end()
 
+        def _apply_extra_selections(self) -> None:
+            # review #10: current-line FIRST, matches AFTER, so a match on
+            # the active line paints on top of the full-width current line.
+            self.setExtraSelections(
+                self._current_line_selection + self._match_selections
+            )
+
         def _highlight_current_line(self) -> None:
             selection = QTextEdit.ExtraSelection()
             selection.format.setBackground(QColor(TOKENS["panel-alt"]))
             selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
-            self.setExtraSelections([selection])
+            self._current_line_selection = [selection]
+            self._apply_extra_selections()
+
+        def set_match_selections(self, spans: "list[tuple[int, int]]") -> None:
+            """Highlight every (char_start, char_end) span with the warn
+            colour, merged with the current-line highlight. Char offsets are
+            mapped to UTF-16 positions so non-BMP text selects correctly
+            (review #8)."""
+            text = self.toPlainText()
+            sels = []
+            for start, end in spans:
+                sel = QTextEdit.ExtraSelection()
+                sel.format.setBackground(QColor(TOKENS["warn"]))
+                cur = self.textCursor()
+                cur.setPosition(_utf16_offset(text, start))
+                cur.setPosition(
+                    _utf16_offset(text, end), QTextCursor.MoveMode.KeepAnchor
+                )
+                sel.cursor = cur
+                sels.append(sel)
+            self._match_selections = sels
+            self._apply_extra_selections()
 
     from PySide6.QtCore import (
         QCoreApplication,
@@ -766,6 +809,197 @@ if _HAS_QT:
             idx = src.index(row, 0, parent)
             return src.fileName(idx) != ".git"
 
+    class EditorFindBar(QWidget):
+        """In-editor Ctrl+F find/replace bar (ADR 0006 tranche B)."""
+
+        def __init__(self, editor, parent=None):
+            super().__init__(parent)
+            self.setObjectName("editorFindBar")
+            self._editor = editor
+            row = QHBoxLayout(self)
+            row.setContentsMargins(6, 2, 6, 2)
+            self.find_field = QLineEdit(self)
+            self.find_field.setObjectName("findField")
+            self.find_field.setPlaceholderText("Znajdź")
+            self.find_field.textChanged.connect(self._on_find_text_changed)
+            self.find_field.returnPressed.connect(self.find_next)
+            row.addWidget(self.find_field, stretch=1)
+            self.case_toggle = QToolButton(self)
+            self.case_toggle.setObjectName("searchToggle")
+            self.case_toggle.setText("Aa")
+            self.case_toggle.setCheckable(True)
+            self.case_toggle.clicked.connect(self._rehighlight)
+            row.addWidget(self.case_toggle)
+            self.prev_button = QPushButton("◀", self)
+            self.prev_button.clicked.connect(self.find_prev)
+            self.next_button = QPushButton("▶", self)
+            self.next_button.clicked.connect(self.find_next)
+            row.addWidget(self.prev_button)
+            row.addWidget(self.next_button)
+            self.replace_field = QLineEdit(self)
+            self.replace_field.setObjectName("findReplaceField")
+            self.replace_field.setPlaceholderText("Zamień")
+            row.addWidget(self.replace_field, stretch=1)
+            self.replace_button = QPushButton("Zamień", self)
+            self.replace_button.clicked.connect(self.replace_one)
+            self.replace_all_button = QPushButton("Zamień wszystko", self)
+            self.replace_all_button.clicked.connect(self.replace_all)
+            row.addWidget(self.replace_button)
+            row.addWidget(self.replace_all_button)
+            # review #7: F3 / Shift+F3 jump next/previous. QShortcuts scoped
+            # to the bar+children fire even though focus is in a QLineEdit
+            # (which would otherwise swallow the key); the .activated signals
+            # are also the emit-pins the wiring tests exercise.
+            self._f3 = QShortcut(QKeySequence(Qt.Key.Key_F3), self)
+            self._f3.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            self._f3.activated.connect(self.find_next)
+            self._shift_f3 = QShortcut(QKeySequence("Shift+F3"), self)
+            self._shift_f3.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+            self._shift_f3.activated.connect(self.find_prev)
+            self.setVisible(False)
+
+        # -- open / close --
+        def apply_read_only(self, ro: bool) -> None:
+            # review #7: keep the replace controls in sync with the editor's
+            # read-only state even while the bar is already open.
+            self.replace_field.setEnabled(not ro)
+            self.replace_button.setEnabled(not ro)
+            self.replace_all_button.setEnabled(not ro)
+
+        def open(self, prefill: str = "") -> None:
+            if prefill:
+                self.find_field.setText(prefill)
+            self.apply_read_only(self._editor.isReadOnly())
+            self.setVisible(True)
+            if not self.isActiveWindow():
+                # Focus only lands in an ACTIVE window. Right after show()
+                # the activation event may still be queued (notably on the
+                # offscreen platform), so request activation and flush the
+                # pending events; otherwise setFocus below is deferred and
+                # F3 keystrokes would miss the bar.
+                self.window().activateWindow()
+                QCoreApplication.processEvents()
+            self.find_field.setFocus()
+            self.find_field.selectAll()
+            self._rehighlight()
+
+        def close_bar(self) -> None:
+            self.setVisible(False)
+            self._editor.set_match_selections([])
+            self._editor.setFocus()
+
+        def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.close_bar()
+                return
+            if key == Qt.Key.Key_F3:  # review #7 (also handled by QShortcut)
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self.find_prev()
+                else:
+                    self.find_next()
+                return
+            super().keyPressEvent(event)
+
+        # -- search (review #8: re-based, never str.lower — case folding can
+        #    change length, e.g. "İ".lower() → two code points) --
+        def _pattern(self):
+            needle = self.find_field.text()
+            if not needle:
+                return None
+            flags = 0 if self.case_toggle.isChecked() else re.IGNORECASE
+            return re.compile(re.escape(needle), flags)
+
+        def _on_find_text_changed(self, _t) -> None:
+            self._rehighlight()
+
+        def _rehighlight(self) -> None:
+            pat = self._pattern()
+            spans = []
+            if pat is not None:
+                text = self._editor.toPlainText()
+                spans = [(m.start(), m.end()) for m in pat.finditer(text)]
+            self._editor.set_match_selections(spans)
+
+        def find_next(self) -> bool:
+            return self._find(forward=True)
+
+        def find_prev(self) -> bool:
+            return self._find(forward=False)
+
+        def _find(self, forward: bool) -> bool:
+            pat = self._pattern()
+            if pat is None:
+                return False
+            text = self._editor.toPlainText()
+            spans = [(m.start(), m.end()) for m in pat.finditer(text)]
+            if not spans:
+                return False
+            cursor = self._editor.textCursor()
+            # QTextCursor positions are UTF-16 units; python match offsets
+            # are code points. Work in code points throughout and convert
+            # only when setting the cursor (review #8).
+            sel_start_u16 = cursor.selectionStart()
+            sel_end_u16 = cursor.selectionEnd()
+            # Convert the cursor's UTF-16 anchor/end to code-point offsets.
+            cur_start = len(
+                text.encode("utf-16-le")[: sel_start_u16 * 2].decode(
+                    "utf-16-le", errors="ignore"
+                )
+            )
+            cur_end = len(
+                text.encode("utf-16-le")[: sel_end_u16 * 2].decode(
+                    "utf-16-le", errors="ignore"
+                )
+            )
+            if forward:
+                nxt = next((s for s in spans if s[0] >= cur_end), None)
+                start, end = nxt if nxt is not None else spans[0]  # wrap
+            else:
+                prev = [s for s in spans if s[1] <= cur_start]
+                start, end = prev[-1] if prev else spans[-1]  # wrap
+            cur = self._editor.textCursor()
+            cur.setPosition(_utf16_offset(text, start))
+            cur.setPosition(
+                _utf16_offset(text, end), QTextCursor.MoveMode.KeepAnchor
+            )
+            self._editor.setTextCursor(cur)
+            self._editor.centerCursor()
+            self._rehighlight()
+            return True
+
+        # -- replace --
+        def replace_one(self) -> None:
+            if self._editor.isReadOnly():
+                return
+            pat = self._pattern()
+            cursor = self._editor.textCursor()
+            selected = cursor.selectedText()
+            if pat is not None and selected and pat.fullmatch(selected):
+                cursor.insertText(self.replace_field.text())
+            self.find_next()
+
+        def replace_all(self) -> int:
+            if self._editor.isReadOnly():
+                return 0
+            pat = self._pattern()
+            if pat is None:
+                return 0
+            original = self._editor.toPlainText()
+            new_text, n = pat.subn(
+                lambda _m: self.replace_field.text(), original
+            )
+            if n:
+                cur = self._editor.textCursor()
+                cur.beginEditBlock()
+                cur.select(QTextCursor.SelectionType.Document)
+                cur.insertText(new_text)
+                cur.endEditBlock()
+            self._rehighlight()
+            return n
+
     class EditorTab(QWidget):
         """One tab page: a per-tab "changed on disk" banner over a
         FileEditor. Keeps FileEditor a pure QPlainTextEdit subclass."""
@@ -793,7 +1027,12 @@ if _HAS_QT:
             self.editor.load_from_disk()
             self.editor.disk_conflict.connect(self._show_disk_banner)
             self.editor.disk_reloaded.connect(self._hide_disk_banner)
+            self.find_bar = EditorFindBar(self.editor, self)
+            layout.addWidget(self.find_bar)
             layout.addWidget(self.editor, stretch=1)
+
+        def open_find(self, prefill: str = "") -> None:
+            self.find_bar.open(prefill)
 
         def is_dirty(self) -> bool:
             return self.editor.is_dirty()
@@ -806,6 +1045,9 @@ if _HAS_QT:
 
         def set_read_only(self, ro: bool) -> None:
             self.editor.set_read_only(ro)
+            # review #7: keep an already-open find bar's replace controls in
+            # sync when the run locks/unlocks the editor.
+            self.find_bar.apply_read_only(ro)
 
         def _show_disk_banner(self) -> None:
             self.disk_banner.setVisible(True)

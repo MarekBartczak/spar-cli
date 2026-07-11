@@ -1413,3 +1413,153 @@ class TestReplaceInFiles:
         self._search(qtbot, panel)
         item = panel.results.topLevelItem(0)
         assert not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+
+
+class TestEditorFindBar:
+    def _tab(self, qtbot, tmp_path, text="alpha beta alpha gamma alpha\n"):
+        from spar.gui.files import EditorTab
+
+        f = tmp_path / "a.py"
+        f.write_text(text, encoding="utf-8")
+        tab = EditorTab(f)
+        qtbot.addWidget(tab)
+        return tab
+
+    def test_open_prefills_and_shows(self, qtbot, tmp_path):
+        tab = self._tab(qtbot, tmp_path)
+        tab.open_find(prefill="alpha")
+        assert tab.find_bar.isHidden() is False
+        assert tab.find_bar.find_field.text() == "alpha"
+
+    def test_find_next_wraps(self, qtbot, tmp_path):
+        tab = self._tab(qtbot, tmp_path)
+        bar = tab.find_bar
+        bar.open("alpha")
+        assert bar.find_next() is True
+        first = tab.editor.textCursor().selectedText()
+        assert first == "alpha"
+        bar.find_next()
+        bar.find_next()
+        # a 4th next wraps back to the first occurrence (only 3 exist)
+        assert bar.find_next() is True
+
+    def test_highlight_all_marks_every_match(self, qtbot, tmp_path):
+        from PySide6.QtGui import QColor, QTextFormat
+
+        from spar.gui.theme import TOKENS
+
+        tab = self._tab(qtbot, tmp_path)
+        bar = tab.find_bar
+        bar.open("alpha")
+        bar.find_next()  # triggers highlight-all
+        sels = tab.editor.extraSelections()
+        # review #10: current-line FIRST, 3 match selections AFTER.
+        assert len(sels) == 4
+        warn = QColor(TOKENS["warn"])
+        match_bgs = [s.format.background().color() for s in sels[1:]]
+        assert all(c == warn for c in match_bgs)  # assert formats, not count
+        # the current-line band is full-width; the matches are not
+        assert sels[0].format.property(
+            QTextFormat.Property.FullWidthSelection
+        )
+
+    def test_f3_and_shift_f3_wired(self, qtbot, tmp_path):
+        # review #7: F3 / Shift+F3 map to next/prev (emit-pin the shortcuts).
+        tab = self._tab(qtbot, tmp_path)
+        bar = tab.find_bar
+        bar.open("alpha")
+        bar._f3.activated.emit()
+        assert tab.editor.textCursor().selectedText() == "alpha"
+        first = tab.editor.textCursor().selectionStart()
+        bar._f3.activated.emit()
+        assert tab.editor.textCursor().selectionStart() > first  # moved on
+        bar._shift_f3.activated.emit()
+        assert tab.editor.textCursor().selectionStart() == first  # back
+
+    def test_real_f3_keypress_navigates_next_and_prev(self, qtbot, tmp_path):
+        # review #26 (both-halves rule): the emit-pin above proves the
+        # signal→slot wiring; this proves the REAL key half — a physical
+        # F3 / Shift+F3 pressed while a QLineEdit child holds focus must
+        # reach the bar (WidgetWithChildrenShortcut) instead of being
+        # swallowed by the line edit.
+        from PySide6.QtCore import Qt
+
+        tab = self._tab(qtbot, tmp_path)
+        tab.show()
+        qtbot.waitExposed(tab)
+        bar = tab.find_bar
+        bar.open("alpha")  # focuses find_field (a child QLineEdit)
+        assert bar.find_field.hasFocus()
+        qtbot.keyClick(bar.find_field, Qt.Key.Key_F3)
+        assert tab.editor.textCursor().selectedText() == "alpha"
+        first = tab.editor.textCursor().selectionStart()
+        qtbot.keyClick(bar.find_field, Qt.Key.Key_F3)
+        assert tab.editor.textCursor().selectionStart() > first  # next
+        qtbot.keyClick(
+            bar.find_field,
+            Qt.Key.Key_F3,
+            Qt.KeyboardModifier.ShiftModifier,
+        )
+        assert tab.editor.textCursor().selectionStart() == first  # prev
+
+    def test_case_insensitive_uses_regex_not_lower(self, qtbot, tmp_path):
+        # review #8: "İ".lower() is two code points; a lower()-based scan
+        # would desync offsets. A regex IGNORECASE search stays aligned.
+        tab = self._tab(qtbot, tmp_path, text="x İ y İ\n")
+        bar = tab.find_bar
+        bar.open("i̇")  # combining form should NOT match; İ literal should
+        bar.find_field.setText("İ")
+        assert bar.find_next() is True
+        assert tab.editor.textCursor().selectedText() == "İ"
+
+    def test_non_bmp_span_selects_correct_range(self, qtbot, tmp_path):
+        # review #8: a match after a non-BMP char (😀) must select the right
+        # UTF-16 range, not a code-point-shifted one.
+        tab = self._tab(qtbot, tmp_path, text="😀 alpha\n")
+        bar = tab.find_bar
+        bar.open("alpha")
+        assert bar.find_next() is True
+        assert tab.editor.textCursor().selectedText() == "alpha"
+
+    def test_replace_one(self, qtbot, tmp_path):
+        tab = self._tab(qtbot, tmp_path)
+        bar = tab.find_bar
+        bar.open("alpha")
+        bar.replace_field.setText("X")
+        bar.find_next()
+        bar.replace_one()
+        assert tab.editor.toPlainText().startswith("X beta alpha")
+
+    def test_replace_all(self, qtbot, tmp_path):
+        tab = self._tab(qtbot, tmp_path)
+        bar = tab.find_bar
+        bar.open("alpha")
+        bar.replace_field.setText("X")
+        assert bar.replace_all() == 3
+        assert "alpha" not in tab.editor.toPlainText()
+
+    def test_replace_disabled_when_read_only(self, qtbot, tmp_path):
+        tab = self._tab(qtbot, tmp_path)
+        tab.set_read_only(True)
+        tab.open_find("alpha")
+        assert tab.find_bar.replace_field.isEnabled() is False
+        assert tab.find_bar.replace_all_button.isEnabled() is False
+
+    def test_read_only_toggled_while_bar_open_updates_controls(self, qtbot, tmp_path):
+        # review #7: locking the editor while the find bar is already open
+        # must disable its replace controls (not just on next open).
+        tab = self._tab(qtbot, tmp_path)
+        tab.open_find("alpha")
+        assert tab.find_bar.replace_field.isEnabled() is True
+        tab.set_read_only(True)
+        assert tab.find_bar.replace_field.isEnabled() is False
+        assert tab.find_bar.replace_button.isEnabled() is False
+        tab.set_read_only(False)
+        assert tab.find_bar.replace_field.isEnabled() is True
+
+    def test_current_line_highlight_survives(self, qtbot, tmp_path):
+        # Tranche-A invariant: opening the find bar must not drop the
+        # current-line highlight.
+        tab = self._tab(qtbot, tmp_path)
+        tab.editor.set_match_selections([])
+        assert len(tab.editor.extraSelections()) == 1  # current line only
