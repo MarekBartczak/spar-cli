@@ -69,6 +69,13 @@ def build_qss() -> str:
         background-color: {t['line']};
     }}
 
+    #rightSplit::handle {{
+        background-color: {t['line']};
+    }}
+    #rightSplit::handle:hover {{
+        background-color: {t['muted']};
+    }}
+
     #streamPane {{
         background-color: {t['panel']};
     }}

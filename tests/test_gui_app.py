@@ -193,6 +193,54 @@ class TestRailsLayout:
         window.right_rail.buttons["chat"].setChecked(False)
         assert window._settings.value("rails/chat_visible") in (False, "false", 0, "0")
 
+    def test_right_column_uses_vertical_splitter(self, qtbot, tmp_path):
+        # Live smoke defect 1: Taski and the chat panel sat in a plain
+        # QVBoxLayout — no height adjustment, no visible separator. They
+        # must live in a vertical QSplitter with a real grab handle.
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QSplitter
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        split = window.right_column.splitter
+        assert isinstance(split, QSplitter)
+        assert split.orientation() == Qt.Orientation.Vertical
+        assert split.handleWidth() == 6
+        # The rails stay the single collapse mechanism — the handle drag
+        # must not collapse either panel to zero.
+        assert split.childrenCollapsible() is False
+        assert split.widget(0) is window.side_pane
+        assert split.widget(1) is window.chat_panel
+
+    def test_right_split_state_persists_via_qsettings(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        window.right_column.splitter.setSizes([300, 600])
+        window._save_right_split_state()
+
+        window2 = MainWindow(tmp_path)
+        qtbot.addWidget(window2)
+
+        assert window2._settings.value("rails/right_split") is not None
+
+    def test_rail_collapse_of_splitter_children_still_works(self, qtbot, tmp_path):
+        # Panel hide/show inside the QSplitter must keep the rails' collapse
+        # semantics: hiding one child leaves the column up, hiding both
+        # hides the whole column (stream full width).
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        window.right_rail.buttons["chat"].setChecked(False)
+        assert window.chat_panel.isHidden() is True
+        assert window.right_column.isHidden() is False
+        window.right_rail.buttons["tasks"].setChecked(False)
+        assert window.right_column.isHidden() is True
+        window.right_rail.buttons["chat"].setChecked(True)
+        assert window.right_column.isHidden() is False
+        assert window.chat_panel.isHidden() is False
+
     def test_gate_icon_hidden_without_pending_gate(self, qtbot, tmp_path):
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)

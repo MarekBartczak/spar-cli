@@ -93,15 +93,30 @@ class Toolbar(QToolBar):
 
 
 class RightColumn(QWidget):
-    """Right-side tool column: SidePane (Taski + gate) over the chat panel."""
+    """Right-side tool column: SidePane (Taski + gate) over the chat panel.
+
+    The two panels live in a vertical QSplitter (live smoke defect 1) so the
+    user can adjust their height split via a visible grab handle. Children
+    are NOT collapsible via the handle — the rails stay the single collapse
+    mechanism (hide/show of a splitter child works fine and the freed space
+    goes to the remaining panel).
+    """
 
     def __init__(self, side_pane, chat_panel, parent=None):
         super().__init__(parent)
         self.setObjectName("rightColumn")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(side_pane, stretch=3)
-        layout.addWidget(chat_panel, stretch=2)
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.splitter.setObjectName("rightSplit")
+        self.splitter.setHandleWidth(6)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(side_pane)
+        self.splitter.addWidget(chat_panel)
+        # Default height ratio mirrors the old stretch 3:2.
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.splitter)
         self._side_pane = side_pane
         self._chat_panel = chat_panel
 
@@ -234,6 +249,8 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("spar", "gui")
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
+        self._restore_right_split_state()
+        self.right_column.splitter.splitterMoved.connect(self._save_right_split_state)
 
         tasks_visible = self._settings.value("rails/tasks_visible", True, type=bool)
         chat_visible = self._settings.value("rails/chat_visible", True, type=bool)
@@ -536,8 +553,19 @@ class MainWindow(QMainWindow):
     def _save_splitter_state(self, *_args) -> None:
         self._settings.setValue("mainSplitter/state", self.splitter.saveState())
 
+    def _restore_right_split_state(self) -> None:
+        state = self._settings.value("rails/right_split")
+        if state is not None:
+            self.right_column.splitter.restoreState(state)
+
+    def _save_right_split_state(self, *_args) -> None:
+        self._settings.setValue(
+            "rails/right_split", self.right_column.splitter.saveState()
+        )
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._save_splitter_state()
+        self._save_right_split_state()
         self.tailer.stop()
         # Stop the runner's process poll and the side pane's status poll so
         # an embedded/reused MainWindow doesn't leak timers, and interrupt a
