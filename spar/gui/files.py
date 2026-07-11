@@ -1600,7 +1600,7 @@ if _HAS_QT:
             super().__init__(parent)
             self._last_shift = None
             self._now = _time.monotonic
-            self._last_event_sig = None
+            self._last_event = None
 
         def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
             if event.type() == QEvent.Type.KeyPress:
@@ -1610,11 +1610,14 @@ if _HAS_QT:
                 # re-delivers the SAME event object up the parent chain and an
                 # application-level filter sees every hop. Without dedup one
                 # physical press counts as several presses → the finder fired
-                # on a SINGLE Shift (live finding). Dedup by event identity.
-                sig = (id(event), event.timestamp())
-                if sig == self._last_event_sig:
+                # on a SINGLE Shift (live finding). Dedup by wrapper identity;
+                # HOLDING the reference keeps the id unique (no heap reuse —
+                # an id()+timestamp pair proved flaky when two synthetic
+                # events shared an address and a zero timestamp). The wrapper
+                # is only compared by identity, never dereferenced later.
+                if event is self._last_event:
                     return False
-                self._last_event_sig = sig
+                self._last_event = event
                 if event.key() == Qt.Key.Key_Shift:
                     # review #7: require a BARE Shift. On the Shift keypress
                     # the only modifier that may legitimately be reported is
