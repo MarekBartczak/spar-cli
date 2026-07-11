@@ -15,7 +15,7 @@ toggles in `rails/centre_view` QSettings key; run-start and resume auto-switch t
 Strumień via the `runner.started` signal. `FilesView` pairs a `QFileSystemModel`
 tree (hides `.git`, shows `.spar` collapsed, hidden files visible) with a
 tabbed `FileEditor` (gutter with line numbers, current-line highlight,
-Pygments syntax-aware lexer selected by filename, Ctrl+S atomic save, dirty
+Pygments syntax-aware lexer selected by filename, Ctrl+S save, dirty
 marker, save-failure dialog). The read-only matrix, enforced via the same
 `RunnerState` signal (RUNNING / GATE_PENDING / LOCKED), surfaces via a
 "run w toku — tylko podgląd" banner and lock icons on tabs; `QFileSystemWatcher`
