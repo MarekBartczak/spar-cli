@@ -6,6 +6,33 @@ SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
 
+## macOS bootstrap + native GUI smoke (2026-07-14)
+
+The project was moved from its previously tested Ubuntu environment to macOS
+26.6 (Darwin 25.6.0, Intel). Homebrew Python 3.13.14 and a repo-local `.venv`
+were installed; the editable `dev,gui` extras use PySide6 6.11.1. The first
+suite run exposed two environment-specific issues: subprocess fakes with an
+`#!/usr/bin/env python3` shebang found Apple's Python 3.9 unless `.venv/bin`
+was prepended to `PATH`, and all seven real `QFileSystemWatcher` integration
+tests timed out because Qt's Darwin watcher emitted neither file nor directory
+notifications reliably on APFS. `FileEditor` now keeps the existing native
+watcher path on other platforms and, on Darwin only, adds a parent-directory
+watch plus a 250 ms per-file fingerprint poll. The seven watcher regressions
+pass both under the test suite's offscreen backend and explicitly under native
+`QT_QPA_PLATFORM=cocoa`. Full corrected baseline: **1022 passed, 10 skipped**.
+
+A minimal clean Git project now exists at
+`/Users/marek/Projects/spar_tests` (`881d370`): one `calculator.add` function,
+one pytest, and an ignored `.spar/config.toml` whose final test command uses
+this repo's Python. Its test passes, both adapter commands resolve, and the
+initial `spar status --json` is empty/valid. Native
+`spar gui --dir /Users/marek/Projects/spar_tests` launched successfully as a
+macOS `Python.app` process and remained alive without startup errors. A direct
+Codex CLI smoke returned `OK` on `gpt-5.6-sol`; the Claude CLI smoke is the
+remaining blocker for a real model-driven GUI E2E because it returns
+`Not logged in - Please run /login`. After authenticating Claude, run the
+minimal debate/exec/gate flow in this project and record its result here.
+
 ## Files module tranche A (2026-07-11, `6f4ea8a..da3f87e`)
 
 Per ADR 0006 and the plan (`docs/superpowers/plans/2026-07-11-files-module-tranche-a.md`):

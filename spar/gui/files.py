@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import time as _time
 import weakref
@@ -519,6 +520,12 @@ if _HAS_QT:
     # so a genuine deletion stops retrying instead of spinning forever.
     _WATCH_REARM_INTERVAL_MS = 25
     _WATCH_REARM_MAX_RETRIES = 20
+    _DARWIN_WATCH_POLL_INTERVAL_MS = 250
+    # Qt's Darwin backend does not reliably emit ``fileChanged`` for regular
+    # writes on APFS (and rename-over writes drop the file watch entirely).
+    # Watching the parent directory supplies the missing notification; a
+    # per-file fingerprint below filters events caused by sibling paths.
+    _DARWIN_DIRECTORY_WATCH = sys.platform == "darwin"
 
     def _build_token_formats() -> dict:
         """Map Pygments token types to QTextCharFormat, coloured from the
@@ -629,9 +636,13 @@ if _HAS_QT:
             # editable (still no silent clobber of local edits).
             self._watcher = QFileSystemWatcher(self)
             self._watcher.fileChanged.connect(self._on_file_changed)
+            if _DARWIN_DIRECTORY_WATCH:
+                self._watcher.directoryChanged.connect(self._on_directory_changed)
             # review #6: bounded re-arm retries while the path is briefly
             # absent during an atomic replace (temp write + os.replace).
             self._rearm_retries = 0
+            self._disk_fingerprint = None
+            self._darwin_poll_timer = None
 
         # -- content -------------------------------------------------------
         def load_from_disk(self) -> None:
@@ -640,6 +651,23 @@ if _HAS_QT:
             self.document().setModified(False)
             if str(self.path) not in self._watcher.files():
                 self._watcher.addPath(str(self.path))
+            if (
+                _DARWIN_DIRECTORY_WATCH
+                and str(self.path.parent) not in self._watcher.directories()
+            ):
+                self._watcher.addPath(str(self.path.parent))
+            self._disk_fingerprint = _stat_fingerprint(self.path)
+            if _DARWIN_DIRECTORY_WATCH and self._darwin_poll_timer is None:
+                # QFileSystemWatcher can remain completely silent on Darwin
+                # (observed with Qt 6.11/APFS), even for its directory watch.
+                # A modest stat poll keeps the editor coherent without
+                # changing the event-driven path on other platforms.
+                self._darwin_poll_timer = QTimer(self)
+                self._darwin_poll_timer.setInterval(
+                    _DARWIN_WATCH_POLL_INTERVAL_MS
+                )
+                self._darwin_poll_timer.timeout.connect(self._poll_disk_change)
+                self._darwin_poll_timer.start()
 
         def is_dirty(self) -> bool:
             return self.document().isModified()
@@ -661,6 +689,7 @@ if _HAS_QT:
                 )
                 return False
             self.document().setModified(False)
+            self._disk_fingerprint = _stat_fingerprint(self.path)
             # A successful write re-arms the watcher (some platforms drop the
             # path after our own write).
             if str(self.path) not in self._watcher.files() and self.path.exists():
@@ -680,7 +709,23 @@ if _HAS_QT:
             text = self.path.read_text(encoding="utf-8", errors="replace")
             self.setPlainText(text)
             self.document().setModified(False)
+            self._disk_fingerprint = _stat_fingerprint(self.path)
             bar.setValue(min(pos, bar.maximum()))
+
+        def _on_directory_changed(self, _path: str = "") -> None:
+            """Darwin fallback for APFS writes missed by ``fileChanged``."""
+            if _stat_fingerprint(self.path) == self._disk_fingerprint:
+                return
+            self._on_file_changed(str(self.path))
+
+        def _poll_disk_change(self) -> None:
+            """Detect Darwin file changes when Qt's native watcher is silent."""
+            current = _stat_fingerprint(self.path)
+            if current == self._disk_fingerprint:
+                return
+            if current is None and self._rearm_retries:
+                return
+            self._on_file_changed(str(self.path))
 
         def _on_file_changed(self, _path: str = "") -> None:
             # Robustness (review #6): QFileSystemWatcher DROPS the watch
@@ -700,6 +745,7 @@ if _HAS_QT:
             self._rearm_retries = 0
             if str(self.path) not in self._watcher.files():
                 self._watcher.addPath(str(self.path))
+            self._disk_fingerprint = _stat_fingerprint(self.path)
             if self.is_dirty():
                 # Local edits present: never clobber — warn instead.
                 self.disk_conflict.emit()
