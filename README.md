@@ -109,6 +109,27 @@ spar gui                  # operates on the current directory
 spar gui --dir PATH       # operate on a different project directory
 ```
 
+#### Intel macOS DMG
+
+The desktop application is packaged separately from the portable Python
+installation. Build it on an Intel Mac with an x86_64 Python:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[gui,package-macos]"
+./packaging/macos/build_dmg.sh
+```
+
+The artifact is written to `dist/Spar-<version>-macos-x86_64.dmg`. Opening
+`Spar.app` from Finder asks for the project directory and recovers the login
+shell `PATH`, so Homebrew/NVM-installed `git`, `claude`, and `codex` remain
+discoverable. The local build is ad-hoc signed; public distribution requires
+a Developer ID signature and Apple notarization.
+
+This packaging path does not replace the Linux installation: Ubuntu continues
+to use `pip install -e ".[gui]"` and `spar gui`, and the shared engine remains
+the same Python package.
+
 It shows a live stream pane (the same feed as `spar watch`), a task board,
 a gate panel that lights up with the right buttons for whichever gate is
 pending (consensus `Accept` auto-starts execution; `final_merge` always

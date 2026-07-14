@@ -38,6 +38,24 @@ from spar.status import build_status
 __all__ = ["RunnerState", "derive_state", "SparRunner"]
 
 
+def _engine_base_command() -> list[str]:
+    """Return the command used by the GUI to start its headless engine.
+
+    A normal source/pip installation can spawn the package with ``-m`` on
+    every supported POSIX platform.  A PyInstaller bundle cannot: in a frozen
+    process ``sys.executable`` is the bundled application executable, not a
+    Python interpreter.  The macOS bundle entry point owns the private switch
+    below and routes it straight to :func:`spar.cli.main`.
+
+    Keeping the distinction here means the engine and all regular Linux paths
+    remain platform-neutral; only the packaging entry point knows how a macOS
+    app bundle starts.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--spar-engine"]
+    return [sys.executable, "-m", "spar.cli"]
+
+
 class RunnerState(Enum):
     """Lifecycle state of the spar process, driving toolbar enablement."""
 
@@ -136,7 +154,7 @@ class SparRunner(QObject):
 
         # ``[program, *fixed_args]`` prepended to every spawn. Tests replace
         # this with ``[sys.executable, "<fake>.py"]`` to inject a fake engine.
-        self._base_cmd: list[str] = [sys.executable, "-m", "spar.cli"]
+        self._base_cmd: list[str] = _engine_base_command()
 
         self._process: QProcess | None = None
         self._last_exit: int | None = None

@@ -1,10 +1,58 @@
-# HANDOFF — live C++ execution test PASSED (2026-07-09)
+# HANDOFF — Intel macOS DMG build prepared (2026-07-14)
 
 **The v2 goal is achieved:** a full real-agent run `plan (debate, --tasks) →
 implement → cross-review → per-task test → final Test → user-gated merge`
 SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
+
+## Intel macOS DMG packaging (2026-07-14)
+
+An isolated macOS packaging path now builds the PySide6 desktop GUI as an
+Intel-only `Spar.app` and wraps it in a DMG without changing the shared engine
+behavior on Ubuntu. The sources are `packaging/macos/entrypoint.py` (Finder
+startup, project-directory picker, login-shell `PATH` recovery, and frozen
+engine routing), `packaging/macos/Spar.spec` (PyInstaller `x86_64` bundle), and
+`packaging/macos/build_dmg.sh` (build, ad-hoc signing, verification, and DMG
+creation). The optional `package-macos` extra installs PyInstaller only on
+Darwin. `SparRunner` has one additive packaging boundary: normal Python/Linux
+installs still spawn `sys.executable -m spar.cli`, while a frozen executable
+spawns itself with the private `--spar-engine` switch.
+
+The validated local artifact is
+`dist/Spar-0.1.0-macos-x86_64.dmg` (ignored by Git, about 45 MB), SHA-256
+`00d64e5ec6b9fd901c44f8f8ad140b38c7e26c9895e0aad81a1f06a5ef8ac386`.
+Build it with:
+
+```bash
+.venv/bin/pip install -e ".[gui,package-macos]"
+./packaging/macos/build_dmg.sh
+```
+
+Validation completed on the Intel MacBook (`x86_64`, macOS 26.6): every
+Mach-O in the bundle is `x86_64`; deep/strict code-signature verification and
+`hdiutil verify` pass; the frozen `--spar-engine status --json` path works; an
+offscreen packaged-GUI smoke stayed alive after constructing the project
+window; focused runner tests are 41/41. Full corrected baseline is **1032
+passed, 2 skipped**. On this host the full suite MUST be run with the venv at
+the front of `PATH`, otherwise fake adapters' `#!/usr/bin/env python3` resolve
+to Apple's Python 3.9 and fail on `X | None` annotations:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest tests/ -q
+```
+
+**Release status:** suitable for local/internal alpha use on this Mac, not yet
+for public distribution. Current signing is ad-hoc (no Team ID; this machine
+has zero valid code-signing identities), there is no Hardened Runtime,
+Developer ID signature, notarization, or stapled ticket. The bundled Homebrew
+Python 3.13 has deployment target macOS 26.0, so this artifact does not run on
+older Intel macOS releases. Before a public release: obtain/install a
+Developer ID Application certificate; add Hardened Runtime + timestamped
+signing and `notarytool`/stapling; either declare macOS 26 explicitly or build
+with a lower-deployment-target x86_64 Python; add `CFBundleVersion`, a branded
+icon, and third-party license notices. The source build is otherwise clean and
+reproducible from the script above.
 
 ## macOS bootstrap + native GUI smoke (2026-07-14)
 

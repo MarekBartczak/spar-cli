@@ -30,6 +30,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from spar.gui import toolbar as tb
+from spar.gui import runner as runner_mod
 from spar.gui.runner import RunnerState, SparRunner, derive_state
 
 
@@ -37,6 +38,25 @@ from spar.gui.runner import RunnerState, SparRunner, derive_state
 # derive_state — pure truth table
 # ----------------------------------------------------------------------
 _PENDING = {"pending_gate": {"kind": "consensus"}}
+
+
+def test_engine_command_uses_python_module_when_not_frozen(monkeypatch):
+    monkeypatch.delattr(runner_mod.sys, "frozen", raising=False)
+
+    assert runner_mod._engine_base_command() == [
+        sys.executable,
+        "-m",
+        "spar.cli",
+    ]
+
+
+def test_engine_command_routes_back_into_frozen_executable(monkeypatch):
+    monkeypatch.setattr(runner_mod.sys, "frozen", True, raising=False)
+
+    assert runner_mod._engine_base_command() == [
+        sys.executable,
+        "--spar-engine",
+    ]
 
 
 @pytest.mark.parametrize(
