@@ -162,6 +162,9 @@ def _gate_fingerprint(pending_gate: dict | None) -> str:
 
 _TERMINAL_RE = re.compile(r"^done \(.*\)$")
 
+# Sticky-bottom slack for the chat transcript (see grill_dialog).
+_FOLLOW_SLACK_PX = 8
+
 
 def _is_terminal(text: str) -> bool:
     """ClaudeAdapter's terminal status events — ``done`` / ``done (12.3s)``."""
@@ -447,9 +450,12 @@ if _HAS_QT:
                 )
                 if inner:
                     parts.append(self._bot_bubble(inner))
-            self.transcript.setHtml("".join(parts))
             scrollbar = self.transcript.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            # Sticky bottom -- see grill_dialog._render_transcript.
+            prev = scrollbar.value()
+            at_bottom = prev >= scrollbar.maximum() - _FOLLOW_SLACK_PX
+            self.transcript.setHtml("".join(parts))
+            scrollbar.setValue(scrollbar.maximum() if at_bottom else prev)
 
         @staticmethod
         def _bot_bubble(inner_html: str) -> str:

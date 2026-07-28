@@ -861,3 +861,39 @@ class TestHandoff:
         panel.input_edit.setPlainText("kolejne pytanie")
         panel.send_button.click()
         assert panel.handoff_button.isVisible() is False
+
+
+class TestTranscriptStickyBottom:
+    """Auto-scroll follows the stream only while parked at the bottom."""
+
+    def _filled(self, qtbot, tmp_path):
+        fake = FakeSession()
+        panel = _panel(qtbot, tmp_path, fake)
+        panel.show()
+        panel.transcript.setFixedHeight(60)
+        for i in range(40):
+            fake.turn_finished.emit(f"odpowiedz {i}", [])
+        bar = panel.transcript.verticalScrollBar()
+        assert bar.maximum() > 0  # guard: the view really scrolls
+        return fake, panel, bar
+
+    def test_stays_at_bottom_when_following(self, qtbot, tmp_path):
+        fake, panel, bar = self._filled(qtbot, tmp_path)
+        bar.setValue(bar.maximum())
+        fake.turn_finished.emit("nowa linia", [])
+        assert bar.value() == bar.maximum()
+
+    def test_scrolled_up_position_survives_new_lines(self, qtbot, tmp_path):
+        fake, panel, bar = self._filled(qtbot, tmp_path)
+        bar.setValue(0)
+        fake.turn_finished.emit("nowa linia", [])
+        assert bar.value() == 0
+        assert bar.value() != bar.maximum()
+
+    def test_scrolling_back_to_bottom_re_enables_follow(self, qtbot, tmp_path):
+        fake, panel, bar = self._filled(qtbot, tmp_path)
+        bar.setValue(0)
+        fake.turn_finished.emit("a", [])
+        bar.setValue(bar.maximum())
+        fake.turn_finished.emit("b", [])
+        assert bar.value() == bar.maximum()

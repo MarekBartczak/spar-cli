@@ -38,6 +38,10 @@ __all__ = ["GrillDialog"]
 # tooltip and in `Option.label` (task brief: truncate dialog-side only).
 _BUTTON_LABEL_MAX = 80
 
+# How far off the bottom still counts as "following the stream". Chat bubbles
+# are taller than log lines, so the stream pane's 2px slack is too tight here.
+_FOLLOW_SLACK_PX = 8
+
 
 def _truncate(text: str, limit: int = _BUTTON_LABEL_MAX) -> str:
     if len(text) <= limit:
@@ -188,9 +192,14 @@ class GrillDialog(QDialog):
             parts.append(self._bubble_html(role, text))
         if self._streaming_text:
             parts.append(self._bubble_html("model", self._streaming_text))
-        self.transcript.setHtml("".join(parts))
         scrollbar = self.transcript.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        # Sticky bottom: follow the stream only while the user is parked at
+        # (or within a bubble-ish tolerance of) the end. Scrolled up to read
+        # something? Keep the position -- setHtml resets it to 0, so restore.
+        prev = scrollbar.value()
+        at_bottom = prev >= scrollbar.maximum() - _FOLLOW_SLACK_PX
+        self.transcript.setHtml("".join(parts))
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else prev)
 
     def _bubble_html(self, role: str, text: str) -> str:
         escaped = (
