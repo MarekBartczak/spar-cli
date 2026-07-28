@@ -154,6 +154,32 @@ comparison on `.spar/requirements.md`, whose content then pre-fills the
 new-debate task field via "Użyj w debacie". Manual smoke test (live grill
 session end-to-end in the running GUI) still pending.
 
+## Next up: multi-project GUI (decided 2026-07-28)
+
+Working on 2-3 (or 200 — no artificial cap) projects in parallel: **one
+window = one project = one OS process**, WebStorm-style UX. Rejected the
+single-process/tabs variant: the GUI already spawns the engine per project
+and holds a per-project `flock`, so tabs would put N engines and N live.log
+tailers on one Qt event loop (a hung adapter freezing every project) and
+would require rewriting the whole singleton-per-window state. Note IntelliJ
+itself hosts multiple project frames in ONE JVM — we copy the UX, not the
+implementation.
+
+Already works today: `spar gui --dir A` + `spar gui --dir B` are independent
+processes with independent locks; the title bar carries the project name.
+Tranche scope (plan: `docs/superpowers/plans/2026-07-28-multi-project-gui.md`):
+
+1. `Otwórz projekt…` in the GUI: directory picker + recent-projects list +
+   detached spawn (`open -n` for the frozen macOS bundle).
+2. Per-project QSettings scope for layout state (splitters, centre view,
+   rail visibility, window geometry); search/mask history stays global.
+3. Window title carries the parent path, so two same-named repos differ.
+4. Single-instance-per-project: a second `spar gui` on the SAME directory
+   raises the existing window (QLocalServer/QLocalSocket named per resolved
+   path) instead of opening a read-only `LOCKED` window. `LOCKED` stays for
+   a foreign *engine* holding the lock (e.g. a headless CLI run), where
+   there is no window to raise.
+
 ## Where things are
 
 - Repo: `github.com/MarekBartczak/spar-cli`, branch **master** (see `git log` for latest).
