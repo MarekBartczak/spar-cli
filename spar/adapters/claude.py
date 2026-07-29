@@ -31,6 +31,16 @@ def _truncate(text: str, limit: int = _MAX_ARG_LEN) -> str:
     return text[: limit - 1] + "…"
 
 
+def _one_line(text: str) -> str:
+    """Collapse any whitespace run (newlines included) into single spaces.
+
+    A tool argument can be a whole heredoc script; emitted verbatim it would
+    break the "one tool call == one display line" invariant and leave its
+    body as prefix-less lines in ``live.log``.
+    """
+    return " ".join(text.split())
+
+
 def _tool_line(name: object, raw_json: str) -> str:
     """Render ``tool: <name> <arg>`` from the buffered raw JSON fragments.
 
@@ -55,7 +65,7 @@ def _tool_line(name: object, raw_json: str) -> str:
     else:
         arg = json.dumps(parsed, separators=(",", ":"))
 
-    return f"tool: {name} {_truncate(arg)}"
+    return f"tool: {name} {_truncate(_one_line(arg))}"
 
 
 class _DisplayMapper:
@@ -68,9 +78,23 @@ class _DisplayMapper:
     buffers those fragments per index and emits a single ``tool: <name> <arg>``
     line once the block closes (see ``_tool_line``).
 
+    ``text_delta`` fragments get the same per-index buffering, but flush on
+    NEWLINE rather than on block close: a delta is a network-sized chunk
+    (observed: 1..141 chars) whose boundaries fall wherever the wire happened
+    to split, so emitting one display line per delta chopped words in half
+    ("Te" + "raz naprawa...") and repeated the ``[side rN]`` prefix mid-word.
+    Buffering to the next ``\\n`` keeps the pane live (a line appears the
+    moment the model finishes it) while every emitted line is a whole one.
+    Blank lines are preserved: they carry the reply's paragraph structure.
+
+    No emitted line ever contains a newline, so every ``live.log`` line keeps
+    its ``[<prefix>]`` (``StreamSink.event`` enforces the same invariant for
+    every adapter).
+
     Safety net: if a ``result`` event or a NEW ``content_block_start`` for the
-    SAME index arrives while a tool is still buffered (a missing stop), the
-    buffered tool is flushed first — a tool must never be silently swallowed.
+    SAME index arrives while a tool or a text tail is still buffered (a
+    missing stop), the buffer is flushed first — nothing must ever be
+    silently swallowed.
 
     ``map`` returns a list of zero or more display lines for one parsed
     event, since the safety net can produce a flush line in addition to the
@@ -79,13 +103,38 @@ class _DisplayMapper:
 
     def __init__(self) -> None:
         self._pending: dict[object, dict] = {}
+        # index -> the trailing, not-yet-terminated text line for that block
+        self._text: dict[object, str] = {}
 
     def _flush(self, index: object) -> str:
         entry = self._pending.pop(index)
         return _tool_line(entry["name"], "".join(entry["buffer"]))
 
+    def _absorb_text(self, index: object, text: str) -> list[str]:
+        """Buffer ``text`` for ``index``; return the lines it completed."""
+        lines = (self._text.get(index, "") + text).split("\n")
+        self._text[index] = lines.pop()  # trailing partial line (may be "")
+        return lines
+
+    def _flush_text(self, index: object) -> list[str]:
+        """Emit whatever text tail ``index`` still holds (no trailing newline)."""
+        tail = self._text.pop(index, "")
+        return [tail] if tail else []
+
+    def _flush_index(self, index: object) -> list[str]:
+        """Flush both buffers for one index: text tail first, then the tool."""
+        lines = self._flush_text(index)
+        if index in self._pending:
+            lines.append(self._flush(index))
+        return lines
+
     def _flush_all(self) -> list[str]:
-        lines = [self._flush(index) for index in list(self._pending.keys())]
+        indexes = list(self._text.keys()) + [
+            i for i in self._pending if i not in self._text
+        ]
+        lines: list[str] = []
+        for index in indexes:
+            lines.extend(self._flush_index(index))
         return lines
 
     def map(self, obj: object) -> list[str]:
@@ -106,7 +155,7 @@ class _DisplayMapper:
                 if dtype == "text_delta":
                     text = delta.get("text")
                     if isinstance(text, str) and text:
-                        return [text]
+                        return self._absorb_text(index, text)
                     return []
                 if dtype == "input_json_delta" and index in self._pending:
                     partial = delta.get("partial_json")
@@ -117,16 +166,14 @@ class _DisplayMapper:
             if etype == "content_block_start":
                 block = event.get("content_block")
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    lines: list[str] = []
-                    if index in self._pending:
-                        lines.append(self._flush(index))
+                    lines = self._flush_index(index)
                     self._pending[index] = {"name": block.get("name"), "buffer": []}
                     return lines
-                return []
+                # a text block reusing this index: the previous block's tail
+                # can never be continued, so close it out now
+                return self._flush_index(index)
             if etype == "content_block_stop":
-                if index in self._pending:
-                    return [self._flush(index)]
-                return []
+                return self._flush_index(index)
             return []
         if kind == "result":
             lines = self._flush_all()

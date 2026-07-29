@@ -2342,3 +2342,49 @@ def test_scope_ignore_absent_still_aborts_on_out_of_scope_artifact(repo, tmp_pat
     assert adapters.get("B") is None or adapters["B"].calls == []
     # no scope_ignore configured -> the managed block was never written
     assert "spar scope_ignore" not in _exclude_path(repo).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Stray-write recovery at merge time. A file written into the MAIN checkout
+# instead of a worktree makes ``git merge`` of the task branch fail hard with
+# "untracked working tree files would be overwritten by merge" (live incident:
+# t2 wrote its handler into the main checkout first, and the merge died several
+# steps later). The merge tail must sweep the main checkout first.
+# ---------------------------------------------------------------------------
+
+
+def _staged_task_branch(repo, tmp_path, task):
+    """integration + task branch with the task's file committed, plus a worktree."""
+    gitops.create_branch(repo, "spar/integration", "master")
+    branch = f"spar/{task.id}-{task.side}"
+    gitops.create_branch(repo, branch, "spar/integration")
+    worktree = tmp_path / ".spar" / "worktrees" / task.side
+    gitops.add_worktree(repo, worktree, branch)
+    (worktree / "work.py").write_text("real\n", encoding="utf-8")
+    git(worktree, "add", "-A")
+    git(worktree, "commit", "-qm", f"{task.id}: impl")
+    state = ExecState(
+        target_branch="master",
+        integration_branch="spar/integration",
+        tasks={task.id: TaskState(task=task, status="testing", branch=branch)},
+    )
+    return branch, worktree, state
+
+
+def test_merge_sweeps_stray_from_main_checkout(repo, tmp_path):
+    task = make_task("t1", "A", ["work.py"])
+    ex, _adapters, _store, logs = build_executor(
+        repo, tmp_path, tasks=[task], steps_by_side={"A": [], "B": []},
+        gate=FakeGate([]), execution=ExecutionConfig(test_command="true"),
+    )
+    branch, worktree, state = _staged_task_branch(repo, tmp_path, task)
+    # the stray: the task's own path, written in the MAIN checkout
+    (repo / "work.py").write_text("stray copy\n", encoding="utf-8")
+
+    ex._merge_task(state, state.tasks["t1"], branch, worktree)
+
+    assert state.tasks["t1"].status == "merged"
+    # the branch's version won; the stray is gone
+    assert (repo / "work.py").read_text(encoding="utf-8") == "real\n"
+    assert gitops.is_clean(repo)
+    assert any("main checkout dirty before merging t1" in line for line in logs)

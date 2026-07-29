@@ -109,6 +109,59 @@ spar gui                  # operates on the current directory
 spar gui --dir PATH       # operate on a different project directory
 ```
 
+#### Ubuntu desktop launcher + `spar-gui` on PATH
+
+```bash
+.venv/bin/pip install -e ".[gui]"      # provides the spar-gui console script
+./packaging/linux/install.sh           # per-user, no root
+```
+
+The installer creates a `~/.local/bin/spar-gui` symlink (so `spar-gui` works
+in any terminal without the venv path), a `Spar` entry in the application menu
+with an icon, and a `inode/directory` MIME association so a folder can be
+opened with Spar straight from Nautilus. Re-run it after moving the repo or
+recreating the venv — it is idempotent.
+
+```bash
+spar-gui                 # the current directory is the project
+spar-gui PATH            # open PATH (a file resolves to its directory)
+spar-gui --pick          # ask for the project directory
+spar-gui --foreground    # keep it attached to this terminal
+```
+
+`spar-gui` returns the prompt immediately and keeps running — like `code`.
+The window runs in its own session, so closing the terminal does not kill it;
+Qt warnings and tracebacks that would otherwise vanish with the terminal are
+appended to `~/.cache/spar/gui.log`. Use `--foreground` when you want the
+output in the terminal instead.
+
+The menu entry uses `--pick`, because a graphical launcher starts with no
+useful working directory: it asks for the project, starting at the most
+recently opened one. A folder dropped on the launcher wins over the dialog.
+
+#### Several projects at once
+
+One window = one project = one OS process (ADR 0007), the WebStorm model.
+There is no limit on how many run in parallel:
+
+```bash
+spar gui --dir ~/P_PROJ/app_a    # window 1, its own engine and .spar/lock
+spar gui --dir ~/P_PROJ/app_b    # window 2, fully independent
+```
+
+Inside the GUI the toolbar's **Projekt** menu does the same without a
+terminal: `Otwórz projekt…` picks a directory, and the recent projects below
+it open with one click — both in a NEW window, never swapping the project
+under the current one. Each window remembers its own layout (splitters,
+Strumień/Pliki view, rail visibility, size and position); the search and
+file-mask history stay shared.
+
+Launching the GUI a second time on a project that is **already open** does not
+open a second window: it raises the running one and exits. A read-only
+`LOCKED` window still appears when a foreign *engine* holds
+`<project>/.spar/lock` (e.g. a headless `spar --continue` in that directory) —
+there is no window to raise in that case.
+
 #### Intel macOS DMG
 
 The desktop application is packaged separately from the portable Python
@@ -367,7 +420,7 @@ SPAR_CONTRACT_TESTS=1 python3 -m pytest tests/test_contract_real_cli.py  # real-
 - `spar/watch.py` / `spar/ui.py` — live viewer + viewer-window spawner
 - `spar/orchestrator.py` — debate loop, consensus, gates, turn prompts
 - `spar/exec/loop.py` — execution FSM: task branches, merges, final test
-- `spar/exec/review.py` — asymmetric cross-review loop, scope guard
+- `spar/exec/review.py` — asymmetric cross-review loop, scope + stray-write guard
 - `spar/exec/tasklist.py` — `## Tasks` parser + validation (deps, models, scopes)
 - `spar/exec/prompts.py` — implementer/reviewer prompt builders
 - `spar/exec/gitops.py` — thin git wrappers (branches, worktrees, diffs)

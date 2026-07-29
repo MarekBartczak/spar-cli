@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Colors are spar.gui.theme TOKENS: ground, claude, codex, gate, text.
+       Each side carries a stylised mark of the CLI that plays it: a radiating
+       burst (claude) and a six petal knot (codex/gpt). Both are deliberate
+       simplifications, because at 32 to 48px dock size anything more detailed
+       turns to mud. -->
+  <rect width="128" height="128" rx="26" fill="#14171c"/>
+
+  <!-- claude side -->
+  <path d="M20 40h34a8 8 0 0 1 8 8v32a8 8 0 0 1-8 8H20a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8z" fill="#e8a854"/>
+  <g fill="#14171c" transform="translate(35 64)">
+    <g id="ray">
+      <path d="M0 -14.5 L3.2 -3.8 L0 0 L-3.2 -3.8 Z"/>
+    </g>
+    <use xlink:href="#ray" transform="rotate(51.4)"/>
+    <use xlink:href="#ray" transform="rotate(102.9)"/>
+    <use xlink:href="#ray" transform="rotate(154.3)"/>
+    <use xlink:href="#ray" transform="rotate(205.7)"/>
+    <use xlink:href="#ray" transform="rotate(257.1)"/>
+    <use xlink:href="#ray" transform="rotate(308.6)"/>
+  </g>
+
+  <!-- codex / gpt side -->
+  <path d="M74 40h34a8 8 0 0 1 8 8v32a8 8 0 0 1-8 8H74a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8z" fill="#56c3d6"/>
+  <g transform="translate(93 64)" fill="none" stroke="#14171c" stroke-width="4.2">
+    <g id="petal">
+      <ellipse cx="0" cy="0" rx="6.2" ry="14.2"/>
+    </g>
+    <use xlink:href="#petal" transform="rotate(60)"/>
+    <use xlink:href="#petal" transform="rotate(120)"/>
+  </g>
+
+  <!-- the gate: the human decision in the middle -->
+  <rect x="60" y="26" width="8" height="76" rx="4" fill="#e0679a"/>
+  <circle cx="64" cy="64" r="11" fill="#14171c"/>
+  <circle cx="64" cy="64" r="6" fill="#d5dae2"/>
+</svg>

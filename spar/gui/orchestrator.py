@@ -238,7 +238,7 @@ except ImportError:  # pragma: no cover
 if _HAS_QT:
     from spar.adapters.claude import ClaudeAdapter
     from spar.gui.conversation import ConversationSession
-    from spar.gui.grill_dialog import _InputEdit, _truncate
+    from spar.gui.grill_dialog import WrappingPushButton, _InputEdit
 
     class OrchestratorSession(ConversationSession):
         """Advisor conversation. The adapter is read-only BY CONSTRUCTION."""
@@ -379,9 +379,15 @@ if _HAS_QT:
             layout.addWidget(self.handoff_button)
 
             input_row = QHBoxLayout()
-            self.input_edit = _InputEdit(self._on_send_clicked, self)
+            self.input_edit = _InputEdit(
+                self._on_send_clicked,
+                self,
+                paste_dir=Path(self._project_dir) / ".spar" / _InputEdit._PASTE_DIR_NAME,
+            )
             self.input_edit.setObjectName("orchestratorInput")
-            self.input_edit.setPlaceholderText("Zapytaj orkiestratora… (Ctrl+Enter wysyła)")
+            self.input_edit.setPlaceholderText(
+                "Zapytaj orkiestratora… (Ctrl+Enter wysyła, Ctrl+V wkleja screena)"
+            )
             self.input_edit.setMaximumHeight(72)
             input_row.addWidget(self.input_edit, stretch=1)
 
@@ -490,11 +496,11 @@ if _HAS_QT:
         def _render_options(self, options: list) -> None:
             self._clear_options()
             for opt in options:
-                btn = QPushButton(f"{opt.letter}.  {_truncate(opt.label)}", self.options_row)
+                btn = WrappingPushButton(f"{opt.letter}.  {opt.label}", self.options_row)
                 btn.setObjectName(f"option_{opt.letter}")
                 btn.setToolTip(opt.label)
-                btn.setStyleSheet("text-align: left; padding: 6px 10px;")
-                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                btn.setStyleSheet("text-align: left;")
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                 # Review #15: through the ONE send path — never session.send.
                 btn.clicked.connect(
                     lambda _checked=False, letter=opt.letter: self._dispatch_user_text(letter)

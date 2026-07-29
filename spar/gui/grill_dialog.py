@@ -13,10 +13,12 @@ Kept Qt-only (imported only where PySide6 is available, same convention as
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -34,27 +36,69 @@ from spar.gui.theme import TOKENS
 
 __all__ = ["GrillDialog"]
 
-# Display truncation for option-button labels; the full text stays in the
-# tooltip and in `Option.label` (task brief: truncate dialog-side only).
-_BUTTON_LABEL_MAX = 80
-
 # How far off the bottom still counts as "following the stream". Chat bubbles
 # are taller than log lines, so the stream pane's 2px slack is too tight here.
 _FOLLOW_SLACK_PX = 8
 
 
-def _truncate(text: str, limit: int = _BUTTON_LABEL_MAX) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+class WrappingPushButton(QPushButton):
+    """A push button whose label wraps instead of being elided or truncated.
+
+    ``QPushButton`` renders its own text on ONE line and elides whatever does
+    not fit, so a grill option had to be truncated to fit ("…") and the full
+    wording only survived in the tooltip -- unreadable for options that are
+    whole sentences. Here the text lives in a word-wrapping ``QLabel`` laid
+    out inside the button, so the full option is always visible and reflows
+    with the dialog width, while the widget stays a real button (native
+    styling, click signal, object name, tooltip).
+
+    ``text()``/``setText()`` proxy the inner label, so callers and tests keep
+    using the ordinary button API.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        self._label = QLabel(text, self)
+        self._label.setWordWrap(True)
+        # The label must not eat the button's clicks or show a text cursor.
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._label)
+
+    def text(self) -> str:  # noqa: D102 (proxies QPushButton.text)
+        return self._label.text()
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
+        self._label.setText(text)
 
 
 class _InputEdit(QPlainTextEdit):
-    """Multiline input; Ctrl+Enter triggers ``send_requested``."""
+    """Multiline input; Ctrl+Enter triggers ``send_requested``.
 
-    def __init__(self, send_requested: Callable[[], None], parent=None) -> None:
+    Ctrl+V of an IMAGE (a screenshot straight off the clipboard) is saved as a
+    PNG under ``paste_dir`` and its path is inserted as text: the model CLIs
+    read images from disk, so a path is the transport. ``paste_dir`` lives
+    under ``.spar/`` -- the one directory the artifact scope guard skips
+    wholesale -- so pasting can never look like a foreign repo change.
+
+    With no ``paste_dir`` (tests, or a panel with no project dir) image paste
+    falls back to Qt's default handling.
+    """
+
+    _PASTE_DIR_NAME = "pasted"
+
+    def __init__(
+        self,
+        send_requested: Callable[[], None],
+        parent=None,
+        paste_dir: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self._send_requested = send_requested
+        self._paste_dir = Path(paste_dir) if paste_dir is not None else None
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and (
@@ -63,6 +107,42 @@ class _InputEdit(QPlainTextEdit):
             self._send_requested()
             return
         super().keyPressEvent(event)
+
+    # -- image paste ---------------------------------------------------
+    def canInsertFromMimeData(self, source) -> bool:  # noqa: N802 (Qt override)
+        if self._paste_dir is not None and source.hasImage():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802 (Qt override)
+        path = self._save_pasted_image(source)
+        if path is None:
+            super().insertFromMimeData(source)
+            return
+        # Surround with spaces so the path never fuses with adjacent words.
+        prefix = "" if self.toPlainText()[-1:] in ("", " ", "\n") else " "
+        self.insertPlainText(f"{prefix}{path} ")
+
+    def _save_pasted_image(self, source) -> Path | None:
+        """Write the mime data's image to ``paste_dir``; return its path.
+
+        ``None`` means "not an image paste, or writing failed" -- the caller
+        then falls back to Qt's default paste rather than losing the content.
+        """
+        if self._paste_dir is None or not source.hasImage():
+            return None
+        image = QImage(source.imageData())
+        if image.isNull():
+            return None
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        target = self._paste_dir / f"paste-{stamp}.png"
+        try:
+            self._paste_dir.mkdir(parents=True, exist_ok=True)
+            if not image.save(str(target), "PNG"):
+                return None
+        except OSError:
+            return None
+        return target
 
 
 class GrillDialog(QDialog):
@@ -136,9 +216,15 @@ class GrillDialog(QDialog):
         layout.addWidget(self.options_row)
 
         input_row = QHBoxLayout()
-        self.input_edit = _InputEdit(self._on_send_clicked, self)
+        self.input_edit = _InputEdit(
+            self._on_send_clicked,
+            self,
+            paste_dir=self._project_dir / ".spar" / _InputEdit._PASTE_DIR_NAME,
+        )
         self.input_edit.setObjectName("inputEdit")
-        self.input_edit.setPlaceholderText("Twoja odpowiedź… (Ctrl+Enter wysyła)")
+        self.input_edit.setPlaceholderText(
+            "Twoja odpowiedź… (Ctrl+Enter wysyła, Ctrl+V wkleja screena)"
+        )
         input_row.addWidget(self.input_edit, stretch=1)
 
         buttons_col = QVBoxLayout()
@@ -248,11 +334,13 @@ class GrillDialog(QDialog):
     def _render_options(self, options: list[Option]) -> None:
         self._clear_options()
         for opt in options:
-            btn = QPushButton(f"{opt.letter}.  {_truncate(opt.label)}", self.options_row)
+            btn = WrappingPushButton(f"{opt.letter}.  {opt.label}", self.options_row)
             btn.setObjectName(f"option_{opt.letter}")
             btn.setToolTip(opt.label)
-            btn.setStyleSheet("text-align: left; padding: 6px 10px;")
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.setStyleSheet("text-align: left;")
+            # Minimum (not Fixed) vertically: a wrapped multi-line option needs
+            # to be taller than a one-liner.
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             btn.clicked.connect(lambda _checked=False, letter=opt.letter: self._on_option_clicked(letter))
             self.options_layout.addWidget(btn)
 

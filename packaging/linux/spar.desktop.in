@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Spar
+GenericName=AI debate & exec pilot
+Comment=Pilotuj silnik spar: debata, exec, gate'y i pliki projektu
+# @EXEC@ is substituted by install.sh with the absolute path to the
+# spar-gui console script, because a graphical session does not read
+# ~/.bashrc and therefore may not have the venv on PATH.
+Exec=@EXEC@ --pick %f
+Icon=@ICON@
+Terminal=false
+Categories=Development;IDE;
+Keywords=spar;ai;debate;claude;codex;
+StartupNotify=true
+StartupWMClass=spar
+# A dropped/opened folder becomes the project directory (it wins over
+# --pick), so "Open with Spar" works from Nautilus on any directory.
+MimeType=inode/directory;

@@ -157,6 +157,25 @@ def _scope_violations(paths: list[str], files: tuple[str, ...]) -> list[str]:
     return [p for p in paths if not _matches_scope(p, files)]
 
 
+def _stray_repo_paths(repo: Path | None, before: frozenset[str]) -> list[str]:
+    """Paths that became dirty in the MAIN checkout during a turn.
+
+    The implementer runs with its cwd set to its worktree, but nothing stops a
+    model from writing through an absolute path into the main repo checkout
+    instead (live incident: t2 wrote the handler into the main checkout, then
+    re-wrote it in the worktree; the leftover untracked copy blocked the task
+    branch's merge many steps later with "untracked working tree files would be
+    overwritten by merge").
+
+    ``spar exec`` only starts on a clean main checkout, so any path dirty there
+    is agent-made. It is still diffed against ``before`` so pre-existing dirt
+    from outside the run is reported, never swept.
+    """
+    if repo is None:
+        return []
+    return sorted(set(gitops.status_paths(repo)) - before)
+
+
 def _rollback(worktree: Path, oid: str) -> None:
     _git(worktree, "reset", "--hard", oid)
     _git(worktree, "clean", "-fd")
@@ -261,6 +280,7 @@ def run_cross_review(
             log=log,
             timeout_sec=timeout_sec,
             on_event=on_event_impl,
+            repo=repo,
         )
         if made_changes:
             no_change_streak = 0
@@ -417,6 +437,7 @@ def _implementer_turn(
     timeout_sec: int,
     warning: str | None = None,
     on_event=None,
+    repo: Path | None = None,
 ) -> tuple[bool, int]:
     """Run one implementer turn.
 
@@ -434,7 +455,10 @@ def _implementer_turn(
     with their own message and retry:
 
     - **scope guard** — a change outside the task's file scope is rolled back and
-      retried once; a second violation raises :class:`ReviewAbort`.
+      retried once; a second violation raises :class:`ReviewAbort`. When ``repo``
+      is given, a write that landed in the MAIN checkout instead of the worktree
+      counts as such a violation too: it is swept from the main checkout and the
+      turn retried, so the stray never survives to break a later merge.
     - **anti-spin guard** — a verdict that marks ≥1 remark ``accepted`` while
       changing NO files on disk is a protocol contradiction (accepted a fix,
       didn't apply it). It is retried once with a stern warning; the accepted
@@ -447,8 +471,13 @@ def _implementer_turn(
 
     while True:  # bounded: each guard retries at most once (its flag latches)
         pre_oid = _head_oid(worktree)
+        repo_dirt_before = frozenset(gitops.status_paths(repo) if repo is not None else ())
         prompt = build_impl_prompt(
-            task, plan_path, list(task_state.pending_remarks), warning=warning
+            task,
+            plan_path,
+            list(task_state.pending_remarks),
+            warning=warning,
+            worktree=worktree,
         )
         result = _invoke(
             role="impl",
@@ -504,23 +533,49 @@ def _implementer_turn(
         )
         changes = _worktree_changes(worktree) + self_committed
         violations = _scope_violations(changes, task.files)
-        if violations:
+        # A write that landed in the MAIN checkout instead of the worktree is a
+        # scope violation regardless of its path: the task branch never sees it,
+        # while the main checkout keeps it until it collides with a later merge.
+        strays = _stray_repo_paths(repo, repo_dirt_before)
+        if violations or strays:
             _rollback(worktree, pre_oid)
+            if strays:
+                gitops.revert_paths(repo, strays)  # type: ignore[arg-type]
             if not scope_retried:
                 scope_retried = True
-                log(
-                    f"[t={task.id}] scope violation: {sorted(violations)} outside "
-                    f"{list(task.files)}; rolled back, retrying the turn."
+                if strays:
+                    log(
+                        f"[t={task.id}] wrote outside its worktree: {strays} in the main "
+                        f"checkout {repo}; swept, rolled back, retrying the turn."
+                    )
+                if violations:
+                    log(
+                        f"[t={task.id}] scope violation: {sorted(violations)} outside "
+                        f"{list(task.files)}; rolled back, retrying the turn."
+                    )
+                stray_warning = (
+                    "Your previous turn wrote to the MAIN repository checkout "
+                    f"({strays} under {repo}) instead of your worktree, and those writes "
+                    f"were discarded. Your worktree is {worktree} — every path you edit "
+                    "MUST be inside it (use relative paths from your working directory). "
+                    if strays
+                    else ""
+                )
+                scope_warning = (
+                    "Your previous turn changed files outside your allowed scope "
+                    f"({sorted(violations)}) and was rolled back. "
+                    if violations
+                    else ""
                 )
                 warning = (
-                    "Your previous turn changed files outside your allowed scope "
-                    f"({sorted(violations)}) and was rolled back. Edit ONLY the files "
-                    f"listed in the file scope: {list(task.files)}."
+                    f"{stray_warning}{scope_warning}Edit ONLY the files listed in the "
+                    f"file scope: {list(task.files)}."
                 )
                 continue
             raise ReviewAbort(
-                f"task {task.id}: second scope violation {sorted(violations)} "
-                f"outside {list(task.files)}"
+                f"task {task.id}: second scope violation "
+                f"{sorted(violations) + strays} outside {list(task.files)}"
+                + (f" / outside worktree {worktree}" if strays else "")
             )
 
         # Anti-spin: accepting a remark while writing nothing is a contradiction.

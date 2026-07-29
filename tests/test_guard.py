@@ -368,3 +368,141 @@ def test_spar_and_git_dir_changes_ignored(tmp_path):
     (repo_dir / ".git" / "some_marker").write_text("noise", encoding="utf-8")
 
     guard(_ctx(artifact))  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Dependency/cache trees are skipped outright
+#
+# Regression: a side running the project's test suite made vitest rewrite
+# app/backend/node_modules/.vite/vitest/<hash>/results.json. The guard walked
+# node_modules, saw a foreign change, and tried `git checkout --` on a
+# gitignored path -- which cannot succeed -- so the turn was rejected twice
+# and the debate aborted before the second side ever spoke.
+# ---------------------------------------------------------------------------
+
+
+def test_node_modules_changes_ignored(tmp_path):
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    (repo_dir / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    cache = repo_dir / "app" / "node_modules" / ".vite" / "vitest" / "abc"
+    cache.mkdir(parents=True)
+    results = cache / "results.json"
+    results.write_text('{"pass": 1}', encoding="utf-8")
+    _commit_all(repo_dir)
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    results.write_text('{"pass": 2}', encoding="utf-8")  # test run rewrote the cache
+    (cache / "new-cache-entry").write_text("x", encoding="utf-8")
+
+    guard(_ctx(artifact))  # should not raise
+
+    # left alone: the guard must not try to roll back build caches
+    assert results.read_text(encoding="utf-8") == '{"pass": 2}'
+
+
+def test_node_modules_deletion_ignored(tmp_path):
+    """Deleting a cache file must not trip the guard either -- that was the
+    second violation that turned a retry into an abort."""
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    cache = repo_dir / "node_modules" / ".vite"
+    cache.mkdir(parents=True)
+    results = cache / "results.json"
+    results.write_text("{}", encoding="utf-8")
+    _commit_all(repo_dir)
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    results.unlink()
+
+    guard(_ctx(artifact))  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# scope_ignore patterns
+# ---------------------------------------------------------------------------
+
+
+def test_scope_ignore_pattern_excludes_path(tmp_path):
+    repo_dir = tmp_path
+    _init_git_repo(repo_dir)
+    spar_dir = repo_dir / ".spar"
+    spar_dir.mkdir(parents=True)
+    artifact = spar_dir / "artifact.md"
+    guard = Guard(
+        repo_dir=repo_dir,
+        artifact_path=artifact,
+        spar_dir=spar_dir,
+        scope_ignore=["*.o", "app/dist/"],
+    )
+    artifact.write_text("content", encoding="utf-8")
+    (repo_dir / "app" / "dist").mkdir(parents=True)
+    _commit_all(repo_dir)
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    (repo_dir / "main.o").write_text("obj", encoding="utf-8")
+    (repo_dir / "app" / "dist" / "bundle.js").write_text("bundle", encoding="utf-8")
+
+    guard(_ctx(artifact))  # should not raise
+
+    # ignored artifacts are left in place, not deleted as "new foreign files"
+    assert (repo_dir / "main.o").exists()
+    assert (repo_dir / "app" / "dist" / "bundle.js").exists()
+
+
+def test_scope_ignore_does_not_hide_real_source_changes(tmp_path):
+    repo_dir = tmp_path
+    _init_git_repo(repo_dir)
+    spar_dir = repo_dir / ".spar"
+    spar_dir.mkdir(parents=True)
+    artifact = spar_dir / "artifact.md"
+    guard = Guard(
+        repo_dir=repo_dir,
+        artifact_path=artifact,
+        spar_dir=spar_dir,
+        scope_ignore=["*.o"],
+    )
+    artifact.write_text("content", encoding="utf-8")
+    src = repo_dir / "main.c"
+    src.write_text("original content", encoding="utf-8")
+    _commit_all(repo_dir)
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    src.write_text("side edited the source", encoding="utf-8")
+
+    with pytest.raises(GuardViolation, match="foreign changes"):
+        guard(_ctx(artifact))
+
+    # tracked + clean before the turn -> rolled back to HEAD
+    assert src.read_text(encoding="utf-8") == "original content"
+
+
+# ---------------------------------------------------------------------------
+# Untracked (gitignored) foreign file -> manual cleanup, no bogus checkout
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_modified_untracked_file_reports_manual_not_checkout(tmp_path):
+    guard, repo_dir, artifact = _make_guard(tmp_path)
+    artifact.write_text("content", encoding="utf-8")
+    (repo_dir / ".gitignore").write_text("generated.log\n", encoding="utf-8")
+    log = repo_dir / "generated.log"
+    log.write_text("pre-existing, gitignored", encoding="utf-8")
+    _commit_all(repo_dir)
+
+    guard.pre_turn()
+    artifact.write_text("content updated", encoding="utf-8")
+    log.write_text("rewritten during the turn", encoding="utf-8")
+
+    with pytest.raises(GuardViolation, match="manual cleanup required") as exc_info:
+        guard(_ctx(artifact))
+
+    msg = str(exc_info.value)
+    assert "generated.log" in msg
+    # no attempted (and doomed) `git checkout --` on an untracked path
+    assert "git checkout failed" not in msg
+    assert log.read_text(encoding="utf-8") == "rewritten during the turn"

@@ -9,8 +9,14 @@ three checks in order — artifact sanity, "not gutted" (no drastic shrink),
 and "no foreign changes" (nothing outside the artifact was touched) — and
 raises :class:`GuardViolation` on the first failure. A foreign-changes
 violation first attempts to roll back what it safely can (deleting new
-files, ``git checkout --`` for files that were clean before the turn) and
-reports anything it could not safely touch as "manual cleanup required".
+files, ``git checkout --`` for *tracked* files that were clean before the
+turn) and reports anything it could not safely touch as "manual cleanup
+required".
+
+The inventory skips dependency/cache trees by name (``_ALWAYS_SKIP_DIR_NAMES``)
+plus whatever ``[execution] scope_ignore`` matches, so build artifacts a side
+legitimately produces by running the test suite never count as foreign
+changes.
 
 ``GuardContext`` and ``GuardViolation`` are defined in :mod:`spar.orchestrator`
 (the hook contract) and re-exported here so both import paths work.
@@ -20,7 +26,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 
 from spar.orchestrator import GuardContext, GuardViolation
@@ -28,16 +36,77 @@ from spar.orchestrator import GuardContext, GuardViolation
 __all__ = ["Guard", "GuardContext", "GuardViolation"]
 
 
-_ALWAYS_SKIP_DIR_NAMES = {".git", "__pycache__"}
+# Dependency and cache trees: never sources, always huge, and routinely
+# rewritten by the very build/test commands a side legitimately runs during
+# its turn (e.g. vitest writing node_modules/.vite/**/results.json). Walking
+# them costs tens of thousands of stat() calls per turn and produces foreign
+# changes that no rollback can undo, so they are skipped outright. Ambiguous
+# output dirs (dist/, build/, target/, coverage/) are NOT hardcoded here --
+# use ``[execution] scope_ignore`` for those.
+_ALWAYS_SKIP_DIR_NAMES = {
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".vite",
+    ".turbo",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".parcel-cache",
+    ".gradle",
+}
+
+
+class _IgnoreMatcher:
+    """Minimal gitignore-flavoured matcher for ``scope_ignore`` patterns.
+
+    A pattern without ``/`` matches any path component (``*.pyc``,
+    ``coverage``, ``node_modules/``); a pattern with ``/`` matches the
+    repo-relative posix path, either as a glob or as a directory prefix
+    (``app/backend/dist/``). Trailing slashes are stripped -- a pattern
+    matches files and directories alike, which is what a scope guard wants.
+    """
+
+    def __init__(self, patterns: Iterable[str]) -> None:
+        self.name_pats: list[str] = []
+        self.path_pats: list[str] = []
+        for raw in patterns:
+            pat = raw.strip().rstrip("/")
+            if not pat:
+                continue
+            if "/" in pat:
+                self.path_pats.append(pat)
+            else:
+                self.name_pats.append(pat)
+
+    def __bool__(self) -> bool:
+        return bool(self.name_pats or self.path_pats)
+
+    def __call__(self, rel: str) -> bool:
+        base = rel.rsplit("/", 1)[-1]
+        for pat in self.name_pats:
+            if fnmatch(base, pat):
+                return True
+        for pat in self.path_pats:
+            if fnmatch(rel, pat) or rel.startswith(f"{pat.rstrip('*')}/"):
+                return True
+        return False
 
 
 def _walk_inventory(
-    repo_dir: Path, spar_dir: Path
+    repo_dir: Path, spar_dir: Path, ignore: Callable[[str], bool] | None = None
 ) -> tuple[dict[str, tuple[int, int]], set[str]]:
     """Map ``relative posix path -> (mtime_ns, size)`` for every file under
     ``repo_dir``, plus the set of relative posix paths of every directory
-    seen, skipping ``.git``, ``__pycache__`` (by name, anywhere in the tree)
-    and ``spar_dir`` (by resolved path, wherever it lives).
+    seen, skipping ``_ALWAYS_SKIP_DIR_NAMES`` (by name, anywhere in the tree),
+    ``spar_dir`` (by resolved path, wherever it lives) and anything ``ignore``
+    matches (by repo-relative posix path).
     """
     repo_dir = repo_dir.resolve()
     skip_abs = {spar_dir.resolve()}
@@ -52,6 +121,9 @@ def _walk_inventory(
                 continue
             if (root_path / d).resolve() in skip_abs:
                 continue
+            rel_dir = (root_path / d).relative_to(repo_dir).as_posix()
+            if ignore is not None and ignore(rel_dir):
+                continue
             kept.append(d)
         dirs[:] = kept
         for d in kept:
@@ -60,11 +132,13 @@ def _walk_inventory(
 
         for fname in files:
             fpath = root_path / fname
+            rel = fpath.relative_to(repo_dir).as_posix()
+            if ignore is not None and ignore(rel):
+                continue
             try:
                 st = fpath.stat()
             except OSError:
                 continue
-            rel = fpath.relative_to(repo_dir).as_posix()
             inventory[rel] = (st.st_mtime_ns, st.st_size)
     return inventory, dirs_seen
 
@@ -91,6 +165,34 @@ def _git_status_porcelain_z(repo_dir: Path) -> bytes:
     if result.returncode != 0:
         return b""
     return result.stdout
+
+
+def _tracked_paths(repo_dir: Path) -> set[str]:
+    """Every path git tracks in ``repo_dir`` (``git ls-files -z``).
+
+    A path outside this set has no committed baseline, so ``git checkout --``
+    on it always fails with "did not match any file(s) known to git" -- the
+    rollback must classify it as manual cleanup instead of attempting a
+    checkout. Untracked-but-not-dirty is not a contradiction: gitignored
+    paths are absent from plain ``git status --porcelain`` output too.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+    except OSError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {
+        field_.decode("utf-8", errors="surrogateescape")
+        for field_ in result.stdout.split(b"\0")
+        if field_
+    }
 
 
 def _dirty_paths_from_porcelain(raw: bytes) -> set[str]:
@@ -129,6 +231,7 @@ class _Snapshot:
     inventory: dict[str, tuple[int, int]]
     dirty_paths: set[str] = field(default_factory=set)
     dirs: set[str] = field(default_factory=set)
+    tracked_paths: set[str] = field(default_factory=set)
 
 
 class Guard:
@@ -140,6 +243,7 @@ class Guard:
         artifact_path: Path,
         spar_dir: Path,
         shrink_threshold: float = 0.6,
+        scope_ignore: Iterable[str] = (),
     ) -> None:
         self.repo_dir = Path(repo_dir)
         self.artifact_path = Path(artifact_path)
@@ -147,6 +251,8 @@ class Guard:
         self.shrink_threshold = shrink_threshold
         self._is_git = (self.repo_dir / ".git").exists()
         self._snapshot: _Snapshot | None = None
+        matcher = _IgnoreMatcher(scope_ignore)
+        self._ignore: Callable[[str], bool] | None = matcher if matcher else None
 
     # -- pre-turn --------------------------------------------------------
 
@@ -157,12 +263,18 @@ class Guard:
         artifact_size = (
             self.artifact_path.stat().st_size if self.artifact_path.exists() else 0
         )
-        inventory, dirs = _walk_inventory(self.repo_dir, self.spar_dir)
+        inventory, dirs = _walk_inventory(self.repo_dir, self.spar_dir, self._ignore)
         dirty_paths: set[str] = set()
+        tracked: set[str] = set()
         if self._is_git:
             dirty_paths = _dirty_paths_from_porcelain(_git_status_porcelain_z(self.repo_dir))
+            tracked = _tracked_paths(self.repo_dir)
         self._snapshot = _Snapshot(
-            artifact_size=artifact_size, inventory=inventory, dirty_paths=dirty_paths, dirs=dirs
+            artifact_size=artifact_size,
+            inventory=inventory,
+            dirty_paths=dirty_paths,
+            dirs=dirs,
+            tracked_paths=tracked,
         )
 
     # -- post-turn ---------------------------------------------------------
@@ -206,7 +318,9 @@ class Guard:
         if self._snapshot is None:
             return
 
-        current_inventory, _current_dirs = _walk_inventory(self.repo_dir, self.spar_dir)
+        current_inventory, _current_dirs = _walk_inventory(
+            self.repo_dir, self.spar_dir, self._ignore
+        )
         artifact_rel = self._artifact_rel()
         pre_inv = self._snapshot.inventory
 
@@ -258,8 +372,14 @@ class Guard:
             if not self._is_git:
                 manual.append(rel)
                 continue
+            if rel not in self._snapshot.tracked_paths:
+                # untracked before the turn (typically gitignored build output):
+                # git has no baseline, so `git checkout --` would only fail with
+                # "did not match any file(s) known to git".
+                manual.append(rel)
+                continue
             if rel in self._snapshot.dirty_paths:
-                # already dirty (or untracked) before the turn: no safe baseline
+                # already dirty before the turn: no safe baseline
                 manual.append(rel)
                 continue
             checkoutable.append(rel)

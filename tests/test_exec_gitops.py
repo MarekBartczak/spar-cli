@@ -15,6 +15,8 @@ from spar.exec.gitops import (
     present_files,
     remove_worktree,
     rev_parse,
+    revert_paths,
+    status_paths,
 )
 
 
@@ -96,3 +98,34 @@ def test_present_files_excludes_deletions(tmp_path):
     # changed_files reports the deletion; present_files must not
     assert "doomed.txt" in changed_files(repo, base, "HEAD")
     assert present_files(repo, base, "HEAD") == ("new.txt",)
+
+
+def test_status_paths_reports_full_nested_paths(repo):
+    (repo / "seed.txt").write_text("y\n", encoding="utf-8")
+    nested = repo / "src" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "stray.py").write_text("x\n", encoding="utf-8")
+
+    paths = set(status_paths(repo))
+    # untracked nested file by FULL path, not collapsed to 'src/'
+    assert paths == {"seed.txt", "src/deep/stray.py"}
+
+
+def test_revert_paths_restores_tracked_and_deletes_untracked(repo):
+    (repo / "seed.txt").write_text("clobbered\n", encoding="utf-8")
+    (repo / "stray.txt").write_text("stray\n", encoding="utf-8")
+    nested = repo / "pkg" / "sub"
+    nested.mkdir(parents=True)
+    (nested / "deep.txt").write_text("deep\n", encoding="utf-8")
+
+    revert_paths(repo, status_paths(repo))
+
+    assert (repo / "seed.txt").read_text(encoding="utf-8") == "x\n"
+    assert not (repo / "stray.txt").exists()
+    assert not (nested / "deep.txt").exists()
+    assert is_clean(repo)
+
+
+def test_revert_paths_is_idempotent_on_missing_paths(repo):
+    revert_paths(repo, ["never-existed.txt"])
+    assert is_clean(repo)

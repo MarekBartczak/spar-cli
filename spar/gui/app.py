@@ -15,18 +15,23 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QFileDialog,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QSplitter,
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,17 +40,62 @@ from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
+from spar.gui.instances import (
+    SingleInstanceGuard,
+    push_recent_project,
+    recent_projects,
+    scoped,
+    spawn_new_window,
+    window_title,
+)
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
 from spar.gui.sidepane import SidePane
 from spar.gui.stream import LiveLogTailer, StreamPane
 from spar.gui.theme import build_qss
+from spar.automode import AUTO_EXTEND_LIMIT, AUTO_EXTEND_ROUNDS, auto_gate_decision, gate_extend_key
 from spar.status import build_status
+from spar.usage import UsageTracker, format_usage
 
-__all__ = ["MainWindow", "Toolbar", "StreamPane", "SidePane", "main_gui"]
+__all__ = [
+    "MainWindow",
+    "Toolbar",
+    "StreamPane",
+    "SidePane",
+    "main_gui",
+    "app_icon",
+    "apply_app_identity",
+]
 
 _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Diff"]
+
+# Identity the desktop shell keys off. ``APP_ID`` MUST equal the installed
+# desktop entry's basename (``~/.local/share/applications/spar.desktop``, from
+# packaging/linux/spar.desktop.in) and its ``StartupWMClass``: on Wayland the
+# compositor matches a window to its .desktop through this name, and that match
+# is what supplies the taskbar icon and label. Without it Qt falls back to
+# argv[0] -- and the detached launcher re-execs as ``python -m
+# spar.gui.launcher``, so the dock showed "launcher.py" with a generic icon.
+APP_ID = "spar"
+APP_DISPLAY_NAME = "Spar"
+
+_ICON_PATH = Path(__file__).resolve().parent / "assets" / "spar.svg"
+
+
+def app_icon() -> QIcon:
+    """The application icon (empty ``QIcon`` if the asset is missing)."""
+    return QIcon(str(_ICON_PATH)) if _ICON_PATH.exists() else QIcon()
+
+
+def apply_app_identity(app) -> None:
+    """Name/icon the app so the desktop shell shows Spar, not ``launcher.py``."""
+    app.setApplicationName(APP_ID)
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    app.setDesktopFileName(APP_ID)
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
 # QSplitter sizes expressing the required 1.7 : 1 left:right ratio.
 _SPLITTER_SIZES = [1700, 1000]
@@ -93,6 +143,15 @@ class Toolbar(QToolBar):
             action.setEnabled(False)
             self.actions_by_label[label] = action
 
+        # ADR 0007: one window per project — this button opens ANOTHER
+        # project in a NEW process, never swaps the project under this one.
+        self.project_button = QToolButton(self)
+        self.project_button.setObjectName("projectButton")
+        self.project_button.setText("Projekt")
+        self.project_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.project_button.setMenu(QMenu(self.project_button))
+        self.addWidget(self.project_button)
+
 
 class RightColumn(QWidget):
     """Right-side tool column: SidePane (Taski + gate) over the chat panel.
@@ -135,7 +194,12 @@ class MainWindow(QMainWindow):
     def __init__(self, project_dir: "str | Path", parent=None):
         super().__init__(parent)
         self.project_dir = Path(project_dir)
-        self.setWindowTitle(f"spar — {self.project_dir.name}")
+        self.setWindowTitle(window_title(self.project_dir))
+        # Also per-window: some window managers read the window's own icon
+        # rather than the application's.
+        icon = app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         # A real default size: without it the window starts at whatever tiny
         # size Qt picks before a show(), which is too small for the splitter
         # to honor the 1.7:1 ratio against the side pane's now-nonzero
@@ -144,6 +208,7 @@ class MainWindow(QMainWindow):
 
         self.toolbar = Toolbar(self)
         self.addToolBar(self.toolbar)
+        self._rebuild_project_menu()
 
         # Side's config model, resolved once per session, feeds StreamPane's
         # human-readable prefix translation for debate rounds (fix 4). Built
@@ -264,7 +329,36 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._startup_label)
         self.statusBar().addPermanentWidget(self._startup_progress)
 
+        # Auto mode: answers the gates that carry no human decision (see
+        # spar/automode.py for the policy and what it deliberately refuses).
+        # Per-project, persisted, OFF by default -- it resumes runs on its own.
+        self._auto_checkbox = QCheckBox("Auto", self)
+        self._auto_checkbox.setObjectName("autoModeCheckbox")
+        self._auto_checkbox.setToolTip(
+            f"Auto: żadnych pytań. Brak rozwiązania → +{AUTO_EXTEND_ROUNDS} rundy "
+            f"(maks. {AUTO_EXTEND_LIMIT}x, potem accept).\n"
+            "consensus → accept + exec, final merge → accept, "
+            "zepsuty test= zadania → accept. Nigdy abort."
+        )
+        self._auto_extends: dict[str, int] = {}
+        self._auto_answered: set[tuple] = set()
+        self._last_status: dict = {}
+        self.statusBar().addPermanentWidget(self._auto_checkbox)
+
+        # Per-side token spend, derived from the transcripts on every status
+        # poll (see spar/usage.py -- incremental, so it re-reads only the file
+        # the live run is currently appending to).
+        self._usage_tracker = UsageTracker(self.project_dir / ".spar" / "transcript")
+        self._usage_label = QLabel("", self)
+        self._usage_label.setObjectName("usageLabel")
+        self._usage_label.setToolTip("zużycie tokenów: ↓ wejście (z cache), ↑ wyjście")
+        self.statusBar().addPermanentWidget(self._usage_label)
+
+        # ADR 0007: layout state belongs to THIS project, not to the app —
+        # with several windows open, a global key means the last window
+        # closed clobbers everyone else's layout.
         self._settings = QSettings("spar", "gui")
+        self._restore_window_geometry()
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
         self._restore_right_split_state()
@@ -272,14 +366,19 @@ class MainWindow(QMainWindow):
 
         # ADR 0006: restore the persisted centre view (Strumień | Pliki) and
         # wire the left-rail toggles.
-        centre_view = self._settings.value("rails/centre_view", "stream", type=str)
+        centre_view = self._settings.value(self._skey("rails/centre_view"), "stream", type=str)
         if centre_view not in ("stream", "files"):
             centre_view = "stream"
         self._set_centre_view(centre_view, persist=False)
         self.left_rail.toggled.connect(self._on_left_rail_toggled)
 
-        tasks_visible = self._settings.value("rails/tasks_visible", True, type=bool)
-        chat_visible = self._settings.value("rails/chat_visible", True, type=bool)
+        auto_mode = self._settings.value(self._skey("auto_mode"), False, type=bool)
+        self._auto_checkbox.setChecked(bool(auto_mode))
+        self._auto_checkbox.setText("AUTO" if auto_mode else "Auto")
+        self._auto_checkbox.toggled.connect(self._on_auto_toggled)
+
+        tasks_visible = self._settings.value(self._skey("rails/tasks_visible"), True, type=bool)
+        chat_visible = self._settings.value(self._skey("rails/chat_visible"), True, type=bool)
         self.right_rail.set_checked("tasks", tasks_visible)
         self.right_rail.set_checked("chat", chat_visible)
         self.right_rail.set_button_visible("gate", False)
@@ -337,6 +436,57 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Runner wiring
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Auto mode
+    # ------------------------------------------------------------------
+    def _on_auto_toggled(self, checked: bool) -> None:
+        self._settings.setValue(self._skey("auto_mode"), checked)
+        # Armed state is loud: red + uppercase (QSS #autoModeCheckbox:checked).
+        self._auto_checkbox.setText("AUTO" if checked else "Auto")
+        if checked:
+            # A gate may already be pending when auto mode is switched on --
+            # act on it now instead of waiting for something to change.
+            self.stream_pane.append_notice("auto: włączone")
+            self._maybe_auto_answer_gate(self._last_status.get("pending_gate"))
+        else:
+            self.stream_pane.append_notice("auto: wyłączone")
+
+    def _maybe_auto_answer_gate(self, pending_gate: "dict | None") -> None:
+        """Answer a pending gate on the user's behalf when auto mode allows it.
+
+        Fires at most once per gate identity: the status poll re-reports the
+        same pending gate every 2s until the resumed child clears it, and a
+        second resume would race the first (the runner would refuse it as
+        busy, but the notice spam alone is reason enough to latch).
+        """
+        if not pending_gate or not self._auto_checkbox.isChecked():
+            return
+        identity = self._gate_identity(pending_gate)
+        if identity in self._auto_answered:
+            return
+
+        key = gate_extend_key(pending_gate)
+        decision = auto_gate_decision(pending_gate, self._auto_extends.get(key, 0))
+        if decision.value is None:
+            # Deferred to the human: say why ONCE, then stay quiet about it.
+            self._auto_answered.add(identity)
+            self.stream_pane.append_notice(f"auto: czekam na ciebie — {decision.reason}")
+            return
+
+        self._auto_answered.add(identity)
+        if decision.value.startswith("extend:"):
+            self._auto_extends[key] = self._auto_extends.get(key, 0) + 1
+        self.stream_pane.append_notice(f"auto: {decision.reason}")
+        self.runner.resume(decision.value, auto_exec=decision.auto_exec)
+
+    def _refresh_usage(self) -> None:
+        """Update the status bar's per-side token counter (never fatal)."""
+        try:
+            totals = self._usage_tracker.refresh()
+        except Exception:
+            return
+        self._usage_label.setText(format_usage(totals, list(self._side_models)))
+
     def _wire_toolbar(self) -> None:
         actions = self.toolbar.actions_by_label
         actions[toolbar_mod.NEW_DEBATE].triggered.connect(self._on_new_debate)
@@ -350,6 +500,8 @@ class MainWindow(QMainWindow):
         actions = self.toolbar.actions_by_label
         actions["Plan"].setEnabled(bool(status.get("artifact")))
         actions["Diff"].setEnabled(bool(status.get("branches")))
+
+        self._refresh_usage()
 
         tasks = status.get("tasks") or {}
         task_models = {
@@ -373,6 +525,9 @@ class MainWindow(QMainWindow):
                 self.right_rail.set_checked("tasks", True)
                 self._on_rail_toggled("tasks", True)  # persists + re-applies layout
         self._prev_gate_key = gate_key if pending else None
+
+        self._last_status = status
+        self._maybe_auto_answer_gate(pending_gate)
 
     @staticmethod
     def _gate_identity(pending_gate: "dict | None") -> "tuple | None":
@@ -406,7 +561,7 @@ class MainWindow(QMainWindow):
         self._column_shown = show_column
 
     def _on_rail_toggled(self, key: str, checked: bool) -> None:
-        self._settings.setValue(f"rails/{key}_visible", checked)
+        self._settings.setValue(self._skey(f"rails/{key}_visible"), checked)
         self._apply_rail_layout()
 
     def _on_rail_clicked(self, key: str) -> None:
@@ -445,7 +600,7 @@ class MainWindow(QMainWindow):
         self.left_rail.set_checked("stream", key == "stream")
         self.left_rail.set_checked("files", key == "files")
         if persist:
-            self._settings.setValue("rails/centre_view", key)
+            self._settings.setValue(self._skey("rails/centre_view"), key)
 
     def _on_left_rail_toggled(self, key: str, checked: bool) -> None:
         if not checked:
@@ -650,22 +805,84 @@ class MainWindow(QMainWindow):
         )
         return True
 
+    def _rebuild_project_menu(self) -> None:
+        """Populate the Projekt dropdown: picker + recent projects."""
+        menu = self.toolbar.project_button.menu()
+        menu.clear()
+        pick = menu.addAction("Otwórz projekt…")
+        pick.triggered.connect(self._pick_project)
+        current = str(Path(self.project_dir).resolve())
+        others = [p for p in recent_projects() if p != current]
+        if others:
+            menu.addSeparator()
+            for path in others:
+                action = menu.addAction(window_title(path).removeprefix("spar — "))
+                action.setData(path)
+                action.triggered.connect(
+                    lambda _checked=False, p=path: self.open_project(p)
+                )
+
+    def _pick_project(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Wybierz katalog projektu",
+            str(Path(self.project_dir).parent),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if selected:
+            self.open_project(selected)
+
+    def open_project(self, project_dir: "str | Path") -> None:
+        """Open ``project_dir`` in a NEW window (a new OS process)."""
+        push_recent_project(project_dir)
+        if not spawn_new_window(project_dir):
+            QMessageBox.warning(
+                self,
+                "spar",
+                f"Nie udało się otworzyć nowego okna dla:\n{project_dir}",
+            )
+            return
+        self._rebuild_project_menu()
+
+    def raise_to_front(self) -> None:
+        """Bring this project's window forward (second-launch request)."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _skey(self, key: str) -> str:
+        """Project-scoped QSettings key (ADR 0007)."""
+        return scoped(self.project_dir, key)
+
+    def _restore_window_geometry(self) -> None:
+        geo = self._settings.value(self._skey("window/geometry"))
+        if geo is not None:
+            self.restoreGeometry(geo)
+
+    def _save_window_geometry(self) -> None:
+        self._settings.setValue(self._skey("window/geometry"), self.saveGeometry())
+
     def _restore_splitter_state(self) -> None:
-        state = self._settings.value("mainSplitter/state")
+        state = self._settings.value(self._skey("mainSplitter/state"))
         if state is not None:
             self.splitter.restoreState(state)
 
     def _save_splitter_state(self, *_args) -> None:
-        self._settings.setValue("mainSplitter/state", self.splitter.saveState())
+        self._settings.setValue(
+            self._skey("mainSplitter/state"), self.splitter.saveState()
+        )
 
     def _restore_right_split_state(self) -> None:
-        state = self._settings.value("rails/right_split")
+        state = self._settings.value(self._skey("rails/right_split"))
         if state is not None:
             self.right_column.splitter.restoreState(state)
 
     def _save_right_split_state(self, *_args) -> None:
         self._settings.setValue(
-            "rails/right_split", self.right_column.splitter.saveState()
+            self._skey("rails/right_split"), self.right_column.splitter.saveState()
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
@@ -676,6 +893,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self._double_shift)
+        self._save_window_geometry()
         self._save_splitter_state()
         self._save_right_split_state()
         self.tailer.stop()
@@ -691,6 +909,9 @@ class MainWindow(QMainWindow):
         # while running — review #2).
         self.chat_panel.stop_session()
         self.files_view.stop_search()   # review #3: idempotent search-thread stop
+        guard = getattr(self, "_instance_guard", None)
+        if guard is not None:
+            guard.release()
         super().closeEvent(event)
 
 
@@ -712,9 +933,23 @@ def main_gui(argv: list[str]) -> int:
     project_dir = Path(args.project_dir).resolve() if args.project_dir else Path.cwd()
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    apply_app_identity(app)
     app.setStyleSheet(build_qss())
 
+    # ADR 0007: one window per project. A second launch on the same
+    # directory raises the running window and exits instead of opening a
+    # read-only twin. try_claim() has already asked the owner to raise its
+    # window when it returns False — do NOT send a second request here.
+    guard = SingleInstanceGuard(project_dir)
+    if not guard.try_claim():
+        return 0
+
+    push_recent_project(project_dir)
     window = MainWindow(project_dir)
+    window._instance_guard = guard
+    # attach(), not a bare connect(): window construction pumps the event
+    # loop, so a raise may already be buffered.
+    guard.attach(window.raise_to_front)
     window.show()
 
     return app.exec()

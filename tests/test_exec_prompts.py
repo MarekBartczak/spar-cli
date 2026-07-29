@@ -181,3 +181,17 @@ def test_review_protocol_forbids_reraising_rejected_remark_verbatim():
     assert "do not re-raise the same remark verbatim" in low
     assert "re-raise only with new evidence" in low
     assert "escalates the dispute to the user" in low
+
+
+def test_impl_prompt_names_the_worktree_root_when_given():
+    # The one root every edited path must resolve under: a model that resolves a
+    # scope path against another checkout of the same repo writes a stray the
+    # task branch never sees (live incident).
+    p = build_impl_prompt(T, Path(".spar/artifact.md"), [], worktree=Path("/repo/.spar/wt/claude"))
+    assert "/repo/.spar/wt/claude" in p
+    assert "MUST resolve inside it" in p
+
+
+def test_impl_prompt_omits_worktree_section_when_not_given():
+    p = build_impl_prompt(T, Path(".spar/artifact.md"), [])
+    assert "working directory is the git worktree" not in p

@@ -7,6 +7,12 @@ is needed, add a token here first.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+# QSS ``image: url(...)`` needs a resolvable path, and the gui may run from any
+# cwd, so asset urls are built from this package's location.
+_ASSETS = Path(__file__).resolve().parent / "assets"
+
 TOKENS: dict[str, str] = {
     "ground": "#14171c",
     "panel": "#1b1f26",
@@ -20,6 +26,9 @@ TOKENS: dict[str, str] = {
     "ok": "#6fbf73",
     "warn": "#e0b154",
     "gate": "#e0679a",
+    # Loud red for a mode that acts on the user's behalf (auto mode): it must
+    # be impossible to miss that gates are being answered without them.
+    "armed": "#e5484d",
 }
 
 __all__ = ["TOKENS", "build_qss"]
@@ -63,6 +72,35 @@ def build_qss() -> str:
         background-color: {t['panel']};
         color: {t['muted']};
         border-top: 1px solid {t['line']};
+    }}
+
+    /* Auto mode answers gates without asking, so an ARMED toggle shouts.
+       The indicator is a real tick (an SVG in armed red): filling the
+       indicator's background instead just paints over Qt's checkmark and
+       leaves a bare colored square. */
+    #autoModeCheckbox {{
+        color: {t['muted']};
+        padding: 1px 6px;
+        border: 1px solid transparent;
+        border-radius: 3px;
+        spacing: 5px;
+    }}
+    #autoModeCheckbox::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t['line']};
+        border-radius: 3px;
+        background-color: {t['panel-alt']};
+    }}
+    #autoModeCheckbox:checked {{
+        color: {t['armed']};
+        font-weight: bold;
+        border: 1px solid {t['armed']};
+    }}
+    #autoModeCheckbox::indicator:checked {{
+        border: 1px solid {t['armed']};
+        background-color: transparent;
+        image: url({_ASSETS.joinpath('check-armed.svg').as_posix()});
     }}
 
     QSplitter::handle {{

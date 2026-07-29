@@ -6,6 +6,38 @@ SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
 
+## Stray writes outside the worktree now fail the turn (2026-07-29)
+
+Live incident on a DofiHub run: the t2 implementer wrote its handler through an
+absolute path into the MAIN repo checkout, noticed on its next turn, and
+re-wrote the file correctly inside its worktree. The stray untracked copy stayed
+in the main checkout and killed the run several steps later, at merge time:
+
+```
+error: The following untracked working tree files would be overwritten by merge:
+    app/backend/src/handlers/admin/getAdminIntegrationExportLink.ts
+```
+
+The scope guard only ever inspected the worktree, so a write that missed the
+worktree entirely was invisible to it. Three changes close this:
+
+- `spar/exec/review.py` — the per-turn guard now diffs `git status` of the MAIN
+  checkout across the turn (`repo=` argument, passed from every
+  `_implementer_turn` call site). Anything that became dirty there is swept via
+  `gitops.revert_paths`, the worktree is rolled back, and the turn is retried
+  with a warning naming the worktree; a second offence aborts the task. Dirt
+  that predates the turn is reported, never swept.
+- `spar/exec/prompts.py` — the implementer prompt now names the worktree as the
+  one root every edited path must resolve under (it previously never mentioned
+  it, so the model had to guess).
+- `spar/exec/loop.py` — `_sweep_repo_strays` runs before the task merge and
+  before the final merge, so a stray from any other source cannot turn into a
+  hard `GitError` mid-run.
+
+Recovery for a run already stuck this way: delete the stray from the main
+checkout (the good copy is committed on the task branch) and
+`spar exec --continue`.
+
 ## Intel macOS DMG packaging (2026-07-14)
 
 An isolated macOS packaging path now builds the PySide6 desktop GUI as an
@@ -153,6 +185,61 @@ the user's grill-with-docs skill; finish is detected by a content-hash
 comparison on `.spar/requirements.md`, whose content then pre-fills the
 new-debate task field via "Użyj w debacie". Manual smoke test (live grill
 session end-to-end in the running GUI) still pending.
+
+## Multi-project GUI landed (2026-07-28, `3f35fa8..HEAD` on feat/multi-project-gui)
+
+One window = one project = one OS process, WebStorm-style, no instance cap
+(ADR `docs/adr/0007-one-window-per-project.md`; plan
+`docs/superpowers/plans/2026-07-28-multi-project-gui.md`, 5 challenge rounds,
+9 MUSTs, all accepted). What shipped, per task:
+
+1. `spar/gui/instances.py` — per-project identity (`project_key`, sha1 of the
+   resolved path, 12 hex chars), `scoped()` QSettings keys, global
+   recent-projects list.
+2. Layout state scoped per project: `mainSplitter/state`,
+   `rails/right_split`, `rails/centre_view`, `rails/{tasks,chat}_visible`,
+   `files/tree_split`, plus a new `window/geometry`. Global on purpose:
+   `files/mask_history`, `files/search_dialog_geometry`, `recent_projects`.
+   No migration of the old global keys (first launch per project = defaults).
+3. Window title is `spar — <name> (<parent>)` with `$HOME` collapsed to `~`,
+   so two same-named repos are distinguishable.
+4. Toolbar `Projekt` menu: `Otwórz projekt…` picker + recent projects, each
+   opening a NEW detached process (`open -n` for the frozen macOS bundle).
+5. Single instance per project: `SingleInstanceGuard` over a
+   `QLocalServer`/`QLocalSocket` named `spar-gui-<project key>`. A duplicate
+   launch raises the running window and exits 0. `RunnerState.LOCKED` is
+   untouched — it still covers a foreign ENGINE holding `.spar/lock`.
+
+Two PySide6 traps the review caught, both verified against the installed
+PySide6, both now load-bearing in the code and the ADR: `QLocalSocket.
+waitForBytesWritten()` returns False after a successful `flush()` even though
+the peer received the bytes (delivery is proven by `bytesToWrite() == 0`), and
+`QLocalServer.removeServer()` succeeds against a LIVE listener, after which
+both servers report `isListening()` — hence probe-before-remove and a
+`release()` that no-ops for a guard that never claimed.
+
+Follow-up in the same branch: a `spar-gui` console script
+(`spar/gui/launcher.py` — `spar-gui [PATH|--dir PATH] [--pick]`, a file
+argument resolves to its directory, a missing path falls back to the picker)
+plus a per-user Ubuntu launcher in `packaging/linux/` (`spar.desktop.in`
+template, SVG icon, idempotent `install.sh` that symlinks
+`~/.local/bin/spar-gui`, installs the menu entry with an absolute Exec path —
+a graphical session does not read `~/.bashrc` — and registers
+`inode/directory` so Nautilus can open a folder with Spar). The menu entry
+passes `--pick` because a desktop launch has no useful cwd. `spar-gui` also
+DETACHES by default (live finding: it held the terminal, unlike `code`): it
+re-execs `python -m spar.gui.launcher` with `start_new_session=True` and a
+`SPAR_GUI_DETACHED` marker so the child runs the window instead of forking
+again, streams Qt output to `~/.cache/spar/gui.log` (it would be lost with the
+terminal), falls back to running in the foreground if the fork fails, and
+honours `--foreground`. Measured: prompt back in ~120 ms, child is its own
+session leader with no tty.
+
+Suite: **1090 passed, 2 skipped** (was 1035). **Manual multi-window smoke is
+pending (user-driven):** two projects side by side with a run in one; distinct
+per-window layouts across restarts; a third launch on an open project raising
+its window; `Projekt → Otwórz projekt…` opening a third window; and on the
+macOS bundle, `open -n` really starting a second `Spar.app`.
 
 ## Where things are
 

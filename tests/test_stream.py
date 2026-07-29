@@ -69,3 +69,38 @@ def test_spar_dir_created_if_missing(tmp_path):
     sink = StreamSink(spar_dir, quiet=False, stdout=out)
     sink.close()
     assert (spar_dir / "live.log").exists()
+
+
+def test_event_prefixes_every_physical_line_of_a_multiline_payload(tmp_path):
+    # An embedded newline used to emit prefix-less physical lines, which
+    # readers attribute to the wrong source: the GUI pane classifies a
+    # prefix-less line as spar's OWN log (stream.py's _FILTER_SPAR), so a
+    # side's own output vanished when filtering by that side.
+    out = io.StringIO()
+    sink = StreamSink(tmp_path, quiet=False, stdout=out)
+    sink.event("A r0", "exec: run this\nand that")
+    sink.close()
+
+    expected = "[A r0] exec: run this\n[A r0] and that\n"
+    assert out.getvalue() == expected
+    assert (tmp_path / "live.log").read_text(encoding="utf-8") == expected
+
+
+def test_event_keeps_blank_lines_prefixed(tmp_path):
+    out = io.StringIO()
+    sink = StreamSink(tmp_path, quiet=False, stdout=out)
+    sink.event("A r0", "para one\n\npara two")
+    sink.close()
+
+    assert out.getvalue() == "[A r0] para one\n[A r0] \n[A r0] para two\n"
+
+
+def test_log_lines_stay_unprefixed(tmp_path):
+    # spar's own log lines are the ONLY prefix-less lines in live.log -- that
+    # is what the GUI's "spar" filter chip keys off.
+    out = io.StringIO()
+    sink = StreamSink(tmp_path, quiet=False, stdout=out)
+    sink.log("spar: turn complete")
+    sink.close()
+
+    assert (tmp_path / "live.log").read_text(encoding="utf-8") == "spar: turn complete\n"

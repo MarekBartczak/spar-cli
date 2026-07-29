@@ -513,6 +513,7 @@ if _HAS_QT:
     from pygments import lex
     from pygments.token import Token
 
+    from spar.gui.instances import scoped
     from spar.gui.theme import TOKENS
 
     # review #6: watcher re-arm poll while a path is momentarily absent
@@ -1554,13 +1555,19 @@ if _HAS_QT:
             tab.deleteLater()
 
         # -- splitter persistence -----------------------------------------
+        def _skey(self, key: str) -> str:
+            """Project-scoped QSettings key (ADR 0007)."""
+            return scoped(self.project_dir, key)
+
         def _restore_split_state(self) -> None:
-            state = self._settings.value("files/tree_split")
+            state = self._settings.value(self._skey("files/tree_split"))
             if state is not None:
                 self.splitter.restoreState(state)
 
         def _save_split_state(self, *_args) -> None:
-            self._settings.setValue("files/tree_split", self.splitter.saveState())
+            self._settings.setValue(
+                self._skey("files/tree_split"), self.splitter.saveState()
+            )
 
     _FINDER_STALE_SECONDS = 5.0
     _FINDER_MAX_RESULTS = 200

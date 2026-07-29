@@ -360,3 +360,137 @@ def test_readonly_adapter_drops_edit_tools(tmp_path, monkeypatch):
         "Read",
         "review this",
     ]
+
+
+# --- _DisplayMapper: text deltas buffered to whole lines -------------------
+#
+# Regression: every ``text_delta`` used to be emitted as its own display line.
+# A delta is a network-sized chunk (observed on a real turn: 1..141 chars, of
+# 35 deltas 9 carried embedded newlines), so the live pane showed words cut in
+# half with the prefix repeated mid-word -- "[claude r1] Te" followed by
+# "[claude r1] raz naprawa ..." -- and delta-internal newlines produced
+# physical lines with no prefix at all (44 of 131 lines in one real log).
+
+
+def _text_delta(text, index=0):
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        },
+    }
+
+
+def _block_stop(index=0):
+    return {"type": "stream_event", "event": {"type": "content_block_stop", "index": index}}
+
+
+def _tool_start(name, index=0):
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "tool_use", "name": name},
+        },
+    }
+
+
+def _tool_input_delta(partial, index=0):
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": partial},
+        },
+    }
+
+
+def _drive(events):
+    from spar.adapters.claude import _DisplayMapper
+
+    mapper = _DisplayMapper()
+    out = []
+    for obj in events:
+        out.extend(mapper.map(obj))
+    return out
+
+
+def test_text_deltas_are_joined_into_whole_lines():
+    # the exact chunking seen on a real turn
+    out = _drive([
+        _text_delta("Te"),
+        _text_delta("raz naprawa niedozwolonych `model=haiku` i kom"),
+        _text_delta("end `yarn` w `test=`:\n"),
+    ])
+    assert out == ["Teraz naprawa niedozwolonych `model=haiku` i komend `yarn` w `test=`:"]
+
+
+def test_partial_text_line_is_not_emitted_until_its_newline():
+    out = _drive([_text_delta("half a sen")])
+    assert out == []
+
+
+def test_text_tail_is_flushed_on_content_block_stop():
+    out = _drive([_text_delta("no trailing newline"), _block_stop()])
+    assert out == ["no trailing newline"]
+
+
+def test_text_tail_is_flushed_by_terminal_result():
+    out = _drive([
+        _text_delta("tail without stop"),
+        {"type": "result", "duration_ms": 2000},
+    ])
+    assert out == ["tail without stop", "done (2.0s)"]
+
+
+def test_no_display_line_ever_contains_a_newline():
+    out = _drive([
+        _text_delta("one\ntwo\nthree"),
+        _block_stop(),
+    ])
+    assert out == ["one", "two", "three"]
+    assert all("\n" not in line for line in out)
+
+
+def test_blank_lines_are_preserved_as_paragraph_structure():
+    out = _drive([_text_delta("para one\n\npara two\n")])
+    assert out == ["para one", "", "para two"]
+
+
+def test_text_tail_is_flushed_when_a_tool_block_reuses_the_index():
+    out = _drive([
+        _text_delta("thinking out loud"),
+        _tool_start("Edit"),
+        _tool_input_delta(json.dumps({"file_path": "a.py"})),
+        _block_stop(),
+    ])
+    assert out == ["thinking out loud", "tool: Edit a.py"]
+
+
+def test_two_text_blocks_buffer_independently():
+    out = _drive([
+        _text_delta("first ", index=0),
+        _text_delta("second ", index=1),
+        _text_delta("block\n", index=1),
+        _text_delta("block\n", index=0),
+    ])
+    assert out == ["second block", "first block"]
+
+
+# --- one tool call == one display line -------------------------------------
+
+
+def test_multiline_tool_argument_is_collapsed_to_one_line():
+    # A heredoc script emitted verbatim left its body as prefix-less lines.
+    command = "cd /repo; python3 - <<'PY'\nimport pathlib\np = pathlib.Path('x')\nPY"
+    out = _drive([
+        _tool_start("Bash"),
+        _tool_input_delta(json.dumps({"command": command})),
+        _block_stop(),
+    ])
+    assert out == ["tool: Bash cd /repo; python3 - <<'PY' import pathlib p = pathlib.Path('x') PY"]
+    assert "\n" not in out[0]

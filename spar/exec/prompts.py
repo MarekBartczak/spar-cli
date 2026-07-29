@@ -17,6 +17,7 @@ def build_impl_prompt(
     artifact_plan_path: Path,
     open_remarks: list[StateRemark],
     warning: str | None = None,
+    worktree: Path | None = None,
 ) -> str:
     """Build a prompt for the implementer (edit phase).
 
@@ -32,6 +33,11 @@ def build_impl_prompt(
         artifact_plan_path: Path to the artifact plan
         open_remarks: List of open StateRemark to address
         warning: Optional warning text to include
+        worktree: The git worktree the turn runs in. When given, the prompt
+            names it as the ONE root every edited path must live under: a model
+            that resolves a scope path against the main repo checkout instead
+            writes a stray that the task branch never sees and that later
+            collides with the branch's merge (live incident).
 
     Returns:
         A formatted prompt string
@@ -61,6 +67,15 @@ def build_impl_prompt(
         remarks_section = ""
         instruction = "Implement the task according to the plan. Do not merely describe the change."
 
+    worktree_section = ""
+    if worktree is not None:
+        worktree_section = (
+            f"\nYour working directory is the git worktree {worktree}. Every path you "
+            "read or write MUST resolve inside it — the file scope above is relative to "
+            "THIS directory, not to any other checkout of the same repository. Writing "
+            "outside it fails the turn and is discarded.\n"
+        )
+
     warning_section = ""
     if warning:
         warning_section = f"\n\nWarning: {warning}"
@@ -75,7 +90,7 @@ Description: {task.description}
 
 Files in scope (edit ONLY these files):
 {files_list}
-
+{worktree_section}
 Read the plan at {artifact_plan_path} for context.
 
 {instruction}{remarks_section}{warning_section}

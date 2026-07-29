@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from spar.gui import theme
+from spar.gui.instances import scoped
 from spar.gui.app import MainWindow, SidePane, StreamPane, Toolbar, _short_action_label
 
 _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Diff"]
@@ -76,7 +77,7 @@ class TestMainWindow:
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
 
-        assert window2._settings.value("mainSplitter/state") is not None
+        assert window2._settings.value(scoped(tmp_path, "mainSplitter/state")) is not None
 
     def test_close_event_stops_runner_and_sidepane_poll_timers(self, qtbot, tmp_path):
         # Final review minor #1: closing the window used to stop only the
@@ -206,7 +207,7 @@ class TestRailsLayout:
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)
         window.right_rail.buttons["chat"].setChecked(False)
-        assert window._settings.value("rails/chat_visible") in (False, "false", 0, "0")
+        assert window._settings.value(scoped(tmp_path, "rails/chat_visible")) in (False, "false", 0, "0")
 
     def test_right_column_uses_vertical_splitter(self, qtbot, tmp_path):
         # Live smoke defect 1: Taski and the chat panel sat in a plain
@@ -238,7 +239,7 @@ class TestRailsLayout:
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
 
-        assert window2._settings.value("rails/right_split") is not None
+        assert window2._settings.value(scoped(tmp_path, "rails/right_split")) is not None
 
     def test_rail_collapse_of_splitter_children_still_works(self, qtbot, tmp_path):
         # Panel hide/show inside the QSplitter must keep the rails' collapse
@@ -796,7 +797,7 @@ class TestCentreSwitch:
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)
         window.left_rail.buttons["files"].setChecked(True)
-        assert window._settings.value("rails/centre_view") == "files"
+        assert window._settings.value(scoped(tmp_path, "rails/centre_view")) == "files"
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
         assert window2.centre_stack.currentIndex() == 1
@@ -902,3 +903,428 @@ class TestCentreSwitch:
         window.runner.resume = lambda *a, **k: resumed.append(1)
         gate._on_abort()
         assert resumed == []
+
+
+class TestPerProjectSettings:
+    """Layout state is remembered per project, not globally (ADR 0007)."""
+
+    def test_centre_view_is_scoped_per_project(self, qtbot, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        win_a = MainWindow(a)
+        qtbot.addWidget(win_a)
+        win_a._set_centre_view("files")
+
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(a, "rails/centre_view"), type=str) == "files"
+        # Project B is untouched and still starts on the stream view.
+        assert settings.value(scoped(b, "rails/centre_view")) is None
+        win_b = MainWindow(b)
+        qtbot.addWidget(win_b)
+        assert win_b.centre_stack.currentIndex() == 0  # index 0 == Strumień
+
+    def test_splitter_state_is_scoped_per_project(self, qtbot, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        a = tmp_path / "a"
+        a.mkdir()
+        win = MainWindow(a)
+        qtbot.addWidget(win)
+        win._save_splitter_state()
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(a, "mainSplitter/state")) is not None
+        assert settings.value("mainSplitter/state") is None  # no global leftovers
+
+    def test_window_geometry_restored_per_project(self, qtbot, tmp_path):
+        # Sizes stay well inside the offscreen platform's virtual screen:
+        # restoreGeometry() clamps to the available screen, so a 1600x900
+        # assertion would fail for reasons unrelated to scoping.
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        win = MainWindow(a)
+        qtbot.addWidget(win)
+        win.resize(640, 480)
+        win._save_window_geometry()
+
+        reopened = MainWindow(a)
+        qtbot.addWidget(reopened)
+        assert reopened.size().width() == 640
+        assert reopened.size().height() == 480
+
+        # Project B never had a geometry saved: it keeps the default size.
+        other = MainWindow(b)
+        qtbot.addWidget(other)
+        assert other.size() != reopened.size()
+
+
+class TestWindowTitleWiring:
+    def test_main_window_uses_the_full_title(self, qtbot, tmp_path):
+        from spar.gui.instances import window_title
+
+        proj = tmp_path / "repo"
+        proj.mkdir()
+        win = MainWindow(proj)
+        qtbot.addWidget(win)
+        assert win.windowTitle() == window_title(proj)
+        assert "repo" in win.windowTitle()
+
+
+class TestOpenProjectAction:
+    def test_toolbar_has_a_project_button_with_a_menu(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QToolButton
+
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        assert button is not None
+        assert button.menu() is not None
+        labels = [a.text() for a in button.menu().actions()]
+        assert "Otwórz projekt…" in labels
+
+    def test_open_project_spawns_a_detached_window_and_records_recent(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        from spar.gui import app as app_mod
+        from spar.gui.instances import recent_projects
+
+        spawned = []
+        monkeypatch.setattr(
+            app_mod, "spawn_new_window", lambda p: spawned.append(str(p)) or True
+        )
+        other = tmp_path / "other"
+        other.mkdir()
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        win.open_project(other)
+        assert spawned == [str(other)]
+        assert str(other.resolve()) in recent_projects()
+
+    def test_menu_lists_recent_projects_and_opens_them(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QToolButton
+
+        from spar.gui import app as app_mod
+        from spar.gui.instances import push_recent_project
+
+        spawned = []
+        monkeypatch.setattr(
+            app_mod, "spawn_new_window", lambda p: spawned.append(str(p)) or True
+        )
+        other = tmp_path / "other"
+        other.mkdir()
+        push_recent_project(other)
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        recent_action = [
+            a for a in button.menu().actions() if a.data() == str(other.resolve())
+        ]
+        assert len(recent_action) == 1
+        recent_action[0].trigger()
+        assert spawned == [str(other.resolve())]
+
+    def test_current_project_is_not_offered_in_recents(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QToolButton
+
+        from spar.gui.instances import push_recent_project
+
+        push_recent_project(tmp_path)
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        data = [a.data() for a in button.menu().actions()]
+        assert str(tmp_path.resolve()) not in data
+
+
+class TestSingleInstanceEntryPoint:
+    def test_second_launch_raises_and_exits_without_a_window(self, tmp_path, monkeypatch):
+        """A second `spar gui` on the SAME project must not build a window."""
+        from spar.gui import app as app_mod
+
+        class FakeGuard:
+            instances_made = []
+
+            def __init__(self, project_dir):
+                self.project_dir = project_dir
+                FakeGuard.instances_made.append(self)
+                self.claims = 0
+                self.extra_raises = 0
+
+            def try_claim(self):
+                # Review #7: the raise is delivered HERE, inside the claim.
+                self.claims += 1
+                return False
+
+            def request_raise(self, timeout_ms=1000):
+                self.extra_raises += 1  # main_gui must never reach this
+                return True
+
+            def release(self):
+                pass
+
+        built = []
+        monkeypatch.setattr(app_mod, "SingleInstanceGuard", FakeGuard)
+        monkeypatch.setattr(
+            app_mod, "MainWindow", lambda *a, **kw: built.append(a) or pytest.fail(
+                "second launch must not construct a MainWindow"
+            )
+        )
+        rc = app_mod.main_gui(["--dir", str(tmp_path)])
+        assert rc == 0
+        assert built == []
+        guard = FakeGuard.instances_made[-1]
+        assert guard.claims == 1
+        assert guard.extra_raises == 0  # no double raise from main_gui
+
+    def test_raise_to_front_shows_and_activates(self, qtbot, tmp_path):
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        win.showMinimized()
+        win.raise_to_front()
+        assert win.isMinimized() is False
+        assert win.isVisible() is True
+
+
+class TestAutoMode:
+    """The status-bar Auto toggle: answers friction gates, defers real ones."""
+
+    @staticmethod
+    def _gate(name, options, **context):
+        return {"name": name, "options": options, "context": context}
+
+    @staticmethod
+    def _status(gate):
+        return {
+            "phase": "debate",
+            "pending_gate": gate,
+            "tasks": {},
+            "artifact": ".spar/artifact.md",
+            "branches": None,
+        }
+
+    def _window_with_spy(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        calls = []
+        window.runner.resume = lambda value=None, auto_exec=False: calls.append(
+            (value, auto_exec)
+        )
+        return window, calls
+
+    def test_checkbox_exists_in_status_bar_and_is_off_by_default(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QCheckBox
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        box = window.findChild(QCheckBox, "autoModeCheckbox")
+        assert box is not None
+        assert box.isChecked() is False  # never resumes runs unasked
+
+    def test_off_means_the_gate_is_left_alone(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+
+        assert calls == []
+
+    def test_on_extends_rounds_exhausted_by_two(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+
+        assert calls == [("extend:2", False)]
+
+    def test_answers_once_per_gate_even_though_the_poll_repeats(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+        status = self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+
+        window._on_status_changed(status)
+        window._on_status_changed(status)
+        window._on_status_changed(status)
+
+        assert calls == [("extend:2", False)]
+
+    def test_extension_stops_after_the_cap(self, qtbot, tmp_path):
+        from spar.automode import AUTO_EXTEND_LIMIT
+
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        # Each pass is a NEW gate identity (rounds grows), but the same
+        # extend key -- so the cap must still bite.
+        for rounds in range(1, AUTO_EXTEND_LIMIT + 3):
+            window._on_status_changed(
+                self._status(
+                    self._gate(
+                        "review_rounds", ["accept", "extend", "abort"],
+                        task_id="t3", rounds=rounds, reason="review_dispute",
+                    )
+                )
+            )
+
+        # extends up to the cap, then accepts -- it never stops to ask
+        assert calls == [("extend:2", False)] * AUTO_EXTEND_LIMIT + [("accept", False)] * 2
+
+    def test_broken_task_test_is_accepted_so_the_run_keeps_going(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(
+                self._gate(
+                    "review_rounds", ["accept", "extend", "fix", "abort"],
+                    task_id="t2", rounds=2, reason="test_escalation", command="yarn test",
+                )
+            )
+        )
+
+        assert calls == [("accept", False)]
+
+    def test_final_merge_is_accepted(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(self._status(self._gate("final_merge", ["accept", "abort"])))
+
+        assert calls == [("accept", False)]
+
+    def test_consensus_accepts_and_chains_exec(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(self._gate("consensus", ["accept", "remarks", "abort"]))
+        )
+
+        assert calls == [("accept", True)]
+
+    def test_turning_auto_on_acts_on_an_already_pending_gate(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+        assert calls == []
+
+        window._auto_checkbox.setChecked(True)
+
+        assert calls == [("extend:2", False)]
+
+    def test_setting_is_persisted_per_project(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window._auto_checkbox.setChecked(True)
+
+        reopened = MainWindow(tmp_path)
+        qtbot.addWidget(reopened)
+        assert reopened._auto_checkbox.isChecked() is True
+
+        other_project = tmp_path / "other"
+        other_project.mkdir()
+        elsewhere = MainWindow(other_project)
+        qtbot.addWidget(elsewhere)
+        assert elsewhere._auto_checkbox.isChecked() is False
+
+
+class TestAutoModeIsVisiblyArmed:
+    """Auto answers gates unasked, so an armed toggle must be unmissable."""
+
+    def test_theme_defines_an_armed_color_and_styles_the_checkbox(self):
+        assert "armed" in theme.TOKENS
+        qss = theme.build_qss()
+        assert "#autoModeCheckbox:checked" in qss
+        assert theme.TOKENS["armed"] in qss
+        # A real tick, not a filled square: painting the indicator background
+        # covers Qt's checkmark and leaves a bare colored box.
+        assert "check-armed.svg" in qss
+        assert "background-color: transparent" in qss
+        check = theme._ASSETS / "check-armed.svg"
+        assert check.exists()
+        assert theme.TOKENS["armed"] in check.read_text(encoding="utf-8")
+
+    def test_label_shouts_when_armed(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert window._auto_checkbox.text() == "Auto"
+        window._auto_checkbox.setChecked(True)
+        assert window._auto_checkbox.text() == "AUTO"
+        window._auto_checkbox.setChecked(False)
+        assert window._auto_checkbox.text() == "Auto"
+
+    def test_armed_label_survives_a_reopen(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window._auto_checkbox.setChecked(True)
+
+        reopened = MainWindow(tmp_path)
+        qtbot.addWidget(reopened)
+        assert reopened._auto_checkbox.text() == "AUTO"
+
+
+class TestAppIdentity:
+    """The desktop shell showed "launcher.py" + a generic icon: Qt derives
+    both from argv[0], and the detached launcher re-execs as
+    ``python -m spar.gui.launcher``."""
+
+    def test_icon_asset_ships_inside_the_package(self):
+        from spar.gui import app as app_mod
+
+        assert app_mod._ICON_PATH.exists(), app_mod._ICON_PATH
+        assert app_mod._ICON_PATH.read_text(encoding="utf-8").lstrip().startswith("<svg")
+
+    def test_app_icon_loads(self, qtbot):
+        from spar.gui.app import app_icon
+
+        assert not app_icon().isNull()
+
+    def test_identity_matches_the_installed_desktop_entry(self, qtbot):
+        from PySide6.QtWidgets import QApplication
+
+        from spar.gui.app import APP_DISPLAY_NAME, APP_ID, apply_app_identity
+
+        app = QApplication.instance()
+        apply_app_identity(app)
+        try:
+            assert app.applicationName() == APP_ID
+            assert app.applicationDisplayName() == APP_DISPLAY_NAME
+            # Wayland matches window -> .desktop through this name; it is what
+            # supplies the taskbar icon and label.
+            assert app.desktopFileName() == APP_ID
+            assert not app.windowIcon().isNull()
+        finally:
+            app.setApplicationDisplayName("")
+
+    def test_app_id_equals_the_desktop_entry_basename_and_wmclass(self):
+        from pathlib import Path
+
+        from spar.gui.app import APP_ID
+
+        entry = Path(__file__).resolve().parents[1] / "packaging" / "linux" / "spar.desktop.in"
+        text = entry.read_text(encoding="utf-8")
+        assert f"StartupWMClass={APP_ID}" in text
+        # install.sh substitutes @ICON@ with the same name
+        assert "Icon=@ICON@" in text
+
+    def test_installer_takes_the_icon_from_the_package(self):
+        from pathlib import Path
+
+        installer = (
+            Path(__file__).resolve().parents[1] / "packaging" / "linux" / "install.sh"
+        ).read_text(encoding="utf-8")
+        assert "spar/gui/assets/spar.svg" in installer
+
+    def test_window_carries_the_icon_too(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert not window.windowIcon().isNull()
