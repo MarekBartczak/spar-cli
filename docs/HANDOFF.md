@@ -194,7 +194,14 @@ template, SVG icon, idempotent `install.sh` that symlinks
 `~/.local/bin/spar-gui`, installs the menu entry with an absolute Exec path —
 a graphical session does not read `~/.bashrc` — and registers
 `inode/directory` so Nautilus can open a folder with Spar). The menu entry
-passes `--pick` because a desktop launch has no useful cwd.
+passes `--pick` because a desktop launch has no useful cwd. `spar-gui` also
+DETACHES by default (live finding: it held the terminal, unlike `code`): it
+re-execs `python -m spar.gui.launcher` with `start_new_session=True` and a
+`SPAR_GUI_DETACHED` marker so the child runs the window instead of forking
+again, streams Qt output to `~/.cache/spar/gui.log` (it would be lost with the
+terminal), falls back to running in the foreground if the fork fails, and
+honours `--foreground`. Measured: prompt back in ~120 ms, child is its own
+session leader with no tty.
 
 Suite: **1090 passed, 2 skipped** (was 1035). **Manual multi-window smoke is
 pending (user-driven):** two projects side by side with a run in one; distinct

@@ -126,7 +126,14 @@ recreating the venv — it is idempotent.
 spar-gui                 # the current directory is the project
 spar-gui PATH            # open PATH (a file resolves to its directory)
 spar-gui --pick          # ask for the project directory
+spar-gui --foreground    # keep it attached to this terminal
 ```
+
+`spar-gui` returns the prompt immediately and keeps running — like `code`.
+The window runs in its own session, so closing the terminal does not kill it;
+Qt warnings and tracebacks that would otherwise vanish with the terminal are
+appended to `~/.cache/spar/gui.log`. Use `--foreground` when you want the
+output in the terminal instead.
 
 The menu entry uses `--pick`, because a graphical launcher starts with no
 useful working directory: it asks for the project, starting at the most

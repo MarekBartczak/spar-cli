@@ -84,6 +84,14 @@ class TestPickerStart:
 
 
 class TestMain:
+    """The in-process path. `_no_detach` keeps these from forking a real
+    window: without it they would spawn detached GUI processes that outlive
+    the test session."""
+
+    @pytest.fixture(autouse=True)
+    def _no_detach(self, monkeypatch):
+        monkeypatch.setenv(launcher._DETACHED_ENV, "1")
+
     def test_delegates_to_main_gui_with_dir(self, tmp_path, monkeypatch):
         seen = {}
 
@@ -118,3 +126,77 @@ class TestMain:
         for flag in ("-h", "--help"):
             assert launcher.main([flag]) == 0
             assert "usage: spar-gui" in capsys.readouterr().out
+
+
+class TestDetach:
+    """`spar-gui` must return the shell prompt immediately, like `code`."""
+
+    def test_detaches_by_default(self):
+        assert launcher.should_detach([], {}) is True
+
+    def test_child_process_does_not_detach_again(self):
+        """The re-launched child carries the marker, or we fork forever."""
+        assert launcher.should_detach([], {launcher._DETACHED_ENV: "1"}) is False
+
+    def test_foreground_flag_keeps_the_process_attached(self):
+        assert launcher.should_detach(["--foreground"], {}) is False
+
+    def test_detached_command_reinvokes_the_module_with_the_same_args(self, tmp_path):
+        cmd = launcher.detached_command([str(tmp_path), "--pick"])
+        assert cmd[:3] == [launcher.sys.executable, "-m", "spar.gui.launcher"]
+        assert cmd[3:] == [str(tmp_path), "--pick"]
+
+    def test_main_spawns_detached_and_returns_zero_without_a_window(
+        self, tmp_path, monkeypatch
+    ):
+        spawned = {}
+
+        def fake_spawn(argv):
+            spawned["argv"] = argv
+            return True
+
+        monkeypatch.setattr(launcher, "spawn_detached", fake_spawn)
+        monkeypatch.setattr(launcher, "main_gui", lambda argv: pytest.fail("no window"))
+        monkeypatch.delenv(launcher._DETACHED_ENV, raising=False)
+        assert launcher.main([str(tmp_path)]) == 0
+        assert spawned["argv"] == [str(tmp_path)]
+
+    def test_foreground_runs_the_window_in_this_process(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_main_gui(argv):
+            seen["argv"] = argv
+            return 0
+
+        monkeypatch.setattr(launcher, "main_gui", fake_main_gui)
+        monkeypatch.setattr(
+            launcher, "spawn_detached", lambda argv: pytest.fail("must not fork")
+        )
+        assert launcher.main(["--foreground", str(tmp_path)]) == 0
+        # --foreground must NOT swallow the path (it is not the project dir).
+        assert seen["argv"] == ["--dir", str(tmp_path.resolve())]
+
+    def test_failed_spawn_falls_back_to_running_in_the_foreground(
+        self, tmp_path, monkeypatch
+    ):
+        """A fork that cannot happen must still give the user a window."""
+        seen = {}
+
+        def fake_main_gui(argv):
+            seen["argv"] = argv
+            return 0
+
+        monkeypatch.setattr(launcher, "spawn_detached", lambda argv: False)
+        monkeypatch.setattr(launcher, "main_gui", fake_main_gui)
+        monkeypatch.delenv(launcher._DETACHED_ENV, raising=False)
+        assert launcher.main([str(tmp_path)]) == 0
+        assert seen["argv"] == ["--dir", str(tmp_path.resolve())]
+
+
+class TestParseTargetWithFlags:
+    def test_foreground_flag_does_not_shadow_the_path(self, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        target, needs_pick = launcher.parse_target(["--foreground", str(proj)])
+        assert needs_pick is False
+        assert target == proj.resolve()
