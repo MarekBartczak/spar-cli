@@ -186,7 +186,17 @@ the peer received the bytes (delivery is proven by `bytesToWrite() == 0`), and
 both servers report `isListening()` — hence probe-before-remove and a
 `release()` that no-ops for a guard that never claimed.
 
-Suite: **1077 passed, 2 skipped** (was 1035). **Manual multi-window smoke is
+Follow-up in the same branch: a `spar-gui` console script
+(`spar/gui/launcher.py` — `spar-gui [PATH|--dir PATH] [--pick]`, a file
+argument resolves to its directory, a missing path falls back to the picker)
+plus a per-user Ubuntu launcher in `packaging/linux/` (`spar.desktop.in`
+template, SVG icon, idempotent `install.sh` that symlinks
+`~/.local/bin/spar-gui`, installs the menu entry with an absolute Exec path —
+a graphical session does not read `~/.bashrc` — and registers
+`inode/directory` so Nautilus can open a folder with Spar). The menu entry
+passes `--pick` because a desktop launch has no useful cwd.
+
+Suite: **1090 passed, 2 skipped** (was 1035). **Manual multi-window smoke is
 pending (user-driven):** two projects side by side with a run in one; distinct
 per-window layouts across restarts; a third launch on an open project raising
 its window; `Projekt → Otwórz projekt…` opening a third window; and on the

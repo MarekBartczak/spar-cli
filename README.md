@@ -109,6 +109,29 @@ spar gui                  # operates on the current directory
 spar gui --dir PATH       # operate on a different project directory
 ```
 
+#### Ubuntu desktop launcher + `spar-gui` on PATH
+
+```bash
+.venv/bin/pip install -e ".[gui]"      # provides the spar-gui console script
+./packaging/linux/install.sh           # per-user, no root
+```
+
+The installer creates a `~/.local/bin/spar-gui` symlink (so `spar-gui` works
+in any terminal without the venv path), a `Spar` entry in the application menu
+with an icon, and a `inode/directory` MIME association so a folder can be
+opened with Spar straight from Nautilus. Re-run it after moving the repo or
+recreating the venv — it is idempotent.
+
+```bash
+spar-gui                 # the current directory is the project
+spar-gui PATH            # open PATH (a file resolves to its directory)
+spar-gui --pick          # ask for the project directory
+```
+
+The menu entry uses `--pick`, because a graphical launcher starts with no
+useful working directory: it asks for the project, starting at the most
+recently opened one. A folder dropped on the launcher wins over the dialog.
+
 #### Several projects at once
 
 One window = one project = one OS process (ADR 0007), the WebStorm model.

@@ -16,6 +16,10 @@ package-macos = ["pyinstaller>=6.10,<7; sys_platform == 'darwin'"]
 
 [project.scripts]
 spar = "spar.cli:main"
+# Desktop/terminal entry point for the gui (ADR 0007): `spar-gui [PATH]`,
+# and `spar-gui --pick` for the .desktop launcher, which starts with no
+# meaningful working directory and must ask for the project.
+spar-gui = "spar.gui.launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

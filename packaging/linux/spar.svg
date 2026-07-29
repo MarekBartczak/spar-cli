@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="26" fill="#16181d"/>
+  <!-- Two sides of a debate, facing each other across the gate. -->
+  <path d="M20 40h34a8 8 0 0 1 8 8v32a8 8 0 0 1-8 8H20a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8z" fill="#3f8cff"/>
+  <path d="M74 40h34a8 8 0 0 1 8 8v32a8 8 0 0 1-8 8H74a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8z" fill="#ff8a3f"/>
+  <!-- The gate: the human decision in the middle. -->
+  <rect x="60" y="26" width="8" height="76" rx="4" fill="#e8eaf0"/>
+  <circle cx="64" cy="64" r="11" fill="#16181d"/>
+  <circle cx="64" cy="64" r="6" fill="#e8eaf0"/>
+</svg>
