@@ -240,7 +240,7 @@ class TestStreamPane:
         assert pane.follow_button.isChecked() is True
         assert pane.jump_button.isVisible() is False
 
-    def test_filter_chips_auto_populated_from_seen_prefixes(self, qtbot):
+    def test_filter_options_auto_populated_from_seen_prefixes(self, qtbot):
         pane = StreamPane()
         qtbot.addWidget(pane)
 
@@ -270,7 +270,7 @@ class TestStreamPane:
         )
 
         text = pane.text.toPlainText()
-        assert "[claude · sonnet · runda 1] hello" in text
+        assert "[claude · sonnet 5 · runda 1] hello" in text
         assert "[codex · gpt-5.5 · t1 · implementacja] working" in text
 
     def test_stream_text_wraps_at_widget_width(self, qtbot):
@@ -280,7 +280,7 @@ class TestStreamPane:
         qtbot.addWidget(pane)
         assert pane.text.lineWrapMode() == QPlainTextEdit.LineWrapMode.WidgetWidth
 
-    def test_garbage_prefixes_produce_no_chips(self, qtbot):
+    def test_garbage_prefixes_produce_no_filter_options(self, qtbot):
         # Fix 4c: chips must be derived only from the engine's known wire
         # shapes -- a stray "t=t1" fragment or a JSON-ish bracket blob must
         # never surface as a filter chip, even though it still renders in
@@ -296,25 +296,25 @@ class TestStreamPane:
             ]
         )
 
-        assert ("side", "t=t1") not in pane._chip_buttons
-        assert ("side", '{"side": "claude"}') not in pane._chip_buttons
-        assert ("side", "claude") in pane._chip_buttons
+        assert ("side", "t=t1") not in pane._filter_actions
+        assert ("side", '{"side": "claude"}') not in pane._filter_actions
+        assert ("side", "claude") in pane._filter_actions
         assert "t=t1" not in pane._known_sides
         assert "claude" in pane._known_sides
-        # The raw lines still render -- sanitization is chip-only.
+        # The raw lines still render -- sanitization is filter-option-only.
         text = pane.text.toPlainText()
         assert "resolution: something happened" in text
         assert "legit line" in text
 
-    def test_chip_label_capped_at_24_chars(self, qtbot):
+    def test_filter_option_label_capped_at_24_chars(self, qtbot):
         pane = StreamPane()
         qtbot.addWidget(pane)
         long_side = "x" * 40
         pane.feed_lines([f"[{long_side} r0] hi"])
 
-        button = pane._chip_buttons[("side", long_side)]
-        assert len(button.text()) == 24
-        assert button.text() == long_side[:24]
+        action = pane._filter_actions[("side", long_side)]
+        assert len(action.text()) == 24
+        assert action.text() == long_side[:24]
 
     def test_filter_still_matches_raw_side_after_translation(self, qtbot):
         # Filter chips must key on the RAW side/task, not the translated
@@ -400,8 +400,8 @@ class TestHumanizePrefix:
 
     def test_debate_round_with_model_and_round_offset(self):
         models = {"sides": {"claude": "sonnet"}}
-        assert humanize_prefix("claude r0", models) == "claude · sonnet · runda 1"
-        assert humanize_prefix("claude r2", models) == "claude · sonnet · runda 3"
+        assert humanize_prefix("claude r0", models) == "claude · sonnet 5 · runda 1"
+        assert humanize_prefix("claude r2", models) == "claude · sonnet 5 · runda 3"
 
     def test_exec_impl_with_model(self):
         models = {"tasks": {"t1": {"model": "gpt-5.5", "review_model": "sonnet"}}}
@@ -409,7 +409,7 @@ class TestHumanizePrefix:
 
     def test_exec_review_uses_review_model_not_model(self):
         models = {"tasks": {"t1": {"model": "gpt-5.5", "review_model": "sonnet"}}}
-        assert humanize_prefix("claude t1 review", models) == "claude · sonnet · t1 · recenzja"
+        assert humanize_prefix("claude t1 review", models) == "claude · sonnet 5 · t1 · recenzja"
 
     def test_missing_model_omits_segment(self):
         assert humanize_prefix("codex t1 impl", {}) == "codex · t1 · implementacja"
@@ -422,3 +422,192 @@ class TestHumanizePrefix:
 
     def test_none_models_defaults_to_empty(self):
         assert humanize_prefix("claude r0", None) == "claude · runda 1"
+
+
+# ---------------------------------------------------------------------------
+# Scroll position survives a rerender
+#
+# Regression: ``set_models`` runs on every status poll and rerendered the ring
+# buffer; ``QPlainTextEdit.clear()`` resets the scrollbar to 0, so a user who
+# had scrolled back to read history was yanked to the TOP every couple of
+# seconds.
+# ---------------------------------------------------------------------------
+
+
+def test_rerender_keeps_scroll_position_when_not_following(qtbot):
+    pane = StreamPane()
+    qtbot.addWidget(pane)
+    pane.resize(400, 120)
+    pane.feed_lines([f"[claude r0] line {i}" for i in range(400)])
+
+    bar = pane.text.verticalScrollBar()
+    # user scrolls back into history
+    bar.setValue(bar.maximum() // 3)
+    assert pane._following is False
+    parked = bar.value()
+    assert parked > 0
+
+    pane.set_filter("all")  # any rerender path
+
+    assert pane.text.verticalScrollBar().value() == parked
+
+
+def test_rerender_still_sticks_to_bottom_while_following(qtbot):
+    pane = StreamPane()
+    qtbot.addWidget(pane)
+    pane.resize(400, 120)
+    pane.feed_lines([f"[claude r0] line {i}" for i in range(400)])
+    assert pane._following is True
+
+    pane.set_filter("all")
+
+    bar = pane.text.verticalScrollBar()
+    assert bar.value() == bar.maximum()
+
+
+def test_set_models_with_unchanged_lookup_does_not_rerender(qtbot):
+    pane = StreamPane()
+    qtbot.addWidget(pane)
+    pane.feed_lines(["[claude r0] hello"])
+
+    models = {"sides": {"claude": "opus"}, "tasks": {}}
+    pane.set_models(models)
+
+    calls = []
+    original = pane._rerender_all
+    pane._rerender_all = lambda: calls.append(1) or original()
+    try:
+        pane.set_models({"sides": {"claude": "opus"}, "tasks": {}})
+        assert calls == []  # same lookup -> no churn
+        pane.set_models({"sides": {"claude": "sonnet"}, "tasks": {}})
+        assert calls == [1]
+    finally:
+        pane._rerender_all = original
+
+
+# ---------------------------------------------------------------------------
+# Filter dropdown: one menu, several selections
+#
+# A dozen exec tasks produced a chip per side AND per task, overflowing the
+# toolbar ("wszystko spar claude codex t1 t2 t3 t4 t12 t5 t6 t7 t8 …").
+# ---------------------------------------------------------------------------
+
+
+class TestFilterDropdown:
+    def _pane(self, qtbot):
+        pane = StreamPane()
+        qtbot.addWidget(pane)
+        pane.feed_lines([
+            "[claude t1 impl] ALPHA",
+            "[codex t1 review] BRAVO",
+            "[claude t12 impl] CHARLIE",
+            "[claude t2 impl] DELTA",
+            "spar exec: own log line",
+        ])
+        return pane
+
+    def test_options_live_in_a_menu_not_in_chip_buttons(self, qtbot):
+        pane = self._pane(qtbot)
+
+        assert pane.filter_button is not None
+        assert pane.filter_menu is not None
+        assert not hasattr(pane, "chips_layout")
+        # every discovered side/task is reachable from the one dropdown
+        assert ("side", "claude") in pane._filter_actions
+        assert ("task", "t12") in pane._filter_actions
+
+    def test_tasks_are_listed_in_natural_order(self, qtbot):
+        pane = self._pane(qtbot)
+
+        tasks = [
+            key[1] for key in pane._filter_actions if key[0] == "task"
+        ]
+        assert tasks == ["t1", "t2", "t12"]  # not t1, t12, t2
+
+    def test_default_selection_is_everything(self, qtbot):
+        pane = self._pane(qtbot)
+
+        assert pane.active_filters == set()
+        assert pane.filter_button.text() == "wszystko"
+        assert pane._filter_actions[("wszystko", None)].isChecked() is True
+        assert "own log line" in pane.text.toPlainText()
+
+    def test_two_tasks_selected_are_ored(self, qtbot):
+        pane = self._pane(qtbot)
+
+        pane.toggle_filter("task", "t1")
+        pane.toggle_filter("task", "t2")
+
+        text = pane.text.toPlainText()
+        assert "ALPHA" in text and "BRAVO" in text  # both t1 lines (impl + review)
+        assert "DELTA" in text                  # t2
+        assert "CHARLIE" not in text              # t12 not selected
+        assert pane.active_filters == {("task", "t1"), ("task", "t2")}
+
+    def test_side_and_task_can_be_combined(self, qtbot):
+        pane = self._pane(qtbot)
+
+        pane.toggle_filter("side", "codex")
+        pane.toggle_filter("task", "t12")
+
+        text = pane.text.toPlainText()
+        assert "BRAVO" in text  # codex
+        assert "CHARLIE" in text  # t12
+        assert "DELTA" not in text
+
+    def test_button_label_summarizes_a_multi_selection(self, qtbot):
+        pane = self._pane(qtbot)
+
+        pane.toggle_filter("task", "t1")
+        assert pane.filter_button.text() == "t1"
+        pane.toggle_filter("task", "t2")
+        assert pane.filter_button.text() == "t1 +1"
+
+    def test_toggling_the_last_filter_off_returns_to_everything(self, qtbot):
+        pane = self._pane(qtbot)
+
+        pane.toggle_filter("task", "t1")
+        pane.toggle_filter("task", "t1")
+
+        assert pane.active_filters == set()
+        assert pane.filter_button.text() == "wszystko"
+        assert "own log line" in pane.text.toPlainText()
+
+    def test_picking_wszystko_clears_the_selection(self, qtbot):
+        pane = self._pane(qtbot)
+        pane.toggle_filter("task", "t1")
+        pane.toggle_filter("side", "codex")
+
+        pane._on_option_triggered("wszystko", None)
+
+        assert pane.active_filters == set()
+
+    def test_menu_check_states_mirror_the_selection(self, qtbot):
+        pane = self._pane(qtbot)
+
+        pane.toggle_filter("task", "t1")
+
+        assert pane._filter_actions[("task", "t1")].isChecked() is True
+        assert pane._filter_actions[("task", "t2")].isChecked() is False
+        # "wszystko" is checked exactly when nothing else is
+        assert pane._filter_actions[("wszystko", None)].isChecked() is False
+        pane.toggle_filter("task", "t1")
+        assert pane._filter_actions[("wszystko", None)].isChecked() is True
+
+    def test_selection_survives_a_newly_discovered_task(self, qtbot):
+        pane = self._pane(qtbot)
+        pane.toggle_filter("task", "t1")
+
+        pane.feed_lines(["[claude t13 impl] later"])  # rebuilds the menu
+
+        assert pane.active_filters == {("task", "t1")}
+        assert pane._filter_actions[("task", "t1")].isChecked() is True
+        assert "later" not in pane.text.toPlainText()
+
+    def test_set_filter_still_selects_exactly_one(self, qtbot):
+        pane = self._pane(qtbot)
+        pane.toggle_filter("task", "t1")
+
+        pane.set_filter("side", "codex")
+
+        assert pane.active_filters == {("side", "codex")}

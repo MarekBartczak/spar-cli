@@ -65,6 +65,50 @@ def is_clean(repo: Path) -> bool:
     return result.stdout.strip("\n") == ""
 
 
+def status_paths(repo: Path) -> tuple[str, ...]:
+    """Paths reported dirty by ``git status`` in ``repo`` (staged, unstaged, untracked).
+
+    ``--untracked-files=all`` so a new file nested in a new directory is
+    reported by its full path rather than collapsed to the directory: callers
+    match globs against full paths, and the stray-write sweep must be able to
+    remove individual files rather than whole directories.
+    """
+    result = _run_ok(
+        repo, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"
+    )
+    paths: list[str] = []
+    for line in result.stdout.split("\n"):
+        if not line.strip():
+            continue
+        rest = line[3:]  # strip the two-char XY status plus its separating space
+        if " -> " in rest:  # rename/copy: "old -> new"
+            old, new = rest.split(" -> ", 1)
+            paths.extend([old, new])
+        else:
+            paths.append(rest)
+    return tuple(paths)
+
+
+def revert_paths(repo: Path, paths: tuple[str, ...] | list[str]) -> None:
+    """Undo ``paths`` in ``repo``: restore tracked ones, delete untracked ones.
+
+    Surgical on purpose — never ``reset --hard`` / ``clean -fd`` over the whole
+    checkout, so only the paths the caller identified are touched. Missing or
+    already-clean paths are tolerated (idempotent), which makes this safe to
+    call on any recovery path.
+    """
+    for path in paths:
+        tracked = _run(repo, "ls-files", "--error-unmatch", "--", path).returncode == 0
+        if tracked:
+            _run_ok(repo, "checkout", "--", path)
+            continue
+        target = repo / path
+        if target.is_dir():
+            _run_ok(repo, "clean", "-fdq", "--", path)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+
+
 def create_branch(repo: Path, name: str, base: str) -> None:
     _run_ok(repo, "branch", name, base)
 

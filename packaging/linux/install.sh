@@ -30,7 +30,10 @@ icon_dir="$HOME/.local/share/icons/hicolor/scalable/apps"
 mkdir -p "$bin_dir" "$apps_dir" "$icon_dir"
 
 ln -sfn "$exec_path" "$bin_dir/spar-gui"
-install -m 0644 "$here/spar.svg" "$icon_dir/spar.svg"
+# The icon ships INSIDE the package (spar/gui/assets/spar.svg) so the running
+# app and the desktop entry cannot drift apart: the app loads that same file
+# for its window icon.
+install -m 0644 "$repo/spar/gui/assets/spar.svg" "$icon_dir/spar.svg"
 
 desktop_file="$apps_dir/spar.desktop"
 sed -e "s|@EXEC@|$exec_path|g" -e "s|@ICON@|spar|g" \

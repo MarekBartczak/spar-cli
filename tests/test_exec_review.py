@@ -45,19 +45,35 @@ class Step:
     own ``git commit`` inside the worktree).
     """
 
-    def __init__(self, reply, sid="sess", edits=None, raises=None, commit=False, emit=None):
+    def __init__(
+        self,
+        reply,
+        sid="sess",
+        edits=None,
+        raises=None,
+        commit=False,
+        emit=None,
+        abs_edits=None,
+    ):
         self.reply = reply
         self.sid = sid
         self.edits = edits or {}
         self.raises = raises
         self.commit = commit
         self.emit = emit
+        # Writes by ABSOLUTE path — models the live failure mode where an agent
+        # resolves a scope path against the main repo checkout, not its worktree.
+        self.abs_edits = abs_edits or {}
 
     def __call__(self, prompt, session_id, root, on_event=None):
         if self.raises is not None:
             raise self.raises
         for rel, content in self.edits.items():
             p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        for path, content in self.abs_edits.items():
+            p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         if self.commit:
@@ -857,3 +873,77 @@ def test_foreign_and_merged_files_reach_the_review_prompt(env):
     )
     assert "t9: src/*.cpp" in review.calls[0]["prompt"]
     assert "lib/util.py" in review.calls[0]["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Stray-write guard: an implementer that writes into the MAIN checkout instead
+# of its worktree produces a file the task branch never sees and that later
+# collides with the branch's merge ("untracked working tree files would be
+# overwritten by merge" — live incident on t2). The turn must be failed and the
+# stray swept at the source.
+# ---------------------------------------------------------------------------
+
+
+def test_write_into_main_checkout_is_swept_and_turn_retried(env):
+    task = _task(files=("work.py",))
+    stray = env["repo"] / "work.py"
+    impl_steps = [
+        # first turn: right filename, wrong checkout
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), abs_edits={stray: "stray\n"}),
+        # retry: same content, correct worktree
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "real\n"}),
+    ]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] implement it"])),
+        Step(vblock("DONE")),
+    ]
+
+    impl, _review, task_state, _state, logs = _run(env, task, impl_steps, review_steps)
+
+    assert len(impl.calls) == 2
+    # stray gone from the main checkout, which is clean again
+    assert not stray.exists()
+    assert _git(env["repo"], "status", "--porcelain").stdout.strip() == ""
+    # the retry prompt names the worktree and the main checkout
+    retry_prompt = impl.calls[1]["prompt"]
+    assert str(env["worktree"]) in retry_prompt
+    assert "MAIN repository checkout" in retry_prompt
+    assert any("wrote outside its worktree" in line for line in logs)
+    # the corrected work landed on the branch
+    assert _branch_files(env) == ["work.py"]
+    assert not task_state.pending_remarks
+
+
+def test_second_write_into_main_checkout_aborts(env):
+    task = _task(files=("work.py",))
+    stray = env["repo"] / "work.py"
+    impl_steps = [
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), abs_edits={stray: "stray\n"}),
+        Step(vblock("CONTINUE", resolved=["#1 accepted"]), abs_edits={stray: "again\n"}),
+    ]
+    review_steps = [Step(vblock("CONTINUE", remarks=["[MUST] implement it"]))]
+
+    with pytest.raises(ReviewAbort):
+        _run(env, task, impl_steps, review_steps)
+
+    assert not stray.exists()
+    assert _git(env["repo"], "status", "--porcelain").stdout.strip() == ""
+    assert _branch_files(env) == []
+
+
+def test_pre_existing_main_checkout_dirt_is_not_swept(env):
+    # Dirt that predates the turn is none of the guard's business: it must not
+    # be reverted (it is not the turn's output) and must not fail the turn.
+    (env["repo"] / "seed.txt").write_text("touched by the user\n", encoding="utf-8")
+    task = _task(files=("work.py",))
+    impl_steps = [Step(vblock("CONTINUE", resolved=["#1 accepted"]), edits={"work.py": "real\n"})]
+    review_steps = [
+        Step(vblock("CONTINUE", remarks=["[MUST] implement it"])),
+        Step(vblock("DONE")),
+    ]
+
+    impl, _review, _ts, _state, _logs = _run(env, task, impl_steps, review_steps)
+
+    assert len(impl.calls) == 1
+    assert (env["repo"] / "seed.txt").read_text(encoding="utf-8") == "touched by the user\n"
+    assert _branch_files(env) == ["work.py"]

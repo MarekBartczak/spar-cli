@@ -203,7 +203,7 @@ class TestTaskRows:
         assert rows[0]["reviewer"] == "?"
 
     def test_label_includes_models_when_present(self):
-        # Fix 5: "codex·gpt-5.4 -> claude·opus" using the task's implementer
+        # Models alone identify their side: "gpt-5.4 -> opus", using the task's
         # model and the reviewer's review_model.
         status = {
             "tasks": {
@@ -216,7 +216,7 @@ class TestTaskRows:
             }
         }
         rows = task_rows(status, side_order=["claude", "codex"])
-        assert rows[0]["label"] == "codex·gpt-5.4 → claude·opus"
+        assert rows[0]["label"] == "gpt-5.4 → opus 5"
         assert rows[0]["model"] == "gpt-5.4"
         assert rows[0]["review_model"] == "opus"
 
@@ -232,7 +232,7 @@ class TestTaskRows:
             "tasks": {"t1": {"status": "pending", "side": "codex", "model": "gpt-5.4"}}
         }
         rows = task_rows(status, side_order=["claude", "codex"])
-        assert rows[0]["label"] == "codex·gpt-5.4 → claude"
+        assert rows[0]["label"] == "gpt-5.4 → claude"
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ class TestTaskBoard:
         assert board.table.item(0, 2).text() == "codex → claude"
 
     def test_set_status_with_models_shows_models_in_side_column(self, qtbot):
-        # Fix 5: "codex·gpt-5.4 -> claude·opus".
+        # Models only: "gpt-5.4 -> opus".
         board = TaskBoard()
         qtbot.addWidget(board)
         status = {
@@ -277,7 +277,7 @@ class TestTaskBoard:
             }
         }
         board.set_status(status, side_order=["claude", "codex"])
-        assert board.table.item(0, 2).text() == "codex·gpt-5.4 → claude·opus"
+        assert board.table.item(0, 2).text() == "gpt-5.4 → opus 5"
 
 
 # ---------------------------------------------------------------------------
@@ -726,8 +726,8 @@ class TestSidePaneTaskPanel:
         rows = {r["task_id"]: r for r in pane.task_board.rows}
         assert rows["t1"]["reviewer"] == "claude"
         # Fix 5: the Side column includes each side's model when the task
-        # carries one -- "codex·gpt-5.5 -> claude·sonnet".
-        assert rows["t1"]["label"] == "codex·gpt-5.5 → claude·sonnet"
+        # carries one, side names dropped -- "gpt-5.5 -> sonnet".
+        assert rows["t1"]["label"] == "gpt-5.5 → sonnet 5"
 
 
 class TestAutoExecPreflight:
@@ -761,3 +761,83 @@ class TestAutoExecPreflight:
         panel.preflight_auto_exec = lambda: True
         primary.click()
         assert runner.calls == [("accept", True)]
+
+
+# ---------------------------------------------------------------------------
+# Layout: the Side column must not be elided, the board must fill the pane
+# ---------------------------------------------------------------------------
+
+
+def test_task_board_side_column_stretches_and_never_elides(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHeaderView
+
+    board = TaskBoard()
+    qtbot.addWidget(board)
+
+    header = board.table.horizontalHeader()
+    assert header.sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
+    assert header.stretchLastSection() is True
+    # "sonnet → gpt-5.6-sol" must render whole, not "sonnet → ..."
+    assert board.table.textElideMode() == Qt.TextElideMode.ElideNone
+
+
+def test_task_board_rows_are_selectable_for_copying(qtbot):
+    from PySide6.QtWidgets import QAbstractItemView
+
+    board = TaskBoard()
+    qtbot.addWidget(board)
+
+    assert board.table.selectionMode() != QAbstractItemView.SelectionMode.NoSelection
+    # still read-only
+    assert board.table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+
+
+def test_task_panel_text_is_selectable(qtbot):
+    from PySide6.QtCore import Qt
+
+    panel = TaskPanel()
+    qtbot.addWidget(panel)
+    panel.set_text("- zadanie do skopiowania")
+
+    flags = panel.label.textInteractionFlags()
+    assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
+
+
+def test_model_column_drops_the_side_names(qtbot):
+    # "claude·sonnet → codex·gpt-5.6-sol" repeated the side in every row and
+    # ate the column width; the model alone identifies its side.
+    board = TaskBoard()
+    qtbot.addWidget(board)
+
+    board.set_status(
+        {
+            "phase": "execution",
+            "tasks": {
+                "t1": {
+                    "status": "merged",
+                    "side": "claude",
+                    "model": "sonnet",
+                    "review_model": "gpt-5.4",
+                }
+            },
+        },
+        ["claude", "codex"],
+    )
+
+    assert board.table.item(0, 2).text() == "sonnet 5 → gpt-5.4"
+    assert board.table.horizontalHeaderItem(2).text() == "Modele"
+
+
+def test_model_column_falls_back_to_side_names_without_models(qtbot):
+    board = TaskBoard()
+    qtbot.addWidget(board)
+
+    board.set_status(
+        {"phase": "execution", "tasks": {"t1": {"status": "pending", "side": "claude"}}},
+        ["claude", "codex"],
+    )
+
+    # No model metadata: the side names are all there is to show.
+    assert board.table.item(0, 2).text() == "claude → codex"

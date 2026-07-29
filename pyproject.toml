@@ -25,6 +25,11 @@ spar-gui = "spar.gui.launcher:main"
 where = ["."]
 include = ["spar*"]
 
+[tool.setuptools.package-data]
+# The app icon is loaded at runtime (spar.gui.app.app_icon) and installed by
+# packaging/linux/install.sh, so it must ship in the wheel.
+"spar.gui" = ["assets/*.svg"]
+
 [tool.pytest.ini_options]
 markers = [
     "contract: opt-in contract tests for real AI CLIs (set SPAR_CONTRACT_TESTS=1)",

@@ -35,7 +35,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -43,6 +45,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -53,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from spar.config import load_config
 from spar.gui.theme import TOKENS
+from spar.models import display_model
 from spar.gui.viewers import show_diff_dialog, show_plan_dialog
 from spar.state import StateError
 from spar.status import build_status
@@ -127,20 +131,16 @@ def _reviewer_for_configured(side: str | None, side_order: "list[str] | tuple[st
 def _format_side_label(
     side: "str | None", reviewer: str, model: "str | None", review_model: "str | None"
 ) -> str:
-    """Pure: render the TaskBoard's ``Side`` column right-hand string.
+    """Pure: render the TaskBoard's implementer → reviewer string.
 
-    ``codex·gpt-5.4 → claude·opus`` when both the implementer's ``model``
-    and the reviewer's ``review_model`` are known (fix 5); falls back to the
-    plain ``side -> reviewer`` string when either model is absent, so a
-    project/status without model metadata renders exactly as before.
+    ``gpt-5.4 → opus``: the MODEL alone identifies its side (only claude runs
+    ``opus``, only codex runs ``gpt-*``), so prefixing the side name doubled
+    the information and cost the column the width it needed. The side name is
+    used only as the fallback for a task carrying no model.
     """
-    side_part = side or "?"
-    if model:
-        side_part = f"{side_part}·{model}"
-    reviewer_part = reviewer
-    if review_model:
-        reviewer_part = f"{reviewer_part}·{review_model}"
-    return f"{side_part} → {reviewer_part}"
+    left = display_model(model) or side or "?"
+    right = display_model(review_model) or reviewer
+    return f"{left} → {right}"
 
 
 def task_rows(status: dict, side_order: "list[str] | tuple[str, ...] | None" = None) -> list[dict]:
@@ -295,12 +295,32 @@ class TaskBoard(QWidget):
 
         self.table = QTableWidget(0, 3, self)
         self.table.setObjectName("taskTable")
-        self.table.setHorizontalHeaderLabels(["Task", "Status", "Side"])
+        # The column shows "<impl model> → <review model>", so it is about
+        # models, not sides -- the model already tells you which side runs it.
+        self.table.setHorizontalHeaderLabels(["Task", "Status", "Modele"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        # Rows are selectable/copyable (Ctrl+C) but never editable: the board
+        # is a read-only view of engine state, yet a reviewer needs to lift a
+        # `side -> reviewer` pair out of it as text.
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.horizontalHeader().setVisible(False)
-        layout.addWidget(self.table)
+
+        # Column sizing: the two narrow columns hug their content and the
+        # `Side` column takes every remaining pixel, so labels like
+        # "claude·sonnet → codex·gpt-5.6-sol" render in full instead of being
+        # elided to "claude·sonnet → ..." inside a default 100px column.
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setStretchLastSection(True)
+        # Fill the pane's free vertical space instead of sitting at sizeHint
+        # height with dead space (and a scrollbar) below it.
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.table, 1)
 
         self._rows: list[dict] = []
         self.placeholder.setVisible(True)
@@ -381,6 +401,15 @@ class TaskPanel(QWidget):
         self.label = QLabel(self.scroll)
         self.label.setObjectName("taskLabel")
         self.label.setWordWrap(True)
+        # The task text is the thing a user most often needs to quote back
+        # (into the chat, a grill, a commit message), so it must be
+        # mouse-selectable and Ctrl+C-copyable. A QLabel is not by default.
+        self.label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.label.setCursor(Qt.CursorShape.IBeamCursor)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.scroll.setWidget(self.label)
         layout.addWidget(self.scroll)
 
@@ -725,12 +754,13 @@ class SidePane(QWidget):
         layout.addWidget(self.task_panel)
 
         self.task_board = TaskBoard(self)
-        layout.addWidget(self.task_board)
+        # The board -- not a trailing spacer -- absorbs the pane's free height,
+        # so a 13-row task list uses the whole pane instead of scrolling inside
+        # a short table with dead space underneath.
+        layout.addWidget(self.task_board, 1)
 
         self.gate_panel = GatePanel(self._runner, self)
         layout.addWidget(self.gate_panel)
-
-        layout.addStretch(1)
 
         self._poll = QTimer(self)
         self._poll.setInterval(_POLL_INTERVAL_MS)

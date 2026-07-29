@@ -420,7 +420,7 @@ SPAR_CONTRACT_TESTS=1 python3 -m pytest tests/test_contract_real_cli.py  # real-
 - `spar/watch.py` / `spar/ui.py` — live viewer + viewer-window spawner
 - `spar/orchestrator.py` — debate loop, consensus, gates, turn prompts
 - `spar/exec/loop.py` — execution FSM: task branches, merges, final test
-- `spar/exec/review.py` — asymmetric cross-review loop, scope guard
+- `spar/exec/review.py` — asymmetric cross-review loop, scope + stray-write guard
 - `spar/exec/tasklist.py` — `## Tasks` parser + validation (deps, models, scopes)
 - `spar/exec/prompts.py` — implementer/reviewer prompt builders
 - `spar/exec/gitops.py` — thin git wrappers (branches, worktrees, diffs)

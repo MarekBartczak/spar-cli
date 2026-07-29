@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Checked indicator for auto mode. Stroke is TOKENS["armed"]. -->
+  <path d="M3 8.5 L6.3 12 L13 4.5" fill="none" stroke="#e5484d" stroke-width="2.6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

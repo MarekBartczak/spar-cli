@@ -6,6 +6,38 @@ SUCCEEDED end-to-end on a C++ app in `/home/marek/P_PROJ/spar_tests`
 (factorial CLI: 4 tasks, all merged, final test green, black-box suite 13/13,
 merged into the target master as `b5e3850`).
 
+## Stray writes outside the worktree now fail the turn (2026-07-29)
+
+Live incident on a DofiHub run: the t2 implementer wrote its handler through an
+absolute path into the MAIN repo checkout, noticed on its next turn, and
+re-wrote the file correctly inside its worktree. The stray untracked copy stayed
+in the main checkout and killed the run several steps later, at merge time:
+
+```
+error: The following untracked working tree files would be overwritten by merge:
+    app/backend/src/handlers/admin/getAdminIntegrationExportLink.ts
+```
+
+The scope guard only ever inspected the worktree, so a write that missed the
+worktree entirely was invisible to it. Three changes close this:
+
+- `spar/exec/review.py` — the per-turn guard now diffs `git status` of the MAIN
+  checkout across the turn (`repo=` argument, passed from every
+  `_implementer_turn` call site). Anything that became dirty there is swept via
+  `gitops.revert_paths`, the worktree is rolled back, and the turn is retried
+  with a warning naming the worktree; a second offence aborts the task. Dirt
+  that predates the turn is reported, never swept.
+- `spar/exec/prompts.py` — the implementer prompt now names the worktree as the
+  one root every edited path must resolve under (it previously never mentioned
+  it, so the model had to guess).
+- `spar/exec/loop.py` — `_sweep_repo_strays` runs before the task merge and
+  before the final merge, so a stray from any other source cannot turn into a
+  hard `GitError` mid-run.
+
+Recovery for a run already stuck this way: delete the stray from the main
+checkout (the good copy is committed on the task branch) and
+`spar exec --continue`.
+
 ## Intel macOS DMG packaging (2026-07-14)
 
 An isolated macOS packaging path now builds the PySide6 desktop GUI as an

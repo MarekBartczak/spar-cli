@@ -1086,3 +1086,245 @@ class TestSingleInstanceEntryPoint:
         win.raise_to_front()
         assert win.isMinimized() is False
         assert win.isVisible() is True
+
+
+class TestAutoMode:
+    """The status-bar Auto toggle: answers friction gates, defers real ones."""
+
+    @staticmethod
+    def _gate(name, options, **context):
+        return {"name": name, "options": options, "context": context}
+
+    @staticmethod
+    def _status(gate):
+        return {
+            "phase": "debate",
+            "pending_gate": gate,
+            "tasks": {},
+            "artifact": ".spar/artifact.md",
+            "branches": None,
+        }
+
+    def _window_with_spy(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        calls = []
+        window.runner.resume = lambda value=None, auto_exec=False: calls.append(
+            (value, auto_exec)
+        )
+        return window, calls
+
+    def test_checkbox_exists_in_status_bar_and_is_off_by_default(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QCheckBox
+
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        box = window.findChild(QCheckBox, "autoModeCheckbox")
+        assert box is not None
+        assert box.isChecked() is False  # never resumes runs unasked
+
+    def test_off_means_the_gate_is_left_alone(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+
+        assert calls == []
+
+    def test_on_extends_rounds_exhausted_by_two(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+
+        assert calls == [("extend:2", False)]
+
+    def test_answers_once_per_gate_even_though_the_poll_repeats(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+        status = self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+
+        window._on_status_changed(status)
+        window._on_status_changed(status)
+        window._on_status_changed(status)
+
+        assert calls == [("extend:2", False)]
+
+    def test_extension_stops_after_the_cap(self, qtbot, tmp_path):
+        from spar.automode import AUTO_EXTEND_LIMIT
+
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        # Each pass is a NEW gate identity (rounds grows), but the same
+        # extend key -- so the cap must still bite.
+        for rounds in range(1, AUTO_EXTEND_LIMIT + 3):
+            window._on_status_changed(
+                self._status(
+                    self._gate(
+                        "review_rounds", ["accept", "extend", "abort"],
+                        task_id="t3", rounds=rounds, reason="review_dispute",
+                    )
+                )
+            )
+
+        # extends up to the cap, then accepts -- it never stops to ask
+        assert calls == [("extend:2", False)] * AUTO_EXTEND_LIMIT + [("accept", False)] * 2
+
+    def test_broken_task_test_is_accepted_so_the_run_keeps_going(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(
+                self._gate(
+                    "review_rounds", ["accept", "extend", "fix", "abort"],
+                    task_id="t2", rounds=2, reason="test_escalation", command="yarn test",
+                )
+            )
+        )
+
+        assert calls == [("accept", False)]
+
+    def test_final_merge_is_accepted(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(self._status(self._gate("final_merge", ["accept", "abort"])))
+
+        assert calls == [("accept", False)]
+
+    def test_consensus_accepts_and_chains_exec(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+
+        window._on_status_changed(
+            self._status(self._gate("consensus", ["accept", "remarks", "abort"]))
+        )
+
+        assert calls == [("accept", True)]
+
+    def test_turning_auto_on_acts_on_an_already_pending_gate(self, qtbot, tmp_path):
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._on_status_changed(
+            self._status(self._gate("rounds_exhausted", ["accept", "extend", "abort"]))
+        )
+        assert calls == []
+
+        window._auto_checkbox.setChecked(True)
+
+        assert calls == [("extend:2", False)]
+
+    def test_setting_is_persisted_per_project(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window._auto_checkbox.setChecked(True)
+
+        reopened = MainWindow(tmp_path)
+        qtbot.addWidget(reopened)
+        assert reopened._auto_checkbox.isChecked() is True
+
+        other_project = tmp_path / "other"
+        other_project.mkdir()
+        elsewhere = MainWindow(other_project)
+        qtbot.addWidget(elsewhere)
+        assert elsewhere._auto_checkbox.isChecked() is False
+
+
+class TestAutoModeIsVisiblyArmed:
+    """Auto answers gates unasked, so an armed toggle must be unmissable."""
+
+    def test_theme_defines_an_armed_color_and_styles_the_checkbox(self):
+        assert "armed" in theme.TOKENS
+        qss = theme.build_qss()
+        assert "#autoModeCheckbox:checked" in qss
+        assert theme.TOKENS["armed"] in qss
+        # A real tick, not a filled square: painting the indicator background
+        # covers Qt's checkmark and leaves a bare colored box.
+        assert "check-armed.svg" in qss
+        assert "background-color: transparent" in qss
+        check = theme._ASSETS / "check-armed.svg"
+        assert check.exists()
+        assert theme.TOKENS["armed"] in check.read_text(encoding="utf-8")
+
+    def test_label_shouts_when_armed(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert window._auto_checkbox.text() == "Auto"
+        window._auto_checkbox.setChecked(True)
+        assert window._auto_checkbox.text() == "AUTO"
+        window._auto_checkbox.setChecked(False)
+        assert window._auto_checkbox.text() == "Auto"
+
+    def test_armed_label_survives_a_reopen(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+        window._auto_checkbox.setChecked(True)
+
+        reopened = MainWindow(tmp_path)
+        qtbot.addWidget(reopened)
+        assert reopened._auto_checkbox.text() == "AUTO"
+
+
+class TestAppIdentity:
+    """The desktop shell showed "launcher.py" + a generic icon: Qt derives
+    both from argv[0], and the detached launcher re-execs as
+    ``python -m spar.gui.launcher``."""
+
+    def test_icon_asset_ships_inside_the_package(self):
+        from spar.gui import app as app_mod
+
+        assert app_mod._ICON_PATH.exists(), app_mod._ICON_PATH
+        assert app_mod._ICON_PATH.read_text(encoding="utf-8").lstrip().startswith("<svg")
+
+    def test_app_icon_loads(self, qtbot):
+        from spar.gui.app import app_icon
+
+        assert not app_icon().isNull()
+
+    def test_identity_matches_the_installed_desktop_entry(self, qtbot):
+        from PySide6.QtWidgets import QApplication
+
+        from spar.gui.app import APP_DISPLAY_NAME, APP_ID, apply_app_identity
+
+        app = QApplication.instance()
+        apply_app_identity(app)
+        try:
+            assert app.applicationName() == APP_ID
+            assert app.applicationDisplayName() == APP_DISPLAY_NAME
+            # Wayland matches window -> .desktop through this name; it is what
+            # supplies the taskbar icon and label.
+            assert app.desktopFileName() == APP_ID
+            assert not app.windowIcon().isNull()
+        finally:
+            app.setApplicationDisplayName("")
+
+    def test_app_id_equals_the_desktop_entry_basename_and_wmclass(self):
+        from pathlib import Path
+
+        from spar.gui.app import APP_ID
+
+        entry = Path(__file__).resolve().parents[1] / "packaging" / "linux" / "spar.desktop.in"
+        text = entry.read_text(encoding="utf-8")
+        assert f"StartupWMClass={APP_ID}" in text
+        # install.sh substitutes @ICON@ with the same name
+        assert "Icon=@ICON@" in text
+
+    def test_installer_takes_the_icon_from_the_package(self):
+        from pathlib import Path
+
+        installer = (
+            Path(__file__).resolve().parents[1] / "packaging" / "linux" / "install.sh"
+        ).read_text(encoding="utf-8")
+        assert "spar/gui/assets/spar.svg" in installer
+
+    def test_window_carries_the_icon_too(self, qtbot, tmp_path):
+        window = MainWindow(tmp_path)
+        qtbot.addWidget(window)
+
+        assert not window.windowIcon().isNull()

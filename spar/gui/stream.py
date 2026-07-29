@@ -33,18 +33,21 @@ import zlib
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from spar.gui.theme import TOKENS
+from spar.models import display_model
 
 __all__ = ["LiveLogTailer", "StreamPane", "humanize_prefix", "derive_chip_specs"]
 
@@ -117,7 +120,7 @@ def humanize_prefix(prefix: str, models: dict | None = None) -> str:
         match = _ROUND_RE.match(parts[1])
         if match:
             segments = [side]
-            model = (models.get("sides") or {}).get(side)
+            model = display_model((models.get("sides") or {}).get(side))
             if model:
                 segments.append(model)
             segments.append(f"runda {int(match.group(1)) + 1}")
@@ -129,14 +132,14 @@ def humanize_prefix(prefix: str, models: dict | None = None) -> str:
         task_models = (models.get("tasks") or {}).get(task_id) or {}
         if action == "impl":
             segments = [side]
-            model = task_models.get("model")
+            model = display_model(task_models.get("model"))
             if model:
                 segments.append(model)
             segments += [task_id, "implementacja"]
             return " · ".join(segments)
         if action == "review":
             segments = [side]
-            model = task_models.get("review_model")
+            model = display_model(task_models.get("review_model"))
             if model:
                 segments.append(model)
             segments += [task_id, "recenzja"]
@@ -153,6 +156,28 @@ _RING_MAX = 20000
 
 _FILTER_ALL = "wszystko"
 _FILTER_SPAR = "spar"
+
+
+class _KeepOpenMenu(QMenu):
+    """A menu that stays open when a checkable entry is toggled.
+
+    Qt closes a menu on any activation, which makes picking several filters a
+    reopen-per-pick chore. Toggling a checkable entry keeps the menu up;
+    everything else behaves normally.
+    """
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.isCheckable():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def _task_sort_key(task_id: str) -> tuple:
+    """Natural order for task ids so t12 sorts after t2, not after t1."""
+    match = re.fullmatch(r"t(\d+)", task_id)
+    return (0, int(match.group(1))) if match else (1, task_id)
 
 
 def _color_for_prefix(prefix: str) -> str:
@@ -260,10 +285,12 @@ class StreamPane(QWidget):
 
         self._ring: deque[str] = deque(maxlen=_RING_MAX)
         self._models: dict = {"sides": {}, "tasks": {}}
-        self._active_filter: tuple[str, str | None] = (_FILTER_ALL, None)
+        # Selected filters, OR-ed together. EMPTY means "everything" -- there
+        # is no separate all-flag to keep in sync with the set.
+        self._selected: set[tuple[str, str | None]] = set()
         self._known_sides: list[str] = []
         self._known_tasks: list[str] = []
-        self._chip_buttons: dict[tuple[str, str | None], QPushButton] = {}
+        self._filter_actions: dict[tuple[str, str | None], QAction] = {}
         self._following = True
         # Guard set around every programmatic append/clear so ``_on_scroll``
         # ignores the transient ``valueChanged`` emissions Qt fires while
@@ -278,8 +305,18 @@ class StreamPane(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         controls = QHBoxLayout()
-        self.chips_layout = QHBoxLayout()
-        controls.addLayout(self.chips_layout)
+        # One dropdown instead of a row of chips: an exec run over a dozen
+        # tasks produced a chip per side AND per task, which overflowed the
+        # toolbar and stopped being readable. The menu keeps every option one
+        # click away and supports picking SEVERAL at once (OR-ed).
+        self.filter_button = QToolButton(self)
+        self.filter_button.setObjectName("filterButton")
+        self.filter_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.filter_menu = _KeepOpenMenu(self.filter_button)
+        self.filter_menu.setObjectName("filterMenu")
+        self.filter_button.setMenu(self.filter_menu)
+        controls.addWidget(self.filter_button)
         controls.addStretch(1)
 
         self.follow_button = QPushButton("Śledź", self)
@@ -314,8 +351,7 @@ class StreamPane(QWidget):
         self.text.verticalScrollBar().valueChanged.connect(self._on_scroll)
         layout.addWidget(self.text)
 
-        self._add_chip(_FILTER_ALL, None, _FILTER_ALL)
-        self._add_chip(_FILTER_SPAR, None, _FILTER_SPAR)
+        self._rebuild_filter_menu()
 
     # ------------------------------------------------------------------
     # Feeding
@@ -368,7 +404,7 @@ class StreamPane(QWidget):
             known = self._known_sides if kind == "side" else self._known_tasks
             if value not in known:
                 known.append(value)
-                self._add_chip(kind, value, value[:_CHIP_LABEL_MAX])
+                self._rebuild_filter_menu()
 
     # ------------------------------------------------------------------
     # Model resolution (fix 4 -- humanize_prefix's ``models`` argument)
@@ -376,26 +412,57 @@ class StreamPane(QWidget):
     def set_models(self, models: dict) -> None:
         """Update the side/task model lookup used to humanize prefixes and
         re-render the ring buffer so already-shown lines pick up any model
-        that only became known after they were first displayed."""
-        self._models = models or {"sides": {}, "tasks": {}}
+        that only became known after they were first displayed.
+
+        A no-op when the lookup is unchanged: this is called from the status
+        poll, and rerendering the whole ring every couple of seconds fights
+        the user's scrolling (and their text selection) for no gain."""
+        resolved = models or {"sides": {}, "tasks": {}}
+        if resolved == self._models:
+            return
+        self._models = resolved
         self._rerender_all()
 
     # ------------------------------------------------------------------
     # Filtering
     # ------------------------------------------------------------------
     def set_filter(self, kind: str, value: str | None = None) -> None:
-        """Set the active client-side filter and re-render from the ring buffer."""
-        self._active_filter = (kind, value)
+        """Select exactly one filter (``_FILTER_ALL`` clears the selection)."""
+        self.set_filters([] if kind == _FILTER_ALL else [(kind, value)])
+
+    def set_filters(self, filters) -> None:
+        """Replace the whole selection; empty means "everything"."""
+        self._selected = {(k, v) for k, v in filters}
+        self._sync_filter_ui()
         self._rerender_all()
 
+    def toggle_filter(self, kind: str, value: str | None = None) -> None:
+        """Add/remove one filter from the selection (several may be active)."""
+        key = (kind, value)
+        selected = set(self._selected)
+        if key in selected:
+            selected.discard(key)
+        else:
+            selected.add(key)
+        self.set_filters(selected)
+
+    @property
+    def active_filters(self) -> "set[tuple[str, str | None]]":
+        """The current selection; empty set means no filtering."""
+        return set(self._selected)
+
     def _line_matches(self, line: str) -> bool:
-        kind, value = self._active_filter
+        if not self._selected:
+            return True
+        return any(self._matches_filter(line, kind, value) for kind, value in self._selected)
+
+    @staticmethod
+    def _matches_filter(line: str, kind: str, value: str | None) -> bool:
         if kind == _FILTER_ALL:
             return True
-        if kind == _FILTER_SPAR:
-            match = _PREFIX_RE.match(line)
-            return match is None
         match = _PREFIX_RE.match(line)
+        if kind == _FILTER_SPAR:
+            return match is None
         if not match:
             return False
         parts = match.group(1).split()
@@ -408,6 +475,13 @@ class StreamPane(QWidget):
         return True
 
     def _rerender_all(self) -> None:
+        # ``clear()`` resets the scrollbar to 0, so a rerender while the user
+        # is reading history (following OFF) used to dump them at the TOP of
+        # the log. Since ``set_models`` rerenders on every status poll, that
+        # happened every couple of seconds and made scrolling back unusable.
+        # Remember where they were and put them back.
+        bar = self.text.verticalScrollBar()
+        previous = bar.value()
         self._programmatic_scroll = True
         try:
             self.text.clear()
@@ -416,28 +490,72 @@ class StreamPane(QWidget):
                     self._append_line(line)
             if self._following:
                 self._scroll_to_bottom()
+            else:
+                bar.setValue(min(previous, bar.maximum()))
         finally:
             self._programmatic_scroll = False
 
     # ------------------------------------------------------------------
     # Chips
     # ------------------------------------------------------------------
-    def _add_chip(self, kind: str, value: str | None, label: str) -> None:
-        key = (kind, value)
-        if key in self._chip_buttons:
-            return
-        button = QPushButton(label, self)
-        button.setObjectName(f"filterChip_{kind}_{value or ''}")
-        button.setCheckable(True)
-        button.setChecked(kind == _FILTER_ALL)
-        button.clicked.connect(lambda _checked=False, k=kind, v=value: self._on_chip_clicked(k, v))
-        self._chip_buttons[key] = button
-        self.chips_layout.addWidget(button)
+    def _rebuild_filter_menu(self) -> None:
+        """Rebuild the dropdown from the prefixes seen so far.
 
-    def _on_chip_clicked(self, kind: str, value: str | None) -> None:
-        for key, button in self._chip_buttons.items():
-            button.setChecked(key == (kind, value))
-        self.set_filter(kind, value)
+        Cheap enough to redo on every newly discovered side/task (a handful of
+        entries) and it keeps the task section in natural order -- appending in
+        discovery order gave "t1 t2 t3 t4 t12 t5 …".
+        """
+        self.filter_menu.clear()
+        self._filter_actions.clear()
+
+        self._add_filter_action(_FILTER_ALL, None, _FILTER_ALL)
+        self.filter_menu.addSeparator()
+        self._add_filter_action(_FILTER_SPAR, None, _FILTER_SPAR)
+        for side in self._known_sides:
+            self._add_filter_action("side", side, side[:_CHIP_LABEL_MAX])
+        if self._known_tasks:
+            self.filter_menu.addSection("Zadania")
+            for task in sorted(self._known_tasks, key=_task_sort_key):
+                self._add_filter_action("task", task, task[:_CHIP_LABEL_MAX])
+        self._sync_filter_ui()
+
+    def _add_filter_action(self, kind: str, value: str | None, label: str) -> None:
+        action = QAction(label, self.filter_menu)
+        action.setObjectName(f"filterOption_{kind}_{value or ''}")
+        action.setCheckable(True)
+        action.triggered.connect(
+            lambda _checked=False, k=kind, v=value: self._on_option_triggered(k, v)
+        )
+        self._filter_actions[(kind, value)] = action
+        self.filter_menu.addAction(action)
+
+    def _on_option_triggered(self, kind: str, value: str | None) -> None:
+        if kind == _FILTER_ALL:
+            self.set_filter(_FILTER_ALL)
+            return
+        self.toggle_filter(kind, value)
+
+    def _sync_filter_ui(self) -> None:
+        """Mirror ``_selected`` onto the menu's check states and the label."""
+        for key, action in self._filter_actions.items():
+            action.setChecked(
+                len(self._selected) == 0 if key[0] == _FILTER_ALL else key in self._selected
+            )
+        self.filter_button.setText(self._filter_summary())
+
+    def _filter_summary(self) -> str:
+        if not self._selected:
+            return _FILTER_ALL
+        labels = [
+            self._filter_actions[key].text()
+            for key in self._filter_actions
+            if key in self._selected
+        ]
+        if not labels:  # a selection whose option is gone (ring rebuilt)
+            return _FILTER_ALL
+        if len(labels) == 1:
+            return labels[0]
+        return f"{labels[0]} +{len(labels) - 1}"
 
     # ------------------------------------------------------------------
     # Rendering

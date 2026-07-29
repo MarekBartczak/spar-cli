@@ -44,11 +44,19 @@ class StreamSink:
         self._fh = open(spar_dir / "live.log", "w", encoding="utf-8")
 
     def event(self, prefix: str, line: str) -> None:
-        """A ``[<prefix>] <line>`` display line from an adapter turn."""
-        text = f"[{prefix}] {line}"
-        if not self.quiet:
-            print(text, file=self._stdout)
-        self._fh.write(text + "\n")
+        """A ``[<prefix>] <line>`` display line from an adapter turn.
+
+        An embedded newline would emit physical lines with NO prefix, which
+        readers (``spar watch``'s colorizer, the GUI pane's per-side filter --
+        which classifies a prefix-less line as spar's OWN log) would then
+        attribute to the wrong source. So every physical line gets its own
+        prefix; the invariant holds regardless of what an adapter hands in.
+        """
+        for part in line.split("\n"):
+            text = f"[{prefix}] {part}"
+            if not self.quiet:
+                print(text, file=self._stdout)
+            self._fh.write(text + "\n")
         self._fh.flush()
 
     def log(self, message: str) -> None:

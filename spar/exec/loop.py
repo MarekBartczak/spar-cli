@@ -686,6 +686,7 @@ class Executor:
                 timeout_sec=self.execution.turn_timeout_sec,
                 warning=None,
                 on_event=on_event_impl,
+                repo=self.repo,
             )
 
             # Empty-implementation guard (§6/§8): if the initial turn created
@@ -715,6 +716,7 @@ class Executor:
                         "merely describe the change."
                     ),
                     on_event=on_event_impl,
+                    repo=self.repo,
                 )
                 if self._task_branch_empty(
                     branch, worktree, state.integration_branch
@@ -889,6 +891,7 @@ class Executor:
                 timeout_sec=self.execution.turn_timeout_sec,
                 warning=warning,
                 on_event=on_event_impl,
+                repo=self.repo,
             )
             ts.status = "review"
             self.store.save(state)
@@ -967,6 +970,7 @@ class Executor:
         """
         task = ts.task
         # Merge the task branch into integration.
+        self._sweep_repo_strays(f"before merging {task.id}")
         gitops.checkout(self.repo, state.integration_branch)
         gitops.merge_no_ff(
             self.repo, branch, f"spar: merge {task.id} ({task.side}) into integration"
@@ -1305,6 +1309,7 @@ class Executor:
             self.log(summary)
 
         current_target_oid = gitops.rev_parse(self.repo, target)
+        self._sweep_repo_strays("before the final merge")
         gitops.checkout(self.repo, target)
         merge_msg = f"spar: merge integration into {target}"
         if current_target_oid == state.target_base_oid:
@@ -1438,6 +1443,34 @@ class Executor:
         """
         committed = gitops.changed_files(self.repo, integration_base, branch)
         return not committed and gitops.is_clean(worktree)
+
+    def _sweep_repo_strays(self, when: str) -> None:
+        """Restore the main checkout to clean before a branch switch or merge.
+
+        ``spar exec`` refuses to start unless the main checkout is clean, and
+        nothing in a run is supposed to write there (implementers work in
+        worktrees, the reviewer adapter is read-only), so anything dirty here is
+        a stray agent write. The per-turn guard in ``_implementer_turn`` catches
+        those at the source; this is the belt to its braces, because a stray
+        that survives makes ``git checkout``/``git merge`` fail with "untracked
+        working tree files would be overwritten by merge" — a hard abort many
+        steps away from the turn that caused it (live incident).
+        """
+        strays = gitops.status_paths(self.repo)
+        if not strays:
+            return
+        self.log(
+            f"spar exec: main checkout dirty {when}: {list(strays)}; these belong in "
+            "a task worktree, not here — reverting them so the merge can proceed."
+        )
+        gitops.revert_paths(self.repo, strays)
+        remaining = gitops.status_paths(self.repo)
+        if remaining:
+            raise GitError(
+                "main checkout still dirty after reverting stray paths: "
+                f"{list(remaining)}; clean it up manually and resume with "
+                "'spar exec --continue'"
+            )
 
     def _task_branch(self, task: Task) -> str:
         return f"spar/{task.id}-{task.side}"

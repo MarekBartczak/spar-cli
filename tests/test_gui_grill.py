@@ -72,9 +72,7 @@ class TestGrillDialog:
         assert fake.start_calls == ["Zbuduj X"]
         assert "Zbuduj X" in dialog.transcript.toPlainText()
 
-    def test_option_buttons_render_truncated_with_full_tooltip_and_click_answers(
-        self, qtbot, tmp_path
-    ):
+    def test_option_buttons_render_full_label_and_click_answers(self, qtbot, tmp_path):
         fake = FakeGrillSession()
         dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
         qtbot.addWidget(dialog)
@@ -86,10 +84,11 @@ class TestGrillDialog:
         btn_a = dialog.findChild(QPushButton, "option_A")
         btn_b = dialog.findChild(QPushButton, "option_B")
         assert btn_a is not None and btn_b is not None
-        assert btn_b.text() != long_label  # truncated for display
-        assert btn_b.text().startswith("B.")  # letter prefix (vertical layout)
-        assert len(btn_b.text()) <= 80 + len("B.  ")
-        assert btn_b.toolTip() == long_label  # full text preserved
+        # Full wording on the button itself -- no "…", no length cap; the
+        # label wraps instead of eliding.
+        assert btn_b.text() == f"B.  {long_label}"
+        assert "…" not in btn_b.text()
+        assert btn_b.toolTip() == long_label
 
         btn_b.click()
         assert fake.answer_calls == ["B"]
@@ -633,3 +632,87 @@ class TestGrillSession:
         finally:
             sess.stop()
             sess._thread.wait(3000)
+
+
+# ---------------------------------------------------------------------------
+# Ctrl+V of a screenshot: saved under .spar/pasted/, path inserted as text
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_QT_DIALOG, reason="requires PySide6")
+class TestImagePaste:
+    def _mime_with_image(self):
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QImage
+
+        image = QImage(4, 4, QImage.Format.Format_RGB32)
+        image.fill(0x336699)
+        mime = QMimeData()
+        mime.setImageData(image)
+        return mime
+
+    def test_pasted_image_is_saved_and_its_path_inserted(self, qtbot, tmp_path):
+        from spar.gui.grill_dialog import _InputEdit
+
+        paste_dir = tmp_path / ".spar" / "pasted"
+        edit = _InputEdit(lambda: None, paste_dir=paste_dir)
+        qtbot.addWidget(edit)
+
+        assert edit.canInsertFromMimeData(self._mime_with_image()) is True
+        edit.insertFromMimeData(self._mime_with_image())
+
+        files = sorted(paste_dir.glob("paste-*.png"))
+        assert len(files) == 1
+        assert files[0].stat().st_size > 0
+        assert str(files[0]) in edit.toPlainText()
+
+    def test_pasted_path_is_space_separated_from_existing_text(self, qtbot, tmp_path):
+        from spar.gui.grill_dialog import _InputEdit
+
+        edit = _InputEdit(lambda: None, paste_dir=tmp_path / ".spar" / "pasted")
+        qtbot.addWidget(edit)
+        edit.setPlainText("zobacz")
+        edit.moveCursor(edit.textCursor().MoveOperation.End)
+
+        edit.insertFromMimeData(self._mime_with_image())
+
+        text = edit.toPlainText()
+        assert text.startswith("zobacz ")
+        assert ".png" in text
+
+    def test_text_paste_still_goes_through_the_default_path(self, qtbot, tmp_path):
+        from PySide6.QtCore import QMimeData
+
+        from spar.gui.grill_dialog import _InputEdit
+
+        paste_dir = tmp_path / ".spar" / "pasted"
+        edit = _InputEdit(lambda: None, paste_dir=paste_dir)
+        qtbot.addWidget(edit)
+
+        mime = QMimeData()
+        mime.setText("zwykły tekst")
+        edit.insertFromMimeData(mime)
+
+        assert edit.toPlainText() == "zwykły tekst"
+        assert not paste_dir.exists()  # nothing written for a text paste
+
+    def test_without_paste_dir_image_paste_falls_back(self, qtbot):
+        from spar.gui.grill_dialog import _InputEdit
+
+        edit = _InputEdit(lambda: None)
+        qtbot.addWidget(edit)
+
+        # No project dir to write into: must not raise, must not invent a path.
+        edit.insertFromMimeData(self._mime_with_image())
+        assert ".png" not in edit.toPlainText()
+
+    def test_dialog_input_writes_into_the_project_spar_dir(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+
+        dialog.input_edit.insertFromMimeData(self._mime_with_image())
+
+        # .spar/ is the one tree the artifact scope guard skips wholesale.
+        files = sorted((tmp_path / ".spar" / "pasted").glob("paste-*.png"))
+        assert len(files) == 1
