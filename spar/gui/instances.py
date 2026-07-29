@@ -15,9 +15,10 @@ module owns everything that has to agree on *which* project a process is:
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QProcess, QSettings
 
 _RECENT_KEY = "recent_projects"
 _RECENT_MAX = 10
@@ -77,3 +78,35 @@ def push_recent_project(project_dir: "str | Path") -> None:
     path = str(_resolved(project_dir))
     rest = [p for p in recent_projects() if p != path]
     _settings().setValue(_RECENT_KEY, [path] + rest[: _RECENT_MAX - 1])
+
+
+def _macos_bundle_path() -> "Path | None":
+    """``…/Spar.app`` for a frozen macOS bundle, else None."""
+    exe = Path(sys.executable)
+    for parent in exe.parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def new_window_command(project_dir: "str | Path") -> list[str]:
+    """argv that launches a NEW gui process for ``project_dir``."""
+    target = str(_resolved(project_dir))
+    if getattr(sys, "frozen", False):
+        bundle = _macos_bundle_path() if sys.platform == "darwin" else None
+        if bundle is not None:
+            # Without -n, `open` just activates the running bundle instead of
+            # starting a second instance — which is exactly what a NEW project
+            # window must not do.
+            return ["open", "-n", "-a", str(bundle), "--args", "--dir", target]
+        return [sys.executable, "--dir", target]
+    return [sys.executable, "-m", "spar.cli", "gui", "--dir", target]
+
+
+def spawn_new_window(project_dir: "str | Path") -> bool:
+    """Start a detached gui process for ``project_dir`` (fire and forget)."""
+    program, *arguments = new_window_command(project_dir)
+    ok, _pid = QProcess.startDetached(
+        program, arguments, str(_resolved(project_dir))
+    )
+    return bool(ok)

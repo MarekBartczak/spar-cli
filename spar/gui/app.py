@@ -21,12 +21,15 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QFileDialog,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QSplitter,
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -35,7 +38,13 @@ from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
-from spar.gui.instances import scoped, window_title
+from spar.gui.instances import (
+    push_recent_project,
+    recent_projects,
+    scoped,
+    spawn_new_window,
+    window_title,
+)
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
@@ -94,6 +103,15 @@ class Toolbar(QToolBar):
             action.setEnabled(False)
             self.actions_by_label[label] = action
 
+        # ADR 0007: one window per project — this button opens ANOTHER
+        # project in a NEW process, never swaps the project under this one.
+        self.project_button = QToolButton(self)
+        self.project_button.setObjectName("projectButton")
+        self.project_button.setText("Projekt")
+        self.project_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.project_button.setMenu(QMenu(self.project_button))
+        self.addWidget(self.project_button)
+
 
 class RightColumn(QWidget):
     """Right-side tool column: SidePane (Taski + gate) over the chat panel.
@@ -145,6 +163,7 @@ class MainWindow(QMainWindow):
 
         self.toolbar = Toolbar(self)
         self.addToolBar(self.toolbar)
+        self._rebuild_project_menu()
 
         # Side's config model, resolved once per session, feeds StreamPane's
         # human-readable prefix translation for debate rounds (fix 4). Built
@@ -655,6 +674,45 @@ class MainWindow(QMainWindow):
         )
         return True
 
+    def _rebuild_project_menu(self) -> None:
+        """Populate the Projekt dropdown: picker + recent projects."""
+        menu = self.toolbar.project_button.menu()
+        menu.clear()
+        pick = menu.addAction("Otwórz projekt…")
+        pick.triggered.connect(self._pick_project)
+        current = str(Path(self.project_dir).resolve())
+        others = [p for p in recent_projects() if p != current]
+        if others:
+            menu.addSeparator()
+            for path in others:
+                action = menu.addAction(window_title(path).removeprefix("spar — "))
+                action.setData(path)
+                action.triggered.connect(
+                    lambda _checked=False, p=path: self.open_project(p)
+                )
+
+    def _pick_project(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Wybierz katalog projektu",
+            str(Path(self.project_dir).parent),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if selected:
+            self.open_project(selected)
+
+    def open_project(self, project_dir: "str | Path") -> None:
+        """Open ``project_dir`` in a NEW window (a new OS process)."""
+        push_recent_project(project_dir)
+        if not spawn_new_window(project_dir):
+            QMessageBox.warning(
+                self,
+                "spar",
+                f"Nie udało się otworzyć nowego okna dla:\n{project_dir}",
+            )
+            return
+        self._rebuild_project_menu()
+
     def _skey(self, key: str) -> str:
         """Project-scoped QSettings key (ADR 0007)."""
         return scoped(self.project_dir, key)
@@ -734,6 +792,7 @@ def main_gui(argv: list[str]) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setStyleSheet(build_qss())
 
+    push_recent_project(project_dir)
     window = MainWindow(project_dir)
     window.show()
 

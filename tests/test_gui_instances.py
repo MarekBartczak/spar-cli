@@ -93,3 +93,50 @@ class TestWindowTitle:
 
     def test_root_level_project_has_no_empty_parens(self):
         assert instances.window_title("/") == "spar — /"
+
+
+class TestNewWindowCommand:
+    def test_normal_install_spawns_module_entry_point(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(instances.sys, "frozen", False, raising=False)
+        cmd = instances.new_window_command(tmp_path)
+        assert cmd[1:] == ["-m", "spar.cli", "gui", "--dir", str(tmp_path.resolve())]
+
+    def test_frozen_macos_uses_open_dash_n(self, tmp_path, monkeypatch):
+        bundle = tmp_path / "Spar.app"
+        exe = bundle / "Contents" / "MacOS" / "Spar"
+        exe.parent.mkdir(parents=True)
+        exe.touch()
+        monkeypatch.setattr(instances.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(instances.sys, "executable", str(exe))
+        monkeypatch.setattr(instances.sys, "platform", "darwin")
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        assert instances.new_window_command(proj) == [
+            "open", "-n", "-a", str(bundle), "--args", "--dir", str(proj.resolve()),
+        ]
+
+    def test_frozen_non_macos_reinvokes_the_executable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(instances.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(instances.sys, "executable", "/opt/spar/spar")
+        monkeypatch.setattr(instances.sys, "platform", "linux")
+        cmd = instances.new_window_command(tmp_path)
+        assert cmd == ["/opt/spar/spar", "--dir", str(tmp_path.resolve())]
+
+
+class TestSpawnNewWindow:
+    def test_starts_detached_with_the_command(self, tmp_path, monkeypatch):
+        from PySide6.QtCore import QProcess
+
+        seen = {}
+
+        def fake_detached(program, arguments, working_dir):
+            seen["program"] = program
+            seen["arguments"] = arguments
+            seen["cwd"] = working_dir
+            return True, 4242
+
+        monkeypatch.setattr(QProcess, "startDetached", staticmethod(fake_detached))
+        monkeypatch.setattr(instances.sys, "frozen", False, raising=False)
+        assert instances.spawn_new_window(tmp_path) is True
+        assert seen["arguments"][-2:] == ["--dir", str(tmp_path.resolve())]
+        assert seen["cwd"] == str(tmp_path.resolve())

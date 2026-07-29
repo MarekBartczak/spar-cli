@@ -971,3 +971,69 @@ class TestWindowTitleWiring:
         qtbot.addWidget(win)
         assert win.windowTitle() == window_title(proj)
         assert "repo" in win.windowTitle()
+
+
+class TestOpenProjectAction:
+    def test_toolbar_has_a_project_button_with_a_menu(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QToolButton
+
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        assert button is not None
+        assert button.menu() is not None
+        labels = [a.text() for a in button.menu().actions()]
+        assert "Otwórz projekt…" in labels
+
+    def test_open_project_spawns_a_detached_window_and_records_recent(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        from spar.gui import app as app_mod
+        from spar.gui.instances import recent_projects
+
+        spawned = []
+        monkeypatch.setattr(
+            app_mod, "spawn_new_window", lambda p: spawned.append(str(p)) or True
+        )
+        other = tmp_path / "other"
+        other.mkdir()
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        win.open_project(other)
+        assert spawned == [str(other)]
+        assert str(other.resolve()) in recent_projects()
+
+    def test_menu_lists_recent_projects_and_opens_them(self, qtbot, tmp_path, monkeypatch):
+        from PySide6.QtWidgets import QToolButton
+
+        from spar.gui import app as app_mod
+        from spar.gui.instances import push_recent_project
+
+        spawned = []
+        monkeypatch.setattr(
+            app_mod, "spawn_new_window", lambda p: spawned.append(str(p)) or True
+        )
+        other = tmp_path / "other"
+        other.mkdir()
+        push_recent_project(other)
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        recent_action = [
+            a for a in button.menu().actions() if a.data() == str(other.resolve())
+        ]
+        assert len(recent_action) == 1
+        recent_action[0].trigger()
+        assert spawned == [str(other.resolve())]
+
+    def test_current_project_is_not_offered_in_recents(self, qtbot, tmp_path):
+        from PySide6.QtWidgets import QToolButton
+
+        from spar.gui.instances import push_recent_project
+
+        push_recent_project(tmp_path)
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        button = win.findChild(QToolButton, "projectButton")
+        data = [a.data() for a in button.menu().actions()]
+        assert str(tmp_path.resolve()) not in data
