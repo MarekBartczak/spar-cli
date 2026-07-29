@@ -1,0 +1,77 @@
+"""Tests for spar.gui.instances — per-project identity and window plumbing."""
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from spar.gui import instances
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_qsettings():
+    from PySide6.QtCore import QSettings
+
+    QSettings("spar", "gui").clear()
+    yield
+
+
+class TestProjectKey:
+    def test_stable_for_the_same_directory(self, tmp_path):
+        assert instances.project_key(tmp_path) == instances.project_key(tmp_path)
+
+    def test_differs_between_directories(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        assert instances.project_key(a) != instances.project_key(b)
+
+    def test_normalizes_relative_and_dotted_paths(self, tmp_path, monkeypatch):
+        (tmp_path / "proj").mkdir()
+        monkeypatch.chdir(tmp_path / "proj")
+        # "." , "../proj" and the absolute path are ONE project.
+        assert instances.project_key(".") == instances.project_key(tmp_path / "proj")
+        assert instances.project_key("../proj") == instances.project_key(tmp_path / "proj")
+
+    def test_is_short_hex(self, tmp_path):
+        key = instances.project_key(tmp_path)
+        assert len(key) == 12
+        assert all(c in "0123456789abcdef" for c in key)
+
+
+class TestScoped:
+    def test_prefixes_with_project_key(self, tmp_path):
+        key = instances.project_key(tmp_path)
+        assert instances.scoped(tmp_path, "rails/centre_view") == (
+            f"projects/{key}/rails/centre_view"
+        )
+
+
+class TestRecentProjects:
+    def test_empty_by_default(self):
+        assert instances.recent_projects() == []
+
+    def test_push_puts_newest_first_and_dedups(self, tmp_path):
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        instances.push_recent_project(a)
+        instances.push_recent_project(b)
+        instances.push_recent_project(a)
+        assert instances.recent_projects() == [str(a.resolve()), str(b.resolve())]
+
+    def test_caps_at_ten(self, tmp_path):
+        for i in range(12):
+            d = tmp_path / f"p{i}"
+            d.mkdir()
+            instances.push_recent_project(d)
+        assert len(instances.recent_projects()) == 10
+        assert instances.recent_projects()[0] == str((tmp_path / "p11").resolve())
+
+    def test_drops_vanished_directories(self, tmp_path):
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        instances.push_recent_project(gone)
+        gone.rmdir()
+        assert instances.recent_projects() == []
