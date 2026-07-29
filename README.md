@@ -109,6 +109,29 @@ spar gui                  # operates on the current directory
 spar gui --dir PATH       # operate on a different project directory
 ```
 
+#### Several projects at once
+
+One window = one project = one OS process (ADR 0007), the WebStorm model.
+There is no limit on how many run in parallel:
+
+```bash
+spar gui --dir ~/P_PROJ/app_a    # window 1, its own engine and .spar/lock
+spar gui --dir ~/P_PROJ/app_b    # window 2, fully independent
+```
+
+Inside the GUI the toolbar's **Projekt** menu does the same without a
+terminal: `Otwórz projekt…` picks a directory, and the recent projects below
+it open with one click — both in a NEW window, never swapping the project
+under the current one. Each window remembers its own layout (splitters,
+Strumień/Pliki view, rail visibility, size and position); the search and
+file-mask history stay shared.
+
+Launching the GUI a second time on a project that is **already open** does not
+open a second window: it raises the running one and exits. A read-only
+`LOCKED` window still appears when a foreign *engine* holds
+`<project>/.spar/lock` (e.g. a headless `spar --continue` in that directory) —
+there is no window to raise in that case.
+
 #### Intel macOS DMG
 
 The desktop application is packaged separately from the portable Python

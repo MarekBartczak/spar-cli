@@ -154,31 +154,43 @@ comparison on `.spar/requirements.md`, whose content then pre-fills the
 new-debate task field via "Użyj w debacie". Manual smoke test (live grill
 session end-to-end in the running GUI) still pending.
 
-## Next up: multi-project GUI (decided 2026-07-28)
+## Multi-project GUI landed (2026-07-28, `3f35fa8..HEAD` on feat/multi-project-gui)
 
-Working on 2-3 (or 200 — no artificial cap) projects in parallel: **one
-window = one project = one OS process**, WebStorm-style UX. Rejected the
-single-process/tabs variant: the GUI already spawns the engine per project
-and holds a per-project `flock`, so tabs would put N engines and N live.log
-tailers on one Qt event loop (a hung adapter freezing every project) and
-would require rewriting the whole singleton-per-window state. Note IntelliJ
-itself hosts multiple project frames in ONE JVM — we copy the UX, not the
-implementation.
+One window = one project = one OS process, WebStorm-style, no instance cap
+(ADR `docs/adr/0007-one-window-per-project.md`; plan
+`docs/superpowers/plans/2026-07-28-multi-project-gui.md`, 5 challenge rounds,
+9 MUSTs, all accepted). What shipped, per task:
 
-Already works today: `spar gui --dir A` + `spar gui --dir B` are independent
-processes with independent locks; the title bar carries the project name.
-Tranche scope (plan: `docs/superpowers/plans/2026-07-28-multi-project-gui.md`):
+1. `spar/gui/instances.py` — per-project identity (`project_key`, sha1 of the
+   resolved path, 12 hex chars), `scoped()` QSettings keys, global
+   recent-projects list.
+2. Layout state scoped per project: `mainSplitter/state`,
+   `rails/right_split`, `rails/centre_view`, `rails/{tasks,chat}_visible`,
+   `files/tree_split`, plus a new `window/geometry`. Global on purpose:
+   `files/mask_history`, `files/search_dialog_geometry`, `recent_projects`.
+   No migration of the old global keys (first launch per project = defaults).
+3. Window title is `spar — <name> (<parent>)` with `$HOME` collapsed to `~`,
+   so two same-named repos are distinguishable.
+4. Toolbar `Projekt` menu: `Otwórz projekt…` picker + recent projects, each
+   opening a NEW detached process (`open -n` for the frozen macOS bundle).
+5. Single instance per project: `SingleInstanceGuard` over a
+   `QLocalServer`/`QLocalSocket` named `spar-gui-<project key>`. A duplicate
+   launch raises the running window and exits 0. `RunnerState.LOCKED` is
+   untouched — it still covers a foreign ENGINE holding `.spar/lock`.
 
-1. `Otwórz projekt…` in the GUI: directory picker + recent-projects list +
-   detached spawn (`open -n` for the frozen macOS bundle).
-2. Per-project QSettings scope for layout state (splitters, centre view,
-   rail visibility, window geometry); search/mask history stays global.
-3. Window title carries the parent path, so two same-named repos differ.
-4. Single-instance-per-project: a second `spar gui` on the SAME directory
-   raises the existing window (QLocalServer/QLocalSocket named per resolved
-   path) instead of opening a read-only `LOCKED` window. `LOCKED` stays for
-   a foreign *engine* holding the lock (e.g. a headless CLI run), where
-   there is no window to raise.
+Two PySide6 traps the review caught, both verified against the installed
+PySide6, both now load-bearing in the code and the ADR: `QLocalSocket.
+waitForBytesWritten()` returns False after a successful `flush()` even though
+the peer received the bytes (delivery is proven by `bytesToWrite() == 0`), and
+`QLocalServer.removeServer()` succeeds against a LIVE listener, after which
+both servers report `isListening()` — hence probe-before-remove and a
+`release()` that no-ops for a guard that never claimed.
+
+Suite: **1077 passed, 2 skipped** (was 1035). **Manual multi-window smoke is
+pending (user-driven):** two projects side by side with a run in one; distinct
+per-window layouts across restarts; a third launch on an open project raising
+its window; `Projekt → Otwórz projekt…` opening a third window; and on the
+macOS bundle, `open -n` really starting a second `Spar.app`.
 
 ## Where things are
 
