@@ -959,3 +959,15 @@ class TestPerProjectSettings:
         other = MainWindow(b)
         qtbot.addWidget(other)
         assert other.size() != reopened.size()
+
+
+class TestWindowTitleWiring:
+    def test_main_window_uses_the_full_title(self, qtbot, tmp_path):
+        from spar.gui.instances import window_title
+
+        proj = tmp_path / "repo"
+        proj.mkdir()
+        win = MainWindow(proj)
+        qtbot.addWidget(win)
+        assert win.windowTitle() == window_title(proj)
+        assert "repo" in win.windowTitle()

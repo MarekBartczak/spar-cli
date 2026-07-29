@@ -38,6 +38,21 @@ def scoped(project_dir: "str | Path", key: str) -> str:
     return f"projects/{project_key(project_dir)}/{key}"
 
 
+def window_title(project_dir: "str | Path") -> str:
+    """Title bar text: project name plus its parent, so two same-named
+    repos in different trees are distinguishable across windows."""
+    path = _resolved(project_dir)
+    if path.parent == path:  # filesystem root
+        return f"spar — {path}"
+    parent = str(path.parent)
+    home = str(Path.home())
+    if parent == home:
+        parent = "~"
+    elif parent.startswith(home + "/"):
+        parent = "~/" + parent[len(home) + 1:]
+    return f"spar — {path.name} ({parent})"
+
+
 def _settings() -> QSettings:
     return QSettings("spar", "gui")
 

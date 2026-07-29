@@ -35,7 +35,7 @@ from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
-from spar.gui.instances import scoped
+from spar.gui.instances import scoped, window_title
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
@@ -136,7 +136,7 @@ class MainWindow(QMainWindow):
     def __init__(self, project_dir: "str | Path", parent=None):
         super().__init__(parent)
         self.project_dir = Path(project_dir)
-        self.setWindowTitle(f"spar — {self.project_dir.name}")
+        self.setWindowTitle(window_title(self.project_dir))
         # A real default size: without it the window starts at whatever tiny
         # size Qt picks before a show(), which is too small for the splitter
         # to honor the 1.7:1 ratio against the side pane's now-nonzero

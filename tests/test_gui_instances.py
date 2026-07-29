@@ -75,3 +75,21 @@ class TestRecentProjects:
         instances.push_recent_project(gone)
         gone.rmdir()
         assert instances.recent_projects() == []
+
+
+class TestWindowTitle:
+    def test_includes_name_and_parent(self, tmp_path):
+        proj = tmp_path / "ai_fight"
+        proj.mkdir()
+        title = instances.window_title(proj)
+        assert title.startswith("spar — ai_fight (")
+        assert str(tmp_path) in title
+
+    def test_collapses_home_to_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proj = tmp_path / "P_PROJ" / "ai_fight"
+        proj.mkdir(parents=True)
+        assert instances.window_title(proj) == "spar — ai_fight (~/P_PROJ)"
+
+    def test_root_level_project_has_no_empty_parens(self):
+        assert instances.window_title("/") == "spar — /"
