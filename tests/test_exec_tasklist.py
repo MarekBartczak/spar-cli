@@ -172,3 +172,57 @@ def test_empty_impl_models_allows_any_catalog_model():
 """
     tasks = parse_task_list(plan, sides=sides, order=["claude", "codex"])
     assert tasks[0].model == "haiku"
+
+
+# ---------------------------------------------------------------------------
+# Pipes inside values
+#
+# Regression: the description used to end at the FIRST pipe and fields were
+# split on every ` | `, so a plan whose description mentioned `admin|ops`,
+# `export=enabled|disabled` or a TS union `string | undefined` failed to parse
+# ("expected field 'side=...'"). A real DofiHub plan tripped this on 5 of 13
+# task lines, un-consensus'ing an otherwise agreed plan.
+# ---------------------------------------------------------------------------
+
+
+def test_description_may_contain_pipes():
+    plan = """## Tasks
+- [t1] rola admin|ops, filtr export=enabled|disabled | side=claude | model=sonnet | review=gpt-5.4 | deps=- | files=a.py
+"""
+    tasks = parse_task_list(plan, sides=SIDES, order=ORDER)
+    assert tasks[0].description == "rola admin|ops, filtr export=enabled|disabled"
+    assert tasks[0].side == "claude"
+    assert tasks[0].files == ("a.py",)
+
+
+def test_description_may_contain_spaced_pipe_union():
+    plan = """## Tasks
+- [t1] map to string | undefined everywhere | side=claude | model=sonnet | review=gpt-5.4 | deps=- | files=a.py
+"""
+    tasks = parse_task_list(plan, sides=SIDES, order=ORDER)
+    assert tasks[0].description == "map to string | undefined everywhere"
+    assert tasks[0].model == "sonnet"
+
+
+def test_test_command_may_contain_a_pipe():
+    plan = """## Tasks
+- [t1] do it | side=claude | model=sonnet | review=gpt-5.4 | deps=- | files=a.py | test=pytest -q | tail -5
+"""
+    tasks = parse_task_list(plan, sides=SIDES, order=ORDER)
+    assert tasks[0].test == "pytest -q | tail -5"
+
+
+def test_unexpected_trailing_field_still_errors():
+    plan = """## Tasks
+- [t1] do it | side=claude | model=sonnet | review=gpt-5.4 | deps=- | files=a.py | bogus=1
+"""
+    with pytest.raises(TaskListError, match="unexpected trailing field"):
+        parse_task_list(plan, sides=SIDES, order=ORDER)
+
+
+def test_missing_files_field_still_errors():
+    plan = """## Tasks
+- [t1] do it | side=claude | model=sonnet | review=gpt-5.4 | deps=-
+"""
+    with pytest.raises(TaskListError):
+        parse_task_list(plan, sides=SIDES, order=ORDER)

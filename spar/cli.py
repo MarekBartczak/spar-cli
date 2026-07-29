@@ -157,7 +157,12 @@ def _build_orchestrator(args, config) -> Orchestrator:
 
     store = StateStore(Path(".spar"))
     artifact_path = Path(args.artifact)
-    guard = Guard(repo_dir=cwd, artifact_path=artifact_path, spar_dir=Path(".spar"))
+    guard = Guard(
+        repo_dir=cwd,
+        artifact_path=artifact_path,
+        spar_dir=Path(".spar"),
+        scope_ignore=config.execution.scope_ignore,
+    )
     gate = HeadlessGate() if getattr(args, "headless", False) else ConsoleGate()
     # A fresh StreamSink per CLI invocation truncates .spar/live.log, so a
     # --continue resume also starts a fresh live view -- accepted v1 behavior

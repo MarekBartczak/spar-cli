@@ -21,7 +21,14 @@ logger = logging.getLogger(__name__)
 
 _SECTION_START_RE = re.compile(r"^##\s+Tasks\s*$", re.MULTILINE)
 _SECTION_NEXT_RE = re.compile(r"^##\s", re.MULTILINE)
-_LINE_RE = re.compile(r"^- \[(?P<id>t\d+)\]\s+(?P<desc>.*?)\s*\|\s*(?P<rest>.*)$")
+# The description ends at the first ` | side=` -- anything before that (TS
+# unions like `string | undefined`, prose like `admin|ops`, log-action lists)
+# belongs to the description, not to the field block.
+_LINE_RE = re.compile(r"^- \[(?P<id>t\d+)\]\s+(?P<desc>.*?)\s*\|\s*(?P<rest>side=.*)$")
+
+# Fields are separated by ` | ` *followed by a `key=`*. A bare pipe inside a
+# value (`test=... | grep x`, `deps=-`) does not start a new field.
+_FIELD_SPLIT_RE = re.compile(r"\s*\|\s*(?=[A-Za-z_][\w-]*=)")
 
 _REQUIRED_ORDER = ("side", "model", "review", "deps")
 
@@ -112,24 +119,23 @@ def _parse_line(line: str, ids_seen: set[str]) -> dict:
     desc = m.group("desc")
     remaining = m.group("rest")
 
+    fields = [f.strip() for f in _FIELD_SPLIT_RE.split(remaining)]
+
     values: dict[str, str] = {}
     for key in _REQUIRED_ORDER:
-        if " | " not in remaining:
+        if len(fields) < 2:  # the field block must still hold files= after this
             raise TaskListError(f"missing required field {key!r} in line: {line!r}")
-        field, remaining = remaining.split(" | ", 1)
-        field = field.strip()
+        field = fields.pop(0)
         parsed_key, sep, parsed_val = field.partition("=")
         if not sep or parsed_key != key:
             raise TaskListError(f"expected field {key + '=...'!r} but got {field!r} in line: {line!r}")
         values[key] = parsed_val
 
-    remaining = remaining.strip()
-    if " | " in remaining:
-        files_field, test_field = remaining.split(" | ", 1)
-    else:
-        files_field, test_field = remaining, None
+    files_field = fields.pop(0)
+    test_field = fields.pop(0) if fields else None
+    if fields:
+        raise TaskListError(f"unexpected trailing field {fields[0]!r} in line: {line!r}")
 
-    files_field = files_field.strip()
     fkey, fsep, fval = files_field.partition("=")
     if not fsep or fkey != "files":
         raise TaskListError(f"expected field 'files=...' but got {files_field!r} in line: {line!r}")
