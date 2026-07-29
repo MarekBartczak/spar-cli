@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from spar.gui import theme
+from spar.gui.instances import scoped
 from spar.gui.app import MainWindow, SidePane, StreamPane, Toolbar, _short_action_label
 
 _TOOLBAR_LABELS = ["Nowa debata…", "Start exec", "Wznów", "Stop", "Plan", "Diff"]
@@ -76,7 +77,7 @@ class TestMainWindow:
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
 
-        assert window2._settings.value("mainSplitter/state") is not None
+        assert window2._settings.value(scoped(tmp_path, "mainSplitter/state")) is not None
 
     def test_close_event_stops_runner_and_sidepane_poll_timers(self, qtbot, tmp_path):
         # Final review minor #1: closing the window used to stop only the
@@ -206,7 +207,7 @@ class TestRailsLayout:
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)
         window.right_rail.buttons["chat"].setChecked(False)
-        assert window._settings.value("rails/chat_visible") in (False, "false", 0, "0")
+        assert window._settings.value(scoped(tmp_path, "rails/chat_visible")) in (False, "false", 0, "0")
 
     def test_right_column_uses_vertical_splitter(self, qtbot, tmp_path):
         # Live smoke defect 1: Taski and the chat panel sat in a plain
@@ -238,7 +239,7 @@ class TestRailsLayout:
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
 
-        assert window2._settings.value("rails/right_split") is not None
+        assert window2._settings.value(scoped(tmp_path, "rails/right_split")) is not None
 
     def test_rail_collapse_of_splitter_children_still_works(self, qtbot, tmp_path):
         # Panel hide/show inside the QSplitter must keep the rails' collapse
@@ -796,7 +797,7 @@ class TestCentreSwitch:
         window = MainWindow(tmp_path)
         qtbot.addWidget(window)
         window.left_rail.buttons["files"].setChecked(True)
-        assert window._settings.value("rails/centre_view") == "files"
+        assert window._settings.value(scoped(tmp_path, "rails/centre_view")) == "files"
         window2 = MainWindow(tmp_path)
         qtbot.addWidget(window2)
         assert window2.centre_stack.currentIndex() == 1
@@ -902,3 +903,59 @@ class TestCentreSwitch:
         window.runner.resume = lambda *a, **k: resumed.append(1)
         gate._on_abort()
         assert resumed == []
+
+
+class TestPerProjectSettings:
+    """Layout state is remembered per project, not globally (ADR 0007)."""
+
+    def test_centre_view_is_scoped_per_project(self, qtbot, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        win_a = MainWindow(a)
+        qtbot.addWidget(win_a)
+        win_a._set_centre_view("files")
+
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(a, "rails/centre_view"), type=str) == "files"
+        # Project B is untouched and still starts on the stream view.
+        assert settings.value(scoped(b, "rails/centre_view")) is None
+        win_b = MainWindow(b)
+        qtbot.addWidget(win_b)
+        assert win_b.centre_stack.currentIndex() == 0  # index 0 == Strumień
+
+    def test_splitter_state_is_scoped_per_project(self, qtbot, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        a = tmp_path / "a"
+        a.mkdir()
+        win = MainWindow(a)
+        qtbot.addWidget(win)
+        win._save_splitter_state()
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(a, "mainSplitter/state")) is not None
+        assert settings.value("mainSplitter/state") is None  # no global leftovers
+
+    def test_window_geometry_restored_per_project(self, qtbot, tmp_path):
+        # Sizes stay well inside the offscreen platform's virtual screen:
+        # restoreGeometry() clamps to the available screen, so a 1600x900
+        # assertion would fail for reasons unrelated to scoping.
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        win = MainWindow(a)
+        qtbot.addWidget(win)
+        win.resize(640, 480)
+        win._save_window_geometry()
+
+        reopened = MainWindow(a)
+        qtbot.addWidget(reopened)
+        assert reopened.size().width() == 640
+        assert reopened.size().height() == 480
+
+        # Project B never had a geometry saved: it keeps the default size.
+        other = MainWindow(b)
+        qtbot.addWidget(other)
+        assert other.size() != reopened.size()

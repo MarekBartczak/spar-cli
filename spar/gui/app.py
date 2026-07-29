@@ -35,6 +35,7 @@ from spar.config import load_config
 from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
+from spar.gui.instances import scoped
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
 from spar.gui.runner import RunnerState, SparRunner
@@ -264,7 +265,11 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._startup_label)
         self.statusBar().addPermanentWidget(self._startup_progress)
 
+        # ADR 0007: layout state belongs to THIS project, not to the app —
+        # with several windows open, a global key means the last window
+        # closed clobbers everyone else's layout.
         self._settings = QSettings("spar", "gui")
+        self._restore_window_geometry()
         self._restore_splitter_state()
         self.splitter.splitterMoved.connect(self._save_splitter_state)
         self._restore_right_split_state()
@@ -272,14 +277,14 @@ class MainWindow(QMainWindow):
 
         # ADR 0006: restore the persisted centre view (Strumień | Pliki) and
         # wire the left-rail toggles.
-        centre_view = self._settings.value("rails/centre_view", "stream", type=str)
+        centre_view = self._settings.value(self._skey("rails/centre_view"), "stream", type=str)
         if centre_view not in ("stream", "files"):
             centre_view = "stream"
         self._set_centre_view(centre_view, persist=False)
         self.left_rail.toggled.connect(self._on_left_rail_toggled)
 
-        tasks_visible = self._settings.value("rails/tasks_visible", True, type=bool)
-        chat_visible = self._settings.value("rails/chat_visible", True, type=bool)
+        tasks_visible = self._settings.value(self._skey("rails/tasks_visible"), True, type=bool)
+        chat_visible = self._settings.value(self._skey("rails/chat_visible"), True, type=bool)
         self.right_rail.set_checked("tasks", tasks_visible)
         self.right_rail.set_checked("chat", chat_visible)
         self.right_rail.set_button_visible("gate", False)
@@ -406,7 +411,7 @@ class MainWindow(QMainWindow):
         self._column_shown = show_column
 
     def _on_rail_toggled(self, key: str, checked: bool) -> None:
-        self._settings.setValue(f"rails/{key}_visible", checked)
+        self._settings.setValue(self._skey(f"rails/{key}_visible"), checked)
         self._apply_rail_layout()
 
     def _on_rail_clicked(self, key: str) -> None:
@@ -445,7 +450,7 @@ class MainWindow(QMainWindow):
         self.left_rail.set_checked("stream", key == "stream")
         self.left_rail.set_checked("files", key == "files")
         if persist:
-            self._settings.setValue("rails/centre_view", key)
+            self._settings.setValue(self._skey("rails/centre_view"), key)
 
     def _on_left_rail_toggled(self, key: str, checked: bool) -> None:
         if not checked:
@@ -650,22 +655,36 @@ class MainWindow(QMainWindow):
         )
         return True
 
+    def _skey(self, key: str) -> str:
+        """Project-scoped QSettings key (ADR 0007)."""
+        return scoped(self.project_dir, key)
+
+    def _restore_window_geometry(self) -> None:
+        geo = self._settings.value(self._skey("window/geometry"))
+        if geo is not None:
+            self.restoreGeometry(geo)
+
+    def _save_window_geometry(self) -> None:
+        self._settings.setValue(self._skey("window/geometry"), self.saveGeometry())
+
     def _restore_splitter_state(self) -> None:
-        state = self._settings.value("mainSplitter/state")
+        state = self._settings.value(self._skey("mainSplitter/state"))
         if state is not None:
             self.splitter.restoreState(state)
 
     def _save_splitter_state(self, *_args) -> None:
-        self._settings.setValue("mainSplitter/state", self.splitter.saveState())
+        self._settings.setValue(
+            self._skey("mainSplitter/state"), self.splitter.saveState()
+        )
 
     def _restore_right_split_state(self) -> None:
-        state = self._settings.value("rails/right_split")
+        state = self._settings.value(self._skey("rails/right_split"))
         if state is not None:
             self.right_column.splitter.restoreState(state)
 
     def _save_right_split_state(self, *_args) -> None:
         self._settings.setValue(
-            "rails/right_split", self.right_column.splitter.saveState()
+            self._skey("rails/right_split"), self.right_column.splitter.saveState()
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
@@ -676,6 +695,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self._double_shift)
+        self._save_window_geometry()
         self._save_splitter_state()
         self._save_right_split_state()
         self.tailer.stop()

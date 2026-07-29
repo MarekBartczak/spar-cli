@@ -1968,3 +1968,54 @@ class TestSearchFileMask:
         assert hist[0] == "*.m5"
         assert hist.count("*.m5") == 1
         assert "*.m0" not in hist and "*.m1" not in hist  # oldest dropped
+
+
+class TestFilesViewPerProjectSettings:
+    def test_split_state_saved_under_the_scoped_key(self, qtbot, tmp_path):
+        from PySide6.QtCore import QSettings
+
+        from spar.gui.files import FilesView
+        from spar.gui.instances import scoped
+
+        view = FilesView(tmp_path)
+        qtbot.addWidget(view)
+        view._save_split_state()
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(tmp_path, "files/tree_split")) is not None
+        assert settings.value("files/tree_split") is None
+
+    def test_splitter_move_signal_saves_scoped(self, qtbot, tmp_path):
+        """Review #9: the CONSTRUCTOR's splitterMoved wiring must hit the
+        scoped key too — a directly-called helper proves nothing about the
+        runtime path."""
+        from PySide6.QtCore import QSettings
+
+        from spar.gui.files import FilesView
+        from spar.gui.instances import scoped
+
+        view = FilesView(tmp_path)
+        qtbot.addWidget(view)
+        view.splitter.splitterMoved.emit(120, 1)
+        settings = QSettings("spar", "gui")
+        assert settings.value(scoped(tmp_path, "files/tree_split")) is not None
+        assert settings.value("files/tree_split") is None
+
+    def test_constructor_restores_from_the_scoped_key(self, qtbot, tmp_path):
+        """The restore side is wired in the constructor (files.py:1262), so it
+        must read the scoped key — otherwise layouts silently never come
+        back."""
+        from PySide6.QtCore import QSettings
+
+        from spar.gui.files import FilesView
+        from spar.gui.instances import scoped
+
+        first = FilesView(tmp_path)
+        qtbot.addWidget(first)
+        first.splitter.setSizes([500, 100])
+        first._save_split_state()
+        saved = QSettings("spar", "gui").value(scoped(tmp_path, "files/tree_split"))
+        assert saved is not None
+
+        reopened = FilesView(tmp_path)
+        qtbot.addWidget(reopened)
+        assert reopened.splitter.saveState() == saved
