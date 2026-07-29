@@ -1037,3 +1037,52 @@ class TestOpenProjectAction:
         button = win.findChild(QToolButton, "projectButton")
         data = [a.data() for a in button.menu().actions()]
         assert str(tmp_path.resolve()) not in data
+
+
+class TestSingleInstanceEntryPoint:
+    def test_second_launch_raises_and_exits_without_a_window(self, tmp_path, monkeypatch):
+        """A second `spar gui` on the SAME project must not build a window."""
+        from spar.gui import app as app_mod
+
+        class FakeGuard:
+            instances_made = []
+
+            def __init__(self, project_dir):
+                self.project_dir = project_dir
+                FakeGuard.instances_made.append(self)
+                self.claims = 0
+                self.extra_raises = 0
+
+            def try_claim(self):
+                # Review #7: the raise is delivered HERE, inside the claim.
+                self.claims += 1
+                return False
+
+            def request_raise(self, timeout_ms=1000):
+                self.extra_raises += 1  # main_gui must never reach this
+                return True
+
+            def release(self):
+                pass
+
+        built = []
+        monkeypatch.setattr(app_mod, "SingleInstanceGuard", FakeGuard)
+        monkeypatch.setattr(
+            app_mod, "MainWindow", lambda *a, **kw: built.append(a) or pytest.fail(
+                "second launch must not construct a MainWindow"
+            )
+        )
+        rc = app_mod.main_gui(["--dir", str(tmp_path)])
+        assert rc == 0
+        assert built == []
+        guard = FakeGuard.instances_made[-1]
+        assert guard.claims == 1
+        assert guard.extra_raises == 0  # no double raise from main_gui
+
+    def test_raise_to_front_shows_and_activates(self, qtbot, tmp_path):
+        win = MainWindow(tmp_path)
+        qtbot.addWidget(win)
+        win.showMinimized()
+        win.raise_to_front()
+        assert win.isMinimized() is False
+        assert win.isVisible() is True

@@ -39,6 +39,7 @@ from spar.gui import repo as repo_mod
 from spar.gui import toolbar as toolbar_mod
 from spar.gui.files import DoubleShiftFilter, FileFinderOverlay, FilesView
 from spar.gui.instances import (
+    SingleInstanceGuard,
     push_recent_project,
     recent_projects,
     scoped,
@@ -713,6 +714,15 @@ class MainWindow(QMainWindow):
             return
         self._rebuild_project_menu()
 
+    def raise_to_front(self) -> None:
+        """Bring this project's window forward (second-launch request)."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def _skey(self, key: str) -> str:
         """Project-scoped QSettings key (ADR 0007)."""
         return scoped(self.project_dir, key)
@@ -769,6 +779,9 @@ class MainWindow(QMainWindow):
         # while running — review #2).
         self.chat_panel.stop_session()
         self.files_view.stop_search()   # review #3: idempotent search-thread stop
+        guard = getattr(self, "_instance_guard", None)
+        if guard is not None:
+            guard.release()
         super().closeEvent(event)
 
 
@@ -792,8 +805,20 @@ def main_gui(argv: list[str]) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setStyleSheet(build_qss())
 
+    # ADR 0007: one window per project. A second launch on the same
+    # directory raises the running window and exits instead of opening a
+    # read-only twin. try_claim() has already asked the owner to raise its
+    # window when it returns False — do NOT send a second request here.
+    guard = SingleInstanceGuard(project_dir)
+    if not guard.try_claim():
+        return 0
+
     push_recent_project(project_dir)
     window = MainWindow(project_dir)
+    window._instance_guard = guard
+    # attach(), not a bare connect(): window construction pumps the event
+    # loop, so a raise may already be buffered.
+    guard.attach(window.raise_to_front)
     window.show()
 
     return app.exec()

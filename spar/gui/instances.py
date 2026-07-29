@@ -18,7 +18,8 @@ import hashlib
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QSettings
+from PySide6.QtCore import QObject, QProcess, QSettings, Signal
+from PySide6.QtNetwork import QAbstractSocket, QLocalServer, QLocalSocket
 
 _RECENT_KEY = "recent_projects"
 _RECENT_MAX = 10
@@ -110,3 +111,149 @@ def spawn_new_window(project_dir: "str | Path") -> bool:
         program, arguments, str(_resolved(project_dir))
     )
     return bool(ok)
+
+
+_RAISE_MESSAGE = b"raise\n"
+_PROBE_TIMEOUT_MS = 1000
+
+
+def local_server_name(project_dir: "str | Path") -> str:
+    """QLocalServer name owned by the window serving ``project_dir``."""
+    return f"spar-gui-{project_key(project_dir)}"
+
+
+class SingleInstanceGuard(QObject):
+    """One GUI window per project directory (ADR 0007).
+
+    The FIRST process for a project claims a named local socket; later
+    processes fail the claim and instead ask the owner to raise its window
+    (WebStorm behavior), then exit. This is deliberately NOT the same
+    mechanism as the engine's ``.spar/lock``: that lock guards the ENGINE
+    (a headless CLI run holds it with no window to raise), and a foreign
+    lock still means read-only ``RunnerState.LOCKED``.
+
+    ``try_claim()`` owns the whole decision INCLUDING delivering the raise
+    request: ``False`` means "an owner exists and has already been asked to
+    raise its window", so the caller just exits. Callers must never send a
+    second ``request_raise()`` — the owner would bounce twice.
+    """
+
+    raise_requested = Signal()
+
+    def __init__(
+        self,
+        project_dir: "str | Path",
+        parent=None,
+        *,
+        server_factory=None,
+    ):
+        super().__init__(parent)
+        self.name = local_server_name(project_dir)
+        self._server = None
+        # Injection seam for tests: the stale-socket branch cannot be
+        # reproduced with real sockets (removeServer() succeeds against a
+        # live listener), so the branch tests script `listen` outcomes.
+        self._server_factory = server_factory or (lambda parent: QLocalServer(parent))
+        self._owned = False
+        # Raises can arrive while MainWindow is still being built (FilesView
+        # pumps the event loop), i.e. before any receiver exists.
+        self._attached = False
+        self._pending_raise = False
+
+    # -- owner side ----------------------------------------------------
+    def try_claim(self) -> bool:
+        """True if this process now owns the project's window slot."""
+        server = self._server_factory(self)
+        server.newConnection.connect(self._on_connection)
+        if server.listen(self.name):
+            self._server = server
+            self._owned = True
+            return True
+        if server.serverError() != QAbstractSocket.SocketError.AddressInUseError:
+            # Unknown listen failure: never make the gui unlaunchable.
+            print(
+                f"spar gui: single-instance socket unavailable ({self.name}); "
+                "continuing without it",
+                file=sys.stderr,
+            )
+            return True
+        # Address in use: a live owner, or a socket file left by a crash.
+        if self.request_raise(timeout_ms=_PROBE_TIMEOUT_MS):
+            return False  # live owner answered — caller must exit
+        QLocalServer.removeServer(self.name)
+        if server.listen(self.name):
+            self._server = server
+            self._owned = True
+            return True
+        print(
+            f"spar gui: could not claim {self.name}; continuing without "
+            "single-instance protection",
+            file=sys.stderr,
+        )
+        return True
+
+    def _on_connection(self) -> None:
+        if self._server is None:
+            return
+        conn = self._server.nextPendingConnection()
+        if conn is None:
+            return
+        conn.readyRead.connect(lambda: self._on_ready(conn))
+        conn.disconnected.connect(conn.deleteLater)
+
+    def _on_ready(self, conn) -> None:
+        if _RAISE_MESSAGE.strip() in bytes(conn.readAll()).strip().splitlines():
+            if self._attached:
+                self.raise_requested.emit()
+            else:
+                # No window slot yet — buffer it, `attach()` replays it.
+                self._pending_raise = True
+        conn.disconnectFromServer()
+
+    def attach(self, receiver) -> None:
+        """Connect the window's raise slot and replay a buffered raise.
+
+        Called ONCE, right after the window exists. Anything that arrived
+        during window construction is delivered here instead of being lost.
+        """
+        self.raise_requested.connect(receiver)
+        self._attached = True
+        if self._pending_raise:
+            self._pending_raise = False
+            receiver()
+
+    def release(self) -> None:
+        """Give up ownership (idempotent).
+
+        A guard that never claimed MUST NOT touch the name: removeServer()
+        works against a live listener, so a losing process calling release()
+        would free the WINNER's name and let the next launch open a
+        duplicate window.
+        """
+        if not self._owned:
+            return
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        self._owned = False
+        QLocalServer.removeServer(self.name)
+
+    # -- newcomer side -------------------------------------------------
+    def request_raise(self, timeout_ms: int = _PROBE_TIMEOUT_MS) -> bool:
+        """Ask the owning process to raise its window. True if delivered."""
+        sock = QLocalSocket()
+        sock.connectToServer(self.name)
+        if not sock.waitForConnected(timeout_ms):
+            return False
+        written = sock.write(_RAISE_MESSAGE)
+        sock.flush()
+        # Do NOT use waitForBytesWritten() as delivery proof: after a
+        # successful flush() it returns False (nothing left pending) even
+        # though the owner DID receive the message. Taking that as "no
+        # owner" would remove a live owner's socket name and open a
+        # duplicate window.
+        if sock.bytesToWrite() > 0:
+            sock.waitForBytesWritten(timeout_ms)
+        delivered = written == len(_RAISE_MESSAGE) and sock.bytesToWrite() == 0
+        sock.disconnectFromServer()
+        return bool(delivered)
