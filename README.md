@@ -347,6 +347,13 @@ generated for `python` on a `python3`-only host). The value is split on the
 FIRST colon only, so the command may contain spaces and colons:
 `--gate fix:python3 -m py_compile todo.py`.
 
+Prompts reach both CLIs on **stdin** (`claude -p` with no positional prompt,
+`codex exec -`), never as an argv token: Linux caps a single argument at 128 KiB
+and a reviewer prompt carrying a plan plus a diff exceeds that, which used to
+kill the spawn with `[Errno 7] Argument list too long` mid-execution. The stdin
+contract (including a prompt past that ceiling) is covered by the opt-in
+`SPAR_CONTRACT_TESTS=1` suite.
+
 Every run — debate and `exec`, fresh or `--continue` — first **preflights the
 side CLIs**: each selected side's configured command must resolve on `PATH`.
 A missing one refuses the run with exit `2`, naming the side, the command and
@@ -354,6 +361,14 @@ the searched `PATH`, before any lock is taken or turn is spent (previously the
 gap only surfaced when that side's first turn spawned — after the other side
 had already burned a full turn). Point a side at an absolute path with
 `spar -m <side> -setCommand /full/path/to/cli` when it lives outside `PATH`.
+
+A fresh `spar exec` also **preflights every task's file scope against
+gitignore**: a task whose scope is *entirely* excluded (e.g. `docs/**` plus
+`CONTEXT-MAP.md` in a repo ignoring both) can never produce a change git can
+see — the implementer writes the files, `git status` stays clean, and the run
+would die turns later as "implementer created no files". That refuses up front
+with exit `2`, naming the task and its patterns. A partially ignored scope is
+allowed: its tracked part still produces a diff.
 
 A fresh `spar exec` additionally **preflights** every task's `test` command
 before any work starts: the first shell token (after skipping `VAR=val`
@@ -404,6 +419,15 @@ turn_timeout_sec = 900
 
 Custom CLI binaries per side (e.g. wrappers): `spar -m claude -setCommand
 claude-erli`, inspect with `spar --list-commands`.
+
+`turn_timeout_sec` defaults to 900 (15 min), which real implementation turns on
+a sizeable repo routinely exceed — raise it per project rather than letting turns
+die. A turn that hit the limit **after** finishing is no longer thrown away: if
+the terminal event is already in the stream (claude's `result`) or the final
+message is already on disk (codex's `--output-last-message`), the adapter keeps
+that reply, notes `timeout after Ns — turn had already completed, keeping its
+reply` on the stream, and the run continues. Only a turn that produced nothing
+still fails.
 
 ## How it works
 

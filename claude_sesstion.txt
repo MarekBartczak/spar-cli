@@ -1,1 +1,2 @@
 --resume ea2bb46e-eaa5-4e99-8fed-0c768360179f
+claude --resume 737fce44-bc54-4536-b9a8-a9beed744e9c

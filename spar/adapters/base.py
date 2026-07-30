@@ -35,6 +35,23 @@ class AdapterError(Exception):
     pass
 
 
+class AdapterTimeout(AdapterError):
+    """The CLI outlived ``timeout_sec`` and was killed.
+
+    Carries the PARTIAL stream so the adapter can tell a turn that produced
+    nothing from one that had already finished its work and was merely lingering
+    (live failure: codex emitted ``turn.completed`` and wrote its final message,
+    then idled past the limit -- spar killed it and discarded ~17 minutes of
+    completed work).
+    """
+
+    def __init__(self, timeout_sec: int, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(f"timeout after {timeout_sec}s")
+        self.timeout_sec = timeout_sec
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 class Adapter(Protocol):
     """Shared contract implemented by each AI CLI adapter."""
 
@@ -165,7 +182,11 @@ def run_cli(
         t_out.join()
         t_err.join()
         events_file.close()
-        raise AdapterError(f"timeout after {timeout_sec}s") from exc
+        raise AdapterTimeout(
+            timeout_sec,
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+        ) from exc
 
     t_out.join()
     t_err.join()

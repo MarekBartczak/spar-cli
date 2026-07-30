@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from spar.adapters.base import AdapterError, SessionLost, TurnResult, run_cli
+from spar.adapters.base import (
+    AdapterError,
+    AdapterTimeout,
+    SessionLost,
+    TurnResult,
+    run_cli,
+)
 
 
 def _display_line(obj: object) -> str | None:
@@ -90,6 +96,39 @@ class CodexAdapter:
         self.name = side_name
         self.readonly = readonly
 
+    def _recover_from_timeout(
+        self,
+        exc: AdapterTimeout,
+        events_path: Path,
+        last_msg_path: Path,
+        on_event: Callable[[str], None] | None,
+    ) -> TurnResult | None:
+        """The timed-out turn as a :class:`TurnResult`, or ``None`` if unfinished.
+
+        "Finished" means codex wrote a non-empty last-message file: that file is
+        its terminal artifact, written only once the turn produced its reply.
+        """
+        try:
+            reply_text = last_msg_path.read_text()
+        except OSError:
+            return None
+        if not reply_text:
+            return None
+        if on_event is not None:
+            try:
+                on_event(
+                    f"timeout after {exc.timeout_sec}s — turn had already "
+                    "completed, keeping its reply"
+                )
+            except Exception:
+                pass
+        return TurnResult(
+            session_id=self._extract_session_id(exc.stdout),
+            reply_text=reply_text,
+            events_path=events_path,
+            exit_code=0,
+        )
+
     def _events_path(self, timestamp: str) -> Path:
         pid = os.getpid()
         return self.events_dir / f"{self.side_name}-{timestamp}-{pid}.jsonl"
@@ -99,8 +138,15 @@ class CodexAdapter:
         return self.events_dir / f"{self.side_name}-last-{timestamp}-{pid}.md"
 
     def _build_argv(
-        self, prompt: str, session_id: str | None, last_msg_path: Path
+        self, session_id: str | None, last_msg_path: Path
     ) -> list[str]:
+        """argv with ``-`` in the prompt slot: the prompt is fed on stdin.
+
+        Linux caps a single argument at MAX_ARG_STRLEN (128 KiB); a prompt
+        carrying a plan plus a diff exceeds that and the spawn dies with
+        "[Errno 7] Argument list too long". ``codex exec -`` reads the
+        instructions from stdin instead.
+        """
         globals_ = [
             "--json",
             "--sandbox",
@@ -116,8 +162,8 @@ class CodexAdapter:
             str(last_msg_path),
         ]
         if session_id is not None:
-            return [self.command, "exec", *globals_, "resume", session_id, prompt]
-        return [self.command, "exec", *globals_, prompt]
+            return [self.command, "exec", *globals_, "resume", session_id, "-"]
+        return [self.command, "exec", *globals_, "-"]
 
     @staticmethod
     def _extract_session_id(stdout: str) -> str | None:
@@ -166,11 +212,30 @@ class CodexAdapter:
         last_msg_path.parent.mkdir(parents=True, exist_ok=True)
         last_msg_path = last_msg_path.resolve()
 
-        argv = self._build_argv(prompt, session_id, last_msg_path)
+        argv = self._build_argv(session_id, last_msg_path)
 
         on_line = _make_on_line(on_event) if on_event is not None else None
 
-        result = run_cli(argv, timeout_sec, events_path, cwd=self.cwd, on_line=on_line)
+        try:
+            result = run_cli(
+                argv,
+                timeout_sec,
+                events_path,
+                stdin_text=prompt,
+                cwd=self.cwd,
+                on_line=on_line,
+            )
+        except AdapterTimeout as exc:
+            # The wall clock can expire while codex lingers AFTER finishing its
+            # turn. When the final message is already on disk the turn IS
+            # complete -- keep it rather than discarding the work (live failure:
+            # "timeout after 900s" threw away a finished 17-minute task turn).
+            recovered = self._recover_from_timeout(
+                exc, events_path, last_msg_path, on_event
+            )
+            if recovered is not None:
+                return recovered
+            raise
 
         if result.returncode != 0:
             if session_id is not None:

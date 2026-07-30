@@ -31,7 +31,8 @@ commit) and the asymmetric review loop are reused verbatim from
 ``run_cross_review`` for the review loop).
 
 Exit codes mirror v1: 0 ok, 2 preflight/validation refusal (a fresh start
-whose per-task test command names a tool missing on this machine), 3
+whose per-task test command names a tool missing on this machine, or whose task
+file scope is entirely gitignored), 3
 lock/state guard, 4 protocol/adapter abort, 5 user abort at the
 final-merge gate.
 """
@@ -49,7 +50,7 @@ from spar.adapters.base import Adapter, AdapterError
 from spar.config import ExecutionConfig, SideConfig
 from spar.exec import gitops
 from spar.exec.gitops import GitError
-from spar.exec.preflight import preflight_test_commands
+from spar.exec.preflight import preflight_task_scopes, preflight_test_commands
 from spar.exec.review import ReviewAbort, _implementer_turn, run_cross_review
 from spar.exec.state import ExecState, ExecStateStore, TaskState
 from spar.exec.tasklist import Task
@@ -361,6 +362,10 @@ class Executor:
     _SCOPE_IGNORE_BEGIN = "# >>> spar scope_ignore (managed)"
     _SCOPE_IGNORE_END = "# <<< spar scope_ignore"
 
+    def _path_is_ignored(self, path: str) -> bool:
+        """Does git exclude ``path`` in this repo? (scope preflight backend)"""
+        return path in gitops.ignored_paths(self.repo, [path])
+
     def _apply_scope_ignore(self) -> None:
         """Write ``execution.scope_ignore`` patterns into the repo's LOCAL git
         exclude file (``<git-common-dir>/info/exclude``).
@@ -422,6 +427,25 @@ class Executor:
             self.log(
                 "Fix the plan's test commands (or install the tools) and "
                 "rerun. Nothing was started."
+            )
+            return 2
+
+        # Same fail-fast rule for file scopes: a task whose WHOLE scope is
+        # gitignored can never produce a detectable change. Live incident: a
+        # documentation task scoped to ``docs/**`` + ``CONTEXT-MAP.md`` in a repo
+        # ignoring both — the implementer wrote every file, git saw a clean tree,
+        # and the run died several turns later as "implementer created no files".
+        scope_problems = preflight_task_scopes(self.tasks, self._path_is_ignored)
+        if scope_problems:
+            self.log(
+                "spar exec: preflight failed — task file scope(s) are excluded "
+                "by gitignore:"
+            )
+            for problem in scope_problems:
+                self.log(f"  {problem}")
+            self.log(
+                "Un-ignore those paths (or rescope the task onto tracked ones) "
+                "and rerun. Nothing was started."
             )
             return 2
 

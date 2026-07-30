@@ -170,3 +170,24 @@ def test_missing_binary_raises_and_closes_events_file(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error", ResourceWarning)
         gc.collect()  # an unclosed file would emit ResourceWarning here
+
+
+def test_timeout_raises_adapter_timeout_carrying_the_partial_stdout(tmp_path):
+    # A turn can finish its work and still hit the wall clock while the CLI
+    # process lingers. The partial stream must travel WITH the exception so the
+    # caller can decide whether the turn was already complete.
+    from spar.adapters.base import AdapterTimeout
+
+    events = tmp_path / "ev.jsonl"
+    producer = (
+        "import sys, time\n"
+        "print('final-line', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
+    with pytest.raises(AdapterTimeout) as exc:
+        run_cli([sys.executable, "-c", producer], timeout_sec=1, events_path=events)
+
+    assert isinstance(exc.value, AdapterError)
+    assert exc.value.timeout_sec == 1
+    assert "final-line" in exc.value.stdout

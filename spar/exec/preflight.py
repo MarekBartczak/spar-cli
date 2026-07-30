@@ -1,4 +1,4 @@
-"""Preflight validation of per-task test commands.
+"""Preflight validation of per-task test commands and file scopes.
 
 A FRESH ``spar exec`` refuses to start when any task's ``test`` command names
 a tool that does not exist on this machine. Live incident driving this: a
@@ -22,7 +22,12 @@ from typing import Callable, Iterable
 
 from spar.exec.tasklist import Task
 
-__all__ = ["first_command_token", "preflight_test_commands"]
+__all__ = [
+    "first_command_token",
+    "preflight_test_commands",
+    "scope_probe_path",
+    "preflight_task_scopes",
+]
 
 # Shell keywords/builtins the ``shell=True`` (``/bin/sh``) test runner resolves
 # WITHOUT a binary on PATH — ``shutil.which`` would wrongly flag them as
@@ -107,5 +112,55 @@ def preflight_test_commands(
         problems.append(
             f"[{task.id}] test {cmd!r} uses {tok!r} — not found on this "
             f"machine{hint}"
+        )
+    return problems
+
+
+def scope_probe_path(pattern: str) -> str:
+    """The concrete path to probe for a task ``files=`` pattern.
+
+    The glob tail is dropped (``docs/adr/**`` -> ``docs/adr``,
+    ``test/unit/**/*.ts`` -> ``test/unit``) because ``git check-ignore`` answers
+    for paths, not for gitignore-style patterns; a plain path is returned
+    unchanged. Trailing slashes are stripped so the probe is a single path.
+    """
+    parts: list[str] = []
+    for part in pattern.split("/"):
+        if any(ch in part for ch in "*?[") or not part:
+            break
+        parts.append(part)
+    return "/".join(parts)
+
+
+def preflight_task_scopes(
+    tasks: Iterable[Task],
+    is_ignored: Callable[[str], bool],
+) -> list[str]:
+    """Refuse tasks whose ENTIRE file scope is ignored by git.
+
+    Live incident: a documentation task scoped to ``docs/**`` and
+    ``CONTEXT-MAP.md`` in a repo whose ``.gitignore`` excluded both. The
+    implementer wrote every file and verified it with ``test -f``; git reported
+    a clean tree, so spar counted "no change" turns and killed the run deep in
+    the review loop with "implementer created no files" -- a message that blames
+    the model for the repo's ignore rules.
+
+    Only a FULLY ignored scope is a problem: a task with one tracked entry can
+    still produce a diff. ``is_ignored`` takes a repo-relative path (injectable;
+    the caller backs it with ``git check-ignore``).
+    """
+    problems: list[str] = []
+    for task in tasks:
+        patterns = [p for p in (task.files or ()) if p]
+        if not patterns:
+            continue
+        probes = {pattern: scope_probe_path(pattern) for pattern in patterns}
+        if not all(probe and is_ignored(probe) for probe in probes.values()):
+            continue
+        listed = ", ".join(repr(p) for p in patterns)
+        problems.append(
+            f"[{task.id}] every path in its scope ({listed}) is excluded by "
+            "gitignore — the implementer's files would be invisible to git, so "
+            "the task can never produce a change"
         )
     return problems

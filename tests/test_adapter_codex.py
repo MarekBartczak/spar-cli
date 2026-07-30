@@ -57,7 +57,7 @@ def test_new_session_argv_contract(tmp_path, monkeypatch):
         "workspace-write",
         "--output-last-message",
         last_msg_path,
-        "hello there",
+        "-",
     ]
     assert Path(last_msg_path).is_absolute()
     assert Path(last_msg_path).name.startswith("codex-last-")
@@ -85,7 +85,7 @@ def test_resume_argv_contract(tmp_path, monkeypatch):
         last_msg_path,
         "resume",
         "sess-42",
-        "continue please",
+        "-",
     ]
 
 
@@ -112,7 +112,7 @@ def test_cd_flag_included_when_cwd_set(tmp_path, monkeypatch):
         str(work_dir),
         "--output-last-message",
         last_msg_path,
-        "hi",
+        "-",
     ]
 
 
@@ -148,7 +148,7 @@ def test_model_flag_included_when_set(tmp_path, monkeypatch):
         "o9-codex",
         "--output-last-message",
         last_msg_path,
-        "hi",
+        "-",
     ]
 
 
@@ -386,3 +386,84 @@ def test_relative_cwd_is_resolved_absolute_in_cd_flag(tmp_path, monkeypatch):
     argv = read_argv_lines(args_file)[0]
     idx = argv.index("--cd")
     assert argv[idx + 1] == str((tmp_path / rel).resolve())
+
+
+# --- prompt travels on stdin, never in argv ----------------------------
+# Live failure (claude side, same shape here): a prompt carrying plan + diff
+# exceeded Linux's 128 KiB per-argument limit and the spawn died with
+# "[Errno 7] Argument list too long".
+
+
+def test_prompt_is_fed_on_stdin_not_argv(tmp_path, monkeypatch):
+    args_file = tmp_path / "args.jsonl"
+    stdin_file = tmp_path / "stdin.txt"
+    monkeypatch.setenv("FAKE_CODEX_ARGS_FILE", str(args_file))
+    monkeypatch.setenv("FAKE_CODEX_STDIN_FILE", str(stdin_file))
+
+    adapter = make_adapter(tmp_path)
+    adapter.run_turn("prompt body", session_id=None, timeout_sec=5)
+
+    assert "prompt body" not in read_argv_lines(args_file)[0]
+    assert stdin_file.read_text() == "prompt body"
+
+
+def test_resume_prompt_is_fed_on_stdin_not_argv(tmp_path, monkeypatch):
+    args_file = tmp_path / "args.jsonl"
+    stdin_file = tmp_path / "stdin.txt"
+    monkeypatch.setenv("FAKE_CODEX_ARGS_FILE", str(args_file))
+    monkeypatch.setenv("FAKE_CODEX_STDIN_FILE", str(stdin_file))
+
+    adapter = make_adapter(tmp_path)
+    adapter.run_turn("resumed body", session_id="sess-7", timeout_sec=5)
+
+    assert "resumed body" not in read_argv_lines(args_file)[0]
+    assert stdin_file.read_text() == "resumed body"
+
+
+def test_prompt_far_over_the_per_argument_limit_still_runs(tmp_path, monkeypatch):
+    big = "x" * (300 * 1024)
+    stdin_file = tmp_path / "stdin.txt"
+    monkeypatch.setenv("FAKE_CODEX_STDIN_FILE", str(stdin_file))
+
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn(big, session_id=None, timeout_sec=30)
+
+    assert result.exit_code == 0
+    assert stdin_file.read_text() == big
+
+
+# --- a finished turn survives the wall clock ---------------------------
+# Live failure: this exact shape. Codex emitted `turn.completed` and wrote its
+# last-message file, then lingered past turn_timeout_sec — spar killed it,
+# reported "timeout after 900s" and threw ~17 minutes of finished work away.
+
+
+def test_turn_that_already_completed_survives_a_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_LAST_MSG", "finished before the clock")
+    monkeypatch.setenv("FAKE_CODEX_HANG_AFTER", "30")
+
+    adapter = make_adapter(tmp_path)
+    result = adapter.run_turn("go", session_id=None, timeout_sec=1)
+
+    assert result.reply_text == "finished before the clock"
+    assert result.session_id
+
+
+def test_recovered_timeout_is_announced_on_the_event_stream(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_HANG_AFTER", "30")
+    lines: list[str] = []
+
+    adapter = make_adapter(tmp_path)
+    adapter.run_turn("go", session_id=None, timeout_sec=1, on_event=lines.append)
+
+    assert any("timeout" in line for line in lines)
+
+
+def test_timeout_without_a_completed_turn_still_fails(tmp_path, monkeypatch):
+    # Nothing finished (no events, no last message) — the turn MUST still fail;
+    # the recovery must never invent a reply.
+    monkeypatch.setenv("FAKE_CODEX_SLEEP", "30")
+
+    adapter = make_adapter(tmp_path)
+    with pytest.raises(AdapterError):
+        adapter.run_turn("go", session_id=None, timeout_sec=1)

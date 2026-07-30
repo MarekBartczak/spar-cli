@@ -215,3 +215,84 @@ def _is_json_object(line: str) -> bool:
         return isinstance(json.loads(line), dict)
     except json.JSONDecodeError:
         return False
+
+
+@pytest.mark.contract
+class TestPromptOnStdinContract:
+    """Both CLIs must accept the prompt on stdin, at any size.
+
+    Live failure: the prompt travelled as the final argv token and a reviewer
+    prompt (plan + diff) exceeded Linux's MAX_ARG_STRLEN (128 KiB) -- the spawn
+    died with "[Errno 7] Argument list too long" mid-execution. These tests pin
+    the stdin contract the adapters now rely on, including a prompt far past
+    that ceiling.
+    """
+
+    # ~220 KiB: comfortably over MAX_ARG_STRLEN.
+    _BIG_FILLER = "lorem ipsum dolor sit amet consectetur adipiscing elit. " * 4000
+
+    def test_claude_reads_prompt_from_stdin(self):
+        if not shutil.which("claude"):
+            pytest.skip("claude CLI not found in PATH")
+
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "json", "--allowedTools", "Read"],
+            input="Reply with exactly: STDIN-OK",
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        assert result.returncode == 0, (
+            f"claude stdin prompt: exit {result.returncode}; "
+            f"stderr: {result.stderr[:200]}"
+        )
+        assert "STDIN-OK" in json.loads(result.stdout).get("result", "")
+
+    def test_claude_accepts_a_prompt_over_the_argument_limit(self):
+        if not shutil.which("claude"):
+            pytest.skip("claude CLI not found in PATH")
+
+        prompt = "Ignore the filler below. Reply with exactly: BIG-OK\n\n" + self._BIG_FILLER
+        assert len(prompt.encode()) > 128 * 1024
+
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "json", "--allowedTools", "Read"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        assert result.returncode == 0, (
+            f"claude big stdin prompt: exit {result.returncode}; "
+            f"stderr: {result.stderr[:200]}"
+        )
+
+    def test_codex_exec_dash_reads_prompt_from_stdin(self, tmp_path):
+        if not shutil.which("codex"):
+            pytest.skip("codex CLI not found in PATH")
+
+        # codex refuses to run outside a trusted (git) directory.
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=30)
+        last_msg = tmp_path / "last.md"
+
+        result = subprocess.run(
+            [
+                "codex", "exec", "--json",
+                "--sandbox", "read-only",
+                "--cd", str(tmp_path),
+                "--output-last-message", str(last_msg),
+                "-",
+            ],
+            input="Reply with exactly: STDIN-OK",
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        assert result.returncode == 0, (
+            f"codex stdin prompt: exit {result.returncode}; "
+            f"stderr: {result.stderr[:200]}"
+        )
+        assert "STDIN-OK" in last_msg.read_text()

@@ -12,6 +12,7 @@ verbatim.
 from __future__ import annotations
 
 import subprocess
+from typing import Iterable
 from pathlib import Path
 
 
@@ -87,6 +88,29 @@ def status_paths(repo: Path) -> tuple[str, ...]:
         else:
             paths.append(rest)
     return tuple(paths)
+
+
+def ignored_paths(repo: Path, paths: Iterable[str]) -> set[str]:
+    """The subset of ``paths`` that git excludes (``.gitignore``/exclude files).
+
+    One ``git check-ignore --stdin`` call for the whole batch. Exit 0 means some
+    paths matched, 1 means none did; anything else (a broken repo) is treated as
+    "nothing ignored" -- this feeds a preflight refusal, and a git hiccup must
+    never invent one.
+    """
+    wanted = [p for p in paths if p]
+    if not wanted:
+        return set()
+    result = subprocess.run(
+        ["git", "-C", str(repo), "check-ignore", "--stdin"],
+        input="\n".join(wanted) + "\n",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode not in (0, 1):
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def revert_paths(repo: Path, paths: tuple[str, ...] | list[str]) -> None:
