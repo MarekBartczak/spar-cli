@@ -139,6 +139,18 @@ The menu entry uses `--pick`, because a graphical launcher starts with no
 useful working directory: it asks for the project, starting at the most
 recently opened one. A folder dropped on the launcher wins over the dialog.
 
+A GUI started from the menu entry inherits the *desktop session's* `PATH`,
+which is built from `~/.profile` alone — an NVM-installed `codex` is invisible
+there even though a `~/.local/bin/claude` resolves fine. The GUI therefore
+widens its own `PATH` at startup with the usual developer tool dirs (the newest
+installed `~/.nvm/versions/node/*/bin`, plus `~/.local/bin`,
+`~/bin`, `~/.cargo/bin`, `~/.bun/bin`, `~/.deno/bin`, `/usr/local/bin`,
+`/opt/homebrew/bin`); inherited entries keep their priority. The engine child
+inherits the widened `PATH`, and the engine's `stderr` is streamed into the
+transcript view as `⚠` notices, together with an explicit
+`spar zakończył się kodem N` line for any failing exit — a crashed run can no
+longer look like a frozen one.
+
 #### Several projects at once
 
 One window = one project = one OS process (ADR 0007), the WebStorm model.
@@ -334,6 +346,14 @@ re-implement turns, and the message names the offending command (e.g. a plan
 generated for `python` on a `python3`-only host). The value is split on the
 FIRST colon only, so the command may contain spaces and colons:
 `--gate fix:python3 -m py_compile todo.py`.
+
+Every run — debate and `exec`, fresh or `--continue` — first **preflights the
+side CLIs**: each selected side's configured command must resolve on `PATH`.
+A missing one refuses the run with exit `2`, naming the side, the command and
+the searched `PATH`, before any lock is taken or turn is spent (previously the
+gap only surfaced when that side's first turn spawned — after the other side
+had already burned a full turn). Point a side at an absolute path with
+`spar -m <side> -setCommand /full/path/to/cli` when it lives outside `PATH`.
 
 A fresh `spar exec` additionally **preflights** every task's `test` command
 before any work starts: the first shell token (after skipping `VAR=val`

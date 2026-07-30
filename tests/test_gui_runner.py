@@ -145,7 +145,7 @@ _FAKE_TEMPLATE = textwrap.dedent(
 
     def _record():
         argv = sys.argv[1:]
-        entry = {{"argv": argv, "cwd": os.getcwd()}}
+        entry = {{"argv": argv, "cwd": os.getcwd(), "path": os.environ.get("PATH", "")}}
         if "--task-file" in argv:
             p = argv[argv.index("--task-file") + 1]
             try:
@@ -517,3 +517,127 @@ def test_exit3_without_foreign_lock_is_not_locked():
     assert derive_state(False, 3, status, lock_held=True) == RunnerState.LOCKED
     assert derive_state(False, 3, status, lock_held=False) == RunnerState.RESUMABLE
     assert derive_state(False, 3, {"phase": None, "pending_gate": None}, lock_held=False) == RunnerState.IDLE
+
+
+# ----------------------------------------------------------------------
+# Tool PATH (live finding): the GUI, launched from a .desktop entry, ran the
+# engine with the desktop session's PATH -- which lacks nvm's bin dir, so
+# ``codex`` did not exist. ``claude`` (in ~/.local/bin) happened to resolve,
+# so the debate ran one turn and then died at the codex spawn.
+# ----------------------------------------------------------------------
+def test_tool_path_adds_existing_nvm_bin_and_keeps_original_first(tmp_path):
+    home = tmp_path / "home"
+    nvm_bin = home / ".nvm" / "versions" / "node" / "v24.8.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    (home / ".local" / "bin").mkdir(parents=True)
+
+    result = runner_mod.augment_path("/usr/bin:/bin", home=home)
+
+    entries = result.split(os.pathsep)
+    assert entries[:2] == ["/usr/bin", "/bin"]
+    assert str(nvm_bin) in entries
+    assert str(home / ".local" / "bin") in entries
+
+
+def test_tool_path_skips_missing_dirs_and_never_duplicates(tmp_path):
+    home = tmp_path / "home"
+    local_bin = home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+
+    result = runner_mod.augment_path(f"/usr/bin:{local_bin}", home=home)
+
+    entries = result.split(os.pathsep)
+    assert entries.count(str(local_bin)) == 1
+    assert not any(".nvm" in entry for entry in entries)
+
+
+def test_tool_path_takes_only_the_newest_nvm_node_version(tmp_path):
+    # Appending EVERY installed version would drag ancient node/npm binaries
+    # into the engine's PATH; only the newest one is wanted.
+    home = tmp_path / "home"
+    old = home / ".nvm" / "versions" / "node" / "v18.20.0" / "bin"
+    new = home / ".nvm" / "versions" / "node" / "v24.8.0" / "bin"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+
+    entries = runner_mod.augment_path("/usr/bin", home=home).split(os.pathsep)
+
+    assert str(new) in entries
+    assert str(old) not in entries
+
+
+def test_spawned_engine_inherits_the_augmented_path(
+    runner, project_dir, tmp_path, qtbot, monkeypatch
+):
+    home = tmp_path / "home"
+    nvm_bin = home / ".nvm" / "versions" / "node" / "v24.8.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    record = tmp_path / "rec.jsonl"
+    _use_fake(runner, _make_fake(tmp_path, record, exit_code=0))
+
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.start_exec()
+
+    child_path = _read_records(record)[0]["path"]
+    assert str(nvm_bin) in child_path.split(os.pathsep)
+
+
+# ----------------------------------------------------------------------
+# Child stderr must never be swallowed (live finding: the engine's traceback
+# went nowhere, so a crashed run looked like a frozen one).
+# ----------------------------------------------------------------------
+_FAKE_CRASHER = textwrap.dedent(
+    '''\
+    import sys
+    sys.stderr.write("Traceback (most recent call last):\\n")
+    sys.stderr.write("FileNotFoundError: 'codex'\\n")
+    sys.exit(1)
+    '''
+)
+
+
+def _use_crasher(runner, tmp_path):
+    script = tmp_path / f"fake_crash_{int(time.time() * 1e6)}.py"
+    script.write_text(_FAKE_CRASHER, encoding="utf-8")
+    runner._base_cmd = [sys.executable, str(script)]
+
+
+def test_child_stderr_is_surfaced_as_notice(runner, tmp_path, qtbot):
+    _use_crasher(runner, tmp_path)
+    notices = []
+    runner.notice.connect(notices.append)
+
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.start_exec()
+    qtbot.waitUntil(lambda: any("FileNotFoundError" in n for n in notices), timeout=5000)
+
+    assert any("codex" in n for n in notices)
+
+
+def test_nonzero_exit_is_announced(runner, tmp_path, qtbot):
+    _use_crasher(runner, tmp_path)
+    notices = []
+    runner.notice.connect(notices.append)
+
+    with qtbot.waitSignal(runner.finished, timeout=10000):
+        runner.start_exec()
+
+    assert any("1" in n and "kod" in n.lower() for n in notices)
+
+
+def test_widen_process_path_mutates_the_environment(tmp_path, monkeypatch):
+    # In-process adapters (grill/chat) spawn the AI CLIs from the GUI's own
+    # environment, so the widening has to land on os.environ too -- not only on
+    # the engine child's QProcessEnvironment.
+    home = tmp_path / "home"
+    nvm_bin = home / ".nvm" / "versions" / "node" / "v24.8.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    result = runner_mod.widen_process_path()
+
+    assert str(nvm_bin) in os.environ["PATH"].split(os.pathsep)
+    assert result == os.environ["PATH"]

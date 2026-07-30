@@ -1423,3 +1423,24 @@ def test_headless_recovery_never_pends_repeats_interrupted_turn(tmp_path):
     assert len(adapters["B"].calls) == 1  # the interrupted turn was repeated
     st = store.load()
     assert st.pending_gate["name"] == "consensus"
+
+
+def test_tasks_contract_demands_a_distributed_side_assignment():
+    """The plan's author used to assign itself every task: the contract said
+    only "side is one of the configured sides", so a 13/13 monopoly was
+    perfectly legal and the opposing side had nothing to object to."""
+    from spar.orchestrator import _format_tasks_contract
+
+    text = _format_tasks_contract({"claude": ("opus",), "codex": ("gpt-5.5",)})
+
+    # the assignment is a joint capability decision, not the author's default
+    assert "CAPABILITY decision" in text
+    assert "not the author's default" in text
+    # ...argued for in a named paragraph the reader can find
+    assert "Podzia\u0142 kompetencji" in text
+    # ...and the non-authoring side has to answer it, not rubber-stamp it
+    assert "Silence is not agreement." in text
+    assert "move NAMED tasks" in text
+    assert "blocking remark" in text
+    # a lopsided split stays legal but must carry its argument
+    assert "70%" in text

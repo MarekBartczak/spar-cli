@@ -144,14 +144,28 @@ def test_returns_completed_process_with_stderr(tmp_path):
     assert result.stderr == "err text"
 
 
+def test_missing_binary_raises_adapter_error_naming_command_and_path(tmp_path, monkeypatch):
+    # A spawn failure must arrive as AdapterError: that is the exception the
+    # orchestrator catches and LOGS (stdout + .spar/live.log), so a missing
+    # side CLI can never look like a silent freeze again.
+    monkeypatch.setenv("PATH", "/no/such/dir")
+    events = tmp_path / "ev.jsonl"
+
+    with pytest.raises(AdapterError) as exc:
+        run_cli(["binary-xyz"], 5, events)
+
+    message = str(exc.value)
+    assert "binary-xyz" in message
+    assert "/no/such/dir" in message
+
+
 def test_missing_binary_raises_and_closes_events_file(tmp_path):
-    # Popen raising (missing executable) must propagate AND not leak the
-    # already-opened events file handle.
+    # The spawn failure must not leak the already-opened events file handle.
     import gc
     import warnings
 
     events = tmp_path / "ev.jsonl"
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(AdapterError):
         run_cli(["/no/such/binary-xyz"], 5, events)
     with warnings.catch_warnings():
         warnings.simplefilter("error", ResourceWarning)

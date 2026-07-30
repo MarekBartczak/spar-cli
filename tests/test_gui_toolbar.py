@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QCheckBox, QComboBox
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog
 
 from spar.gui.toolbar import NewDebateDialog
 
@@ -249,3 +249,82 @@ def test_resumable_debate_with_artifact_bridges_to_start_exec():
     assert enablement_for(RunnerState.RESUMABLE, {"phase": "debate", "artifact": None})[START_EXEC] is False
     # exec-phase resumable -> no bridge (resume handles it)
     assert enablement_for(RunnerState.RESUMABLE, {"phase": "execution", "artifact": "x"})[START_EXEC] is False
+
+
+class TestNewDebateTaskPaste:
+    """A task description is exactly where a mockup or error screenshot goes."""
+
+    def _mime_with_image(self):
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QImage
+
+        image = QImage(4, 4, QImage.Format.Format_RGB32)
+        image.fill(0x336699)
+        mime = QMimeData()
+        mime.setImageData(image)
+        return mime
+
+    def test_pasted_screenshot_lands_in_the_project_spar_dir(self, qtbot, tmp_path):
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        dialog.task_edit.insertFromMimeData(self._mime_with_image())
+
+        files = sorted((tmp_path / ".spar" / "pasted").glob("paste-*.png"))
+        assert len(files) == 1
+        assert str(files[0]) in dialog.task_edit.toPlainText()
+
+    def test_text_paste_is_unaffected(self, qtbot, tmp_path):
+        from PySide6.QtCore import QMimeData
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        mime = QMimeData()
+        mime.setText("zbuduj X")
+        dialog.task_edit.insertFromMimeData(mime)
+
+        assert dialog.task_edit.toPlainText() == "zbuduj X"
+        assert not (tmp_path / ".spar" / "pasted").exists()
+
+    def test_dialog_without_a_project_dir_still_pastes_text(self, qtbot):
+        # The picker path can open this dialog before a project is known.
+        dialog = NewDebateDialog(None)
+        qtbot.addWidget(dialog)
+
+        dialog.task_edit.insertFromMimeData(self._mime_with_image())
+
+        assert ".png" not in dialog.task_edit.toPlainText()
+
+    def test_ctrl_enter_submits_a_nonempty_task(self, qtbot, tmp_path):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+        dialog.task_edit.setPlainText("zbuduj X")
+
+        event = QKeyEvent(
+            QKeyEvent.Type.KeyPress,
+            Qt.Key.Key_Return,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        dialog.task_edit.keyPressEvent(event)
+
+        assert dialog.result() == QDialog.DialogCode.Accepted
+
+    def test_ctrl_enter_on_an_empty_task_does_nothing(self, qtbot, tmp_path):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        dialog = NewDebateDialog(tmp_path)
+        qtbot.addWidget(dialog)
+
+        event = QKeyEvent(
+            QKeyEvent.Type.KeyPress,
+            Qt.Key.Key_Return,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        dialog.task_edit.keyPressEvent(event)
+
+        assert dialog.result() != QDialog.DialogCode.Accepted

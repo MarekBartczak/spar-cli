@@ -32,14 +32,10 @@ from PySide6.QtWidgets import (
 )
 
 from spar.gui.grill import GrillSession, Option
+from spar.gui.sticky import StickyBottom
 from spar.gui.theme import TOKENS
 
 __all__ = ["GrillDialog"]
-
-# How far off the bottom still counts as "following the stream". Chat bubbles
-# are taller than log lines, so the stream pane's 2px slack is too tight here.
-_FOLLOW_SLACK_PX = 8
-
 
 class WrappingPushButton(QPushButton):
     """A push button whose label wraps instead of being elided or truncated.
@@ -194,6 +190,7 @@ class GrillDialog(QDialog):
         self.transcript = QTextBrowser(self)
         self.transcript.setObjectName("transcript")
         self.transcript.setOpenExternalLinks(False)
+        self._sticky = StickyBottom(self.transcript)
         layout.addWidget(self.transcript, stretch=1)
 
         self.status_label = QLabel("", self)
@@ -278,14 +275,10 @@ class GrillDialog(QDialog):
             parts.append(self._bubble_html(role, text))
         if self._streaming_text:
             parts.append(self._bubble_html("model", self._streaming_text))
-        scrollbar = self.transcript.verticalScrollBar()
-        # Sticky bottom: follow the stream only while the user is parked at
-        # (or within a bubble-ish tolerance of) the end. Scrolled up to read
-        # something? Keep the position -- setHtml resets it to 0, so restore.
-        prev = scrollbar.value()
-        at_bottom = prev >= scrollbar.maximum() - _FOLLOW_SLACK_PX
-        self.transcript.setHtml("".join(parts))
-        scrollbar.setValue(scrollbar.maximum() if at_bottom else prev)
+        # Sticky bottom lives in StickyBottom: deriving "was at the bottom"
+        # from the scrollbar maximum right after setHtml reads a stale
+        # (pre-layout) maximum and permanently latches following OFF.
+        self._sticky.set_html("".join(parts))
 
     def _bubble_html(self, role: str, text: str) -> str:
         escaped = (

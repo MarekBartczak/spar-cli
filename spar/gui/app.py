@@ -50,7 +50,7 @@ from spar.gui.instances import (
 )
 from spar.gui.orchestrator import OrchestratorChatPanel
 from spar.gui.rails import IconRail, RailButtonSpec, right_column_visibility
-from spar.gui.runner import RunnerState, SparRunner
+from spar.gui.runner import RunnerState, SparRunner, widen_process_path
 from spar.gui.sidepane import SidePane
 from spar.gui.stream import LiveLogTailer, StreamPane
 from spar.gui.theme import build_qss
@@ -931,6 +931,11 @@ def main_gui(argv: list[str]) -> int:
     """Entry point for the ``spar gui`` subcommand."""
     args = _parse_args(argv)
     project_dir = Path(args.project_dir).resolve() if args.project_dir else Path.cwd()
+
+    # A GUI launched from the .desktop entry inherits the desktop session's
+    # PATH, which misses nvm/user tool dirs — the engine child and the
+    # in-process grill/chat adapters would then fail to find e.g. ``codex``.
+    widen_process_path()
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     apply_app_identity(app)

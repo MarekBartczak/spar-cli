@@ -5,6 +5,7 @@ orchestrator (a later task) interacts exclusively with the ``Adapter``
 protocol and ``TurnResult`` — it never builds argv itself.
 """
 
+import os
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -93,9 +94,19 @@ def run_cli(
             text=True,
             cwd=cwd,
         )
+    except OSError as exc:
+        # A missing/non-executable CLI raises here, before any stream exists.
+        # Re-raise as AdapterError -- the exception the orchestrator CATCHES and
+        # LOGS -- naming the program and the PATH that was searched; a bare
+        # FileNotFoundError escaped to a traceback that the GUI never showed,
+        # which made a missing side CLI look like a frozen run.
+        events_file.close()
+        raise AdapterError(
+            f"cannot execute {cmd[0]!r}: {exc}. "
+            f"PATH={os.environ.get('PATH', '')}"
+        ) from exc
     except BaseException:
-        # Popen can raise before any stream exists (e.g. FileNotFoundError for
-        # a missing binary) — don't leak the already-opened events file.
+        # Any other pre-stream failure — don't leak the events file either.
         events_file.close()
         raise
 

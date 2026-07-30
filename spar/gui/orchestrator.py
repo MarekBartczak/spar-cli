@@ -162,9 +162,6 @@ def _gate_fingerprint(pending_gate: dict | None) -> str:
 
 _TERMINAL_RE = re.compile(r"^done \(.*\)$")
 
-# Sticky-bottom slack for the chat transcript (see grill_dialog).
-_FOLLOW_SLACK_PX = 8
-
 
 def _is_terminal(text: str) -> bool:
     """ClaudeAdapter's terminal status events — ``done`` / ``done (12.3s)``."""
@@ -239,6 +236,7 @@ if _HAS_QT:
     from spar.adapters.claude import ClaudeAdapter
     from spar.gui.conversation import ConversationSession
     from spar.gui.grill_dialog import WrappingPushButton, _InputEdit
+    from spar.gui.sticky import StickyBottom
 
     class OrchestratorSession(ConversationSession):
         """Advisor conversation. The adapter is read-only BY CONSTRUCTION."""
@@ -357,6 +355,7 @@ if _HAS_QT:
             self.transcript = QTextBrowser(self)
             self.transcript.setObjectName("transcript")
             self.transcript.setOpenExternalLinks(False)
+            self._sticky = StickyBottom(self.transcript)
             layout.addWidget(self.transcript, stretch=1)
 
             self.options_row = QWidget(self)
@@ -456,12 +455,9 @@ if _HAS_QT:
                 )
                 if inner:
                     parts.append(self._bot_bubble(inner))
-            scrollbar = self.transcript.verticalScrollBar()
-            # Sticky bottom -- see grill_dialog._render_transcript.
-            prev = scrollbar.value()
-            at_bottom = prev >= scrollbar.maximum() - _FOLLOW_SLACK_PX
-            self.transcript.setHtml("".join(parts))
-            scrollbar.setValue(scrollbar.maximum() if at_bottom else prev)
+            # Same stale-maximum trap as the grill dialog had: see
+            # spar.gui.sticky for why intent is tracked instead of position.
+            self._sticky.set_html("".join(parts))
 
         @staticmethod
         def _bot_bubble(inner_html: str) -> str:

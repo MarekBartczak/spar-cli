@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from spar.config import ConfigError, load_config
-from spar.gui.grill_dialog import GrillDialog
+from spar.gui.grill_dialog import GrillDialog, _InputEdit
 from spar.gui.runner import RunnerState
 
 # Sides shown/ordered by default when no project config is readable, or when
@@ -186,9 +186,20 @@ class NewDebateDialog(QDialog):
         task_layout = QVBoxLayout(task_widget)
         task_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.task_edit = QPlainTextEdit(self)
+        # Same input as the chat/grill: Ctrl+V of a screenshot lands as a file
+        # under .spar/pasted/ and its path goes into the text. A task
+        # description is exactly where a mockup or an error screenshot belongs.
+        # No project dir (a dialog opened before one is known) -> plain paste.
+        paste_dir = (
+            self._project_dir / ".spar" / _InputEdit._PASTE_DIR_NAME
+            if self._project_dir is not None
+            else None
+        )
+        self.task_edit = _InputEdit(self._on_task_ctrl_enter, self, paste_dir=paste_dir)
         self.task_edit.setObjectName("taskText")
-        self.task_edit.setPlaceholderText("Opis zadania dla debaty…")
+        self.task_edit.setPlaceholderText(
+            "Opis zadania dla debaty… (Ctrl+V wkleja screena)"
+        )
         task_layout.addWidget(self.task_edit)
 
         self.grill_button = QPushButton("Grilluj z modelem…", task_widget)
@@ -234,6 +245,11 @@ class NewDebateDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_task_ctrl_enter(self) -> None:
+        """Ctrl+Enter in the task field submits the dialog (same as OK)."""
+        if self.task_edit.toPlainText().strip():
+            self.accept()
 
     def _on_grill(self) -> None:
         """Open ``GrillDialog`` seeded with the current task draft.
