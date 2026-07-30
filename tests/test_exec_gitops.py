@@ -129,3 +129,30 @@ def test_revert_paths_restores_tracked_and_deletes_untracked(repo):
 def test_revert_paths_is_idempotent_on_missing_paths(repo):
     revert_paths(repo, ["never-existed.txt"])
     assert is_clean(repo)
+
+
+# ----------------------------------------------------------------------
+# ignored_paths — which of these paths does .gitignore exclude?
+# ----------------------------------------------------------------------
+def test_ignored_paths_reports_only_the_excluded_ones(repo):
+    from spar.exec.gitops import ignored_paths
+
+    (repo / ".gitignore").write_text("docs/\nCONTEXT-MAP.md\n", encoding="utf-8")
+    _run(repo, "add", ".gitignore")
+    _run(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "ignore")
+
+    result = ignored_paths(repo, ["docs/adr", "CONTEXT-MAP.md", "src/app.ts"])
+
+    assert result == {"docs/adr", "CONTEXT-MAP.md"}
+
+
+def test_ignored_paths_empty_input_makes_no_git_call(repo):
+    from spar.exec.gitops import ignored_paths
+
+    assert ignored_paths(repo, []) == set()
+
+
+def test_ignored_paths_with_nothing_ignored_is_empty(repo):
+    from spar.exec.gitops import ignored_paths
+
+    assert ignored_paths(repo, ["src/app.ts", "README.md"]) == set()

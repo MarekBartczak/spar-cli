@@ -1175,6 +1175,46 @@ class TestAutoMode:
         # extends up to the cap, then accepts -- it never stops to ask
         assert calls == [("extend:2", False)] * AUTO_EXTEND_LIMIT + [("accept", False)] * 2
 
+    def test_same_gate_raised_again_after_it_cleared_is_answered_again(
+        self, qtbot, tmp_path
+    ):
+        """Live failure: AUTO was on and the run still stopped to ask.
+
+        ``rounds_used`` restarts at 0 in every engine invocation, so a task can
+        pend ``review_rounds`` twice with the SAME (name, task_id, rounds)
+        identity. The answered-latch remembered that identity forever, so the
+        second, genuinely new gate was silently swallowed -- the panel sat
+        waiting for a human with auto mode on and nothing in the stream.
+        """
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+        gate = self._gate(
+            "review_rounds", ["accept", "extend", "abort"],
+            task_id="t6", rounds=2, reason="review_dispute",
+        )
+
+        window._on_status_changed(self._status(gate))       # first gate: extended
+        window._on_status_changed(self._status(None))       # resumed; gate cleared
+        window._on_status_changed(self._status(gate))       # SAME identity, new gate
+
+        assert calls == [("extend:2", False), ("extend:2", False)]
+
+    def test_a_still_pending_gate_is_not_answered_twice(self, qtbot, tmp_path):
+        # The latch must still hold while the gate is unchanged and pending:
+        # the poll repeats every 2s and a second resume would race the first.
+        window, calls = self._window_with_spy(qtbot, tmp_path)
+        window._auto_checkbox.setChecked(True)
+        gate = self._gate(
+            "review_rounds", ["accept", "extend", "abort"],
+            task_id="t6", rounds=2, reason="review_dispute",
+        )
+
+        window._on_status_changed(self._status(gate))
+        window._on_status_changed(self._status(gate))
+        window._on_status_changed(self._status(gate))
+
+        assert calls == [("extend:2", False)]
+
     def test_broken_task_test_is_accepted_so_the_run_keeps_going(self, qtbot, tmp_path):
         window, calls = self._window_with_spy(qtbot, tmp_path)
         window._auto_checkbox.setChecked(True)

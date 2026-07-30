@@ -10,7 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from spar.adapters.base import AdapterError, SessionLost, TurnResult, run_cli
+from spar.adapters.base import (
+    AdapterError,
+    AdapterTimeout,
+    SessionLost,
+    TurnResult,
+    run_cli,
+)
 
 
 _ARG_KEYS = ("file_path", "path", "command", "pattern", "url")
@@ -227,7 +233,8 @@ class ClaudeAdapter:
         self.name = side_name
         self.readonly = readonly
 
-    def _build_argv(self, prompt: str, session_id: str | None) -> list[str]:
+    def _build_argv(self, session_id: str | None) -> list[str]:
+        """argv WITHOUT the prompt: it is fed on stdin (see :meth:`run_turn`)."""
         model_flags = ["--model", self.model] if self.model else []
         # Headless (`-p`) claude cannot prompt for permission, so without these
         # it silently refuses to touch the artifact. acceptEdits auto-approves
@@ -270,7 +277,6 @@ class ClaudeAdapter:
                 *fmt_flags,
                 *perm_flags,
                 *model_flags,
-                prompt,
             ]
         return [
             self.command,
@@ -278,7 +284,6 @@ class ClaudeAdapter:
             *fmt_flags,
             *perm_flags,
             *model_flags,
-            prompt,
         ]
 
     def _events_path(self) -> Path:
@@ -293,12 +298,33 @@ class ClaudeAdapter:
         timeout_sec: int,
         on_event: Callable[[str], None] | None = None,
     ) -> TurnResult:
-        argv = self._build_argv(prompt, session_id)
+        argv = self._build_argv(session_id)
         events_path = self._events_path()
 
         on_line = self._make_on_line(on_event) if on_event is not None else None
 
-        result = run_cli(argv, timeout_sec, events_path, cwd=self.cwd, on_line=on_line)
+        # The prompt goes on STDIN, never in argv: Linux caps a single argument
+        # at MAX_ARG_STRLEN (128 KiB), and a real reviewer prompt (plan + diff)
+        # blew past it -- the spawn died with "[Errno 7] Argument list too long"
+        # in the middle of an execution. ``claude -p`` reads the prompt from
+        # stdin when no positional prompt is given.
+        try:
+            result = run_cli(
+                argv,
+                timeout_sec,
+                events_path,
+                stdin_text=prompt,
+                cwd=self.cwd,
+                on_line=on_line,
+            )
+        except AdapterTimeout as exc:
+            # The wall clock can expire while the CLI lingers AFTER finishing.
+            # If the terminal ``result`` event is already in the stream, the turn
+            # IS complete -- keep it instead of discarding the work.
+            recovered = self._recover_from_timeout(exc, events_path, on_event)
+            if recovered is not None:
+                return recovered
+            raise
 
         if result.returncode != 0:
             if session_id is not None:
@@ -321,6 +347,31 @@ class ClaudeAdapter:
             reply_text=reply_text,
             events_path=events_path,
             exit_code=result.returncode,
+        )
+
+    def _recover_from_timeout(
+        self,
+        exc: AdapterTimeout,
+        events_path: Path,
+        on_event: Callable[[str], None] | None,
+    ) -> TurnResult | None:
+        """The timed-out turn as a :class:`TurnResult`, or ``None`` if unfinished."""
+        found, reply_text, session_id = _extract_result(exc.stdout)
+        if not found or reply_text is None:
+            return None
+        if on_event is not None:
+            try:
+                on_event(
+                    f"timeout after {exc.timeout_sec}s — turn had already "
+                    "completed, keeping its reply"
+                )
+            except Exception:
+                pass
+        return TurnResult(
+            session_id=session_id,
+            reply_text=reply_text,
+            events_path=events_path,
+            exit_code=0,
         )
 
     @staticmethod

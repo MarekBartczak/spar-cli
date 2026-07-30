@@ -4,6 +4,8 @@
 Never invoke the real ``codex`` CLI in tests — this script stands in for
 it, driven entirely by environment variables:
 
+- ``FAKE_CODEX_STDIN_FILE``: if set, this script writes everything it reads
+  from stdin to the given file (the prompt travels on stdin, never in argv).
 - ``FAKE_CODEX_ARGS_FILE``: if set, this script appends its argv (as a
   JSON line) to the given file, so tests can assert the exact argv contract.
 - ``FAKE_CODEX_STDOUT``: literal stdout to print. Defaults to the current
@@ -20,6 +22,9 @@ it, driven entirely by environment variables:
 - ``FAKE_CODEX_STDERR``: literal stderr to print.
 - ``FAKE_CODEX_SLEEP``: seconds to sleep before producing output. Used to
   simulate a hang for timeout tests.
+- ``FAKE_CODEX_HANG_AFTER``: seconds to sleep AFTER writing the events and the
+  last-message file, so a turn that already emitted ``turn.completed`` still
+  runs into the adapter timeout.
 
 Scripted multi-turn mode (for end-to-end debate tests)
 --------------------------------------------------------
@@ -145,6 +150,11 @@ def main() -> int:
         with open(args_file, "a") as f:
             f.write(json.dumps(argv) + "\n")
 
+    stdin_file = os.environ.get("FAKE_CODEX_STDIN_FILE")
+    if stdin_file:
+        with open(stdin_file, "w") as f:
+            f.write(sys.stdin.read())
+
     sleep_sec = float(os.environ.get("FAKE_CODEX_SLEEP", "0"))
     if sleep_sec:
         time.sleep(sleep_sec)
@@ -168,6 +178,13 @@ def main() -> int:
                 f.write(last_msg)
 
     sys.stdout.write(stdout)
+    sys.stdout.flush()
+
+    # Hang AFTER the events and the last-message file are complete: the live
+    # shape of the timeout that threw away a finished turn.
+    hang_after = float(os.environ.get("FAKE_CODEX_HANG_AFTER", "0"))
+    if hang_after:
+        time.sleep(hang_after)
 
     stderr = os.environ.get("FAKE_CODEX_STDERR", "")
     if stderr:

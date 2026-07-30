@@ -6,11 +6,16 @@ it, driven entirely by environment variables:
 
 - ``FAKE_CLAUDE_ARGS_FILE``: if set, this script appends its argv (as a
   JSON line) to the given file, so tests can assert the exact argv contract.
+- ``FAKE_CLAUDE_STDIN_FILE``: if set, this script writes everything it reads
+  from stdin to the given file (the prompt travels on stdin, never in argv).
 - ``FAKE_CLAUDE_STDOUT``: literal stdout to print. Defaults to a valid JSON
   document with a ``session_id`` and a ``result``.
 - ``FAKE_CLAUDE_EXIT``: process exit code. Defaults to 0.
 - ``FAKE_CLAUDE_SLEEP``: seconds to sleep before producing output. Used to
   simulate a hang for timeout tests.
+- ``FAKE_CLAUDE_HANG_AFTER``: seconds to sleep AFTER writing the whole reply,
+  so a turn that already emitted its terminal ``result`` event still runs into
+  the adapter timeout.
 
 Stream-json mode
 ----------------
@@ -232,6 +237,11 @@ def main() -> int:
         with open(args_file, "a") as f:
             f.write(json.dumps(sys.argv) + "\n")
 
+    stdin_file = os.environ.get("FAKE_CLAUDE_STDIN_FILE")
+    if stdin_file:
+        with open(stdin_file, "w") as f:
+            f.write(sys.stdin.read())
+
     sleep_sec = float(os.environ.get("FAKE_CLAUDE_SLEEP", "0"))
     if sleep_sec:
         time.sleep(sleep_sec)
@@ -253,6 +263,13 @@ def main() -> int:
             stdout = _emit_stream(doc)
 
     sys.stdout.write(stdout)
+    sys.stdout.flush()
+
+    # Hang AFTER the complete reply is on the wire: the live shape of the
+    # timeout that threw away a finished turn.
+    hang_after = float(os.environ.get("FAKE_CLAUDE_HANG_AFTER", "0"))
+    if hang_after:
+        time.sleep(hang_after)
 
     stderr = os.environ.get("FAKE_CLAUDE_STDERR", "")
     if stderr:

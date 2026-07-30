@@ -1,3 +1,4 @@
+import subprocess
 """Preflight validation of per-task test commands (spar/exec/preflight.py).
 
 A FRESH ``spar exec`` must refuse to start when any task's ``test`` command
@@ -247,3 +248,115 @@ def test_resume_does_not_rerun_preflight(repo, tmp_path):
     rc = ex.run_continue()
     assert rc == 0
     assert "preflight" not in "\n".join(logs)
+
+
+# ----------------------------------------------------------------------
+# Task file scopes vs .gitignore
+# ----------------------------------------------------------------------
+# Live incident: a documentation task's whole scope (docs/**, CONTEXT-MAP.md)
+# was gitignored in the target repo. The implementer wrote every file, `test -f`
+# passed, git saw nothing, and the run died deep in the review loop with the
+# misleading "task t8: implementer created no files".
+from spar.exec.preflight import preflight_task_scopes, scope_probe_path
+
+
+def test_scope_probe_path_strips_glob_tail():
+    assert scope_probe_path("docs/adr/**") == "docs/adr"
+    assert scope_probe_path("app/backend/test/unit/**/*.ts") == "app/backend/test/unit"
+    assert scope_probe_path("CONTEXT-MAP.md") == "CONTEXT-MAP.md"
+
+
+def _task(task_id: str, files: tuple):
+    return make_task(task_id, "A", files, test=None)
+
+
+def _ignoring(*ignored: str):
+    return lambda path: path in ignored
+
+
+def test_task_with_every_scope_entry_ignored_is_reported():
+    task = _task("t8", files=("docs/adr/**", "CONTEXT-MAP.md"))
+
+    problems = preflight_task_scopes(
+        [task], is_ignored=_ignoring("docs/adr", "CONTEXT-MAP.md")
+    )
+
+    assert len(problems) == 1
+    assert "t8" in problems[0]
+    assert "docs/adr/**" in problems[0]
+    assert "gitignore" in problems[0].lower()
+
+
+def test_task_with_one_tracked_scope_entry_is_not_reported():
+    # Partially ignored is still workable: the tracked part produces a diff.
+    task = _task("t2", files=("docs/runbook/**", "app/backend/src/db.ts"))
+
+    problems = preflight_task_scopes([task], is_ignored=_ignoring("docs/runbook"))
+
+    assert problems == []
+
+
+def test_task_without_ignored_scope_is_not_reported():
+    task = _task("t1", files=("app/backend/src/db.ts",))
+
+    assert preflight_task_scopes([task], is_ignored=_ignoring()) == []
+
+
+def test_task_without_a_file_scope_is_skipped():
+    assert preflight_task_scopes([_task("t0", files=())], is_ignored=_ignoring()) == []
+
+
+def test_fresh_run_refuses_when_a_task_scope_is_fully_gitignored(repo, tmp_path):
+    # Live incident: the doc task's whole scope was gitignored, so the run died
+    # deep in the review loop with "implementer created no files" after paying
+    # for turns. It must refuse before touching git state.
+    (repo / ".gitignore").write_text("docs/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True,
+                   capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-m", "ignore docs"],
+        check=True, capture_output=True,
+    )
+    tasks = [make_task("t8", "A", ["docs/adr/**", "docs/context/**"], test="true")]
+    gate = FakeGate([])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side={}, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+
+    rc = ex.run()
+
+    joined = "\n".join(logs)
+    assert rc == 2
+    assert "[t8]" in joined
+    assert "gitignore" in joined.lower()
+    assert not branch_exists(repo, "spar/integration")
+    assert not adapters
+    assert not (tmp_path / ".spar" / "exec.json").exists()
+
+
+def test_fresh_run_allows_a_partially_gitignored_scope(repo, tmp_path):
+    # One tracked path is enough to produce a diff — do not block the run.
+    (repo / ".gitignore").write_text("docs/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True,
+                   capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-m", "ignore docs"],
+        check=True, capture_output=True,
+    )
+    tasks = [make_task("t2", "A", ["docs/runbook/**", "work1.py"], test="true")]
+    steps = {
+        "A": [Step(vblock("CONTINUE"), edits={"work1.py": "print(1)\n"})],
+        "B": [Step(vblock("DONE"))],
+    }
+    gate = FakeGate([GateDecision("accept")])
+    ex, adapters, store, logs = build_executor(
+        repo, tmp_path, tasks=tasks, steps_by_side=steps, gate=gate,
+        execution=ExecutionConfig(test_command="true"),
+    )
+
+    rc = ex.run()
+
+    assert rc == 0

@@ -459,7 +459,18 @@ class MainWindow(QMainWindow):
         second resume would race the first (the runner would refuse it as
         busy, but the notice spam alone is reason enough to latch).
         """
-        if not pending_gate or not self._auto_checkbox.isChecked():
+        if not pending_gate:
+            # Gate cleared (the resumed child consumed it): drop the latch, so a
+            # genuinely NEW gate is answered even when its identity repeats.
+            # ``rounds_used`` restarts at 0 in every engine invocation, so the
+            # same task pends ``review_rounds`` with the same (name, task_id,
+            # rounds) triple again -- a latch that remembered it forever left the
+            # run parked on a gate with auto mode on (live finding). The
+            # extension CAP (``_auto_extends``, per gate key) is what stops an
+            # endless extend loop, not this latch.
+            self._auto_answered.clear()
+            return
+        if not self._auto_checkbox.isChecked():
             return
         identity = self._gate_identity(pending_gate)
         if identity in self._auto_answered:
