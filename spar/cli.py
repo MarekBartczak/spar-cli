@@ -17,6 +17,11 @@ from spar.gates import GateChoice, GateParseError, parse_gate_value
 from spar.guard import Guard
 from spar.headless import HeadlessGate
 from spar.orchestrator import ConsoleGate, Orchestrator
+from spar.sidecheck import (
+    SideCommandMissing,
+    missing_side_commands,
+    missing_side_commands_message,
+)
 from spar.state import StateStore
 from spar.status import build_status
 from spar.stream import StreamSink
@@ -122,15 +127,34 @@ def _is_inside_git_work_tree(cwd: Path) -> bool:
     return result.returncode == 0
 
 
+def _preflight_side_commands(config, order: list[str]) -> None:
+    """Refuse up front when a selected side's CLI is not executable.
+
+    Raises :class:`SideCommandMissing`; the callers turn it into exit 2. Without
+    this, the missing CLI only surfaced at the first spawn of THAT side — after
+    the other side had already run a full (billed) turn.
+    """
+    commands = {
+        name: config.sides[name].command
+        for name in order
+        if name in config.sides
+    }
+    missing = missing_side_commands(commands)
+    if missing:
+        raise SideCommandMissing(missing_side_commands_message(missing))
+
+
 def _build_orchestrator(args, config) -> Orchestrator:
     """Wire config + CLI args into a ready-to-run :class:`Orchestrator`.
 
     Kept deliberately thin: no business logic, only construction. Raises
     ``ValueError`` for a side that is not present in the loaded config (the
-    caller turns that into a usage error).
+    caller turns that into a usage error) and ``SideCommandMissing`` when a
+    side's CLI is not executable here.
     """
     sides = [s.strip() for s in args.sides.split(",") if s.strip()]
     order = [args.first] + [s for s in sides if s != args.first]
+    _preflight_side_commands(config, order)
 
     cwd = Path.cwd()
     events_dir = Path(".spar/transcript")
@@ -234,8 +258,10 @@ def _build_executor(
 
     Kept deliberately thin (mirrors ``_build_orchestrator``): no business
     logic beyond adapter-factory construction, so it is easy for tests to
-    monkeypatch wholesale.
+    monkeypatch wholesale. Raises ``SideCommandMissing`` when a side's CLI is
+    not executable here.
     """
+    _preflight_side_commands(config, order)
 
     def make_adapter(side: str, worktree: Path, model: str, readonly: bool = False):
         side_cfg = config.sides[side]
@@ -315,6 +341,9 @@ def _run_exec(argv) -> int:
 
     try:
         executor = _build_executor(args, config, tasks, order, plan_path)
+    except SideCommandMissing as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -454,6 +483,9 @@ def main(argv=None) -> int:
 
     try:
         orchestrator = _build_orchestrator(args, config)
+    except SideCommandMissing as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
     except ValueError as exc:
         parser.error(str(exc))
 

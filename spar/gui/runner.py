@@ -31,11 +31,93 @@ import time
 from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import (
+    QObject,
+    QProcess,
+    QProcessEnvironment,
+    QTimer,
+    Signal,
+)
 
 from spar.status import build_status
 
-__all__ = ["RunnerState", "derive_state", "SparRunner"]
+__all__ = [
+    "RunnerState",
+    "derive_state",
+    "SparRunner",
+    "augment_path",
+    "widen_process_path",
+]
+
+
+# Directories (relative to $HOME) where user-level developer CLIs live. A GUI
+# started from a .desktop entry inherits the *desktop session's* PATH, which is
+# built from ~/.profile only: an nvm-installed CLI (``codex``) is invisible
+# there, while a ~/.local/bin one (``claude``) happens to resolve. That
+# asymmetry is exactly what killed a live run mid-debate, so the engine we spawn
+# gets these dirs appended to whatever PATH we inherited.
+_HOME_TOOL_DIRS: tuple[str, ...] = (
+    ".local/bin",
+    "bin",
+    ".cargo/bin",
+    ".bun/bin",
+    ".deno/bin",
+)
+_SYSTEM_TOOL_DIRS: tuple[str, ...] = ("/usr/local/bin", "/opt/homebrew/bin")
+
+
+def _version_key(name: str) -> tuple:
+    """Sort key for an nvm ``vMAJOR.MINOR.PATCH`` directory name (newest last)."""
+    parts = name.lstrip("v").split(".")
+    numbers = []
+    for part in parts:
+        try:
+            numbers.append(int(part))
+        except ValueError:
+            numbers.append(-1)
+    return tuple(numbers)
+
+
+def _nvm_bin_dirs(home: Path) -> list[str]:
+    """The NEWEST installed nvm node ``bin`` dir (empty when nvm is absent).
+
+    Only one: appending every installed version would drag years-old
+    ``node``/``npm`` binaries into the engine's PATH.
+    """
+    versions = home / ".nvm" / "versions" / "node"
+    try:
+        candidates = [d for d in versions.iterdir() if (d / "bin").is_dir()]
+    except OSError:
+        return []
+    if not candidates:
+        return []
+    newest = max(candidates, key=lambda d: _version_key(d.name))
+    return [str(newest / "bin")]
+
+
+def augment_path(path: str, home: Path | None = None) -> str:
+    """``path`` with the known developer-tool dirs appended.
+
+    The inherited entries keep their order and priority (they come first); only
+    *existing* directories are appended, and never twice.
+    """
+    home = Path(os.path.expanduser("~")) if home is None else Path(home)
+
+    entries = [entry for entry in path.split(os.pathsep) if entry]
+    seen = set(entries)
+
+    extra = _nvm_bin_dirs(home)
+    extra += [str(home / rel) for rel in _HOME_TOOL_DIRS]
+    extra += list(_SYSTEM_TOOL_DIRS)
+
+    for candidate in extra:
+        if candidate in seen:
+            continue
+        if not Path(candidate).is_dir():
+            continue
+        entries.append(candidate)
+        seen.add(candidate)
+    return os.pathsep.join(entries)
 
 
 def _engine_base_command() -> list[str]:
@@ -54,6 +136,17 @@ def _engine_base_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--spar-engine"]
     return [sys.executable, "-m", "spar.cli"]
+
+
+def widen_process_path() -> str:
+    """Apply :func:`augment_path` to this process's ``PATH`` and return it.
+
+    Called once at GUI startup: the grill/chat conversations build adapters
+    *in-process*, so they spawn the AI CLIs from ``os.environ`` rather than from
+    the engine child's environment.
+    """
+    os.environ["PATH"] = augment_path(os.environ.get("PATH", ""))
+    return os.environ["PATH"]
 
 
 class RunnerState(Enum):
@@ -347,19 +440,59 @@ class SparRunner(QObject):
         proc.setWorkingDirectory(str(self.project_dir))  # review #1
         proc.setProgram(program)
         proc.setArguments(full_args)
+        proc.setProcessEnvironment(self._child_environment())
 
         cmd = " ".join([program, *full_args])
         proc.started.connect(lambda: self.started.emit(cmd))
         proc.finished.connect(self._on_finished)
+        # Both channels MUST be drained: an unread pipe fills (~64 KB) and
+        # blocks the engine. stdout already reaches the user through
+        # .spar/live.log, so it is dropped here; stderr is the only place a
+        # traceback/refusal appears and used to vanish silently -- surface it.
+        proc.readyReadStandardOutput.connect(
+            lambda: proc.readAllStandardOutput()
+        )
+        proc.readyReadStandardError.connect(
+            lambda: self._on_stderr(bytes(proc.readAllStandardError()))
+        )
 
         self._process = proc
         proc.start()
         self._refresh_state()
 
+    def _child_environment(self) -> "QProcessEnvironment":
+        """The engine's environment: ours, with PATH widened to the tool dirs."""
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PATH", augment_path(env.value("PATH", os.environ.get("PATH", ""))))
+        return env
+
+    def _on_stderr(self, chunk: bytes) -> None:
+        """Surface each engine stderr line as a :attr:`notice`.
+
+        The engine writes its refusals and any traceback here; with nobody
+        reading this channel a crashed run was indistinguishable from a frozen
+        one (live finding: a missing ``codex`` binary).
+        """
+        text = chunk.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            if line.strip():
+                self.notice.emit(f"⚠ {line.rstrip()}")
+
     def _on_finished(self, exit_code: int, exit_status) -> None:
         crashed = exit_status == QProcess.ExitStatus.CrashExit
         effective = _CRASH_EXIT if crashed else exit_code
         self._last_exit = effective
+
+        # Drain whatever is still buffered before the pipes go away.
+        proc = self._process
+        if proc is not None:
+            self._on_stderr(bytes(proc.readAllStandardError()))
+
+        # A failing exit must always leave a trace in the stream, even when the
+        # child said nothing at all. 10 (gate pending) and 130 (our own SIGINT)
+        # are normal control flow, not failures.
+        if effective not in (0, 10, 130):
+            self.notice.emit(f"⚠ spar zakończył się kodem {effective}")
 
         # Remarks / task temp files outlived the spawn on purpose; reclaim now.
         for attr in ("_remarks_path", "_task_file_path"):

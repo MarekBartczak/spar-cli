@@ -404,6 +404,47 @@ class TestExecSubcommand:
         assert fake_orch["orch"].ran_new == "my prompt"
 
 
+class TestSideCommandPreflight:
+    """A side CLI that is not on PATH must be refused BEFORE any turn runs.
+
+    Live failure: the GUI's engine ran with a PATH lacking nvm's bin, so
+    ``codex`` did not exist. Claude burned a full turn, then the spawn died with
+    a traceback nobody saw and the run just stopped.
+    """
+
+    def _empty_path(self, tmp_path, monkeypatch):
+        # System dirs only (git etc. stay reachable); the AI CLIs live in user
+        # dirs, so neither ``claude`` nor ``codex`` resolves here.
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", f"{empty}:/usr/bin:/bin")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
+        monkeypatch.chdir(tmp_path)
+
+    def test_debate_refuses_and_names_the_missing_side(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._empty_path(tmp_path, monkeypatch)
+
+        assert main(["--continue", "--headless"]) == 2
+
+        err = capsys.readouterr().err
+        assert "codex" in err
+        assert "PATH" in err
+
+    def test_exec_refuses_and_names_the_missing_side(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _write_plan(tmp_path, monkeypatch, VALID_PLAN, with_side_config=True)
+        self._empty_path(tmp_path, monkeypatch)
+
+        assert main(["exec"]) == 2
+
+        err = capsys.readouterr().err
+        assert "codex" in err
+        assert "PATH" in err
+
+
 class TestHeadlessGateFlags:
     """--gate requires --continue and --headless together; --headless swaps gate."""
 

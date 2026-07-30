@@ -293,6 +293,19 @@ def _format_tasks_contract(
         "- side is one of the configured sides: "
         + ", ".join(catalogs.keys())
         + ".",
+        "- side= is a CAPABILITY decision the two of you make together, not the "
+        "author's default. Above the section, include a short `Podział "
+        "kompetencji` paragraph: which classes of work in THIS plan go to which "
+        "side and why (stack/language, mechanical vs design-heavy, "
+        "breadth-of-context vs precision, which catalog has the fitting model). "
+        "Judge both sides honestly, including your own weaknesses — you are "
+        "allocating work, not competing for volume.",
+        "- The side that did NOT write the `## Tasks` section MUST, in its very "
+        "next turn, either state explicitly that it accepts the assignment, or "
+        "move NAMED tasks to the other side with a reason, as a blocking "
+        "remark. Silence is not agreement. If one side ends up implementing "
+        "more than 70% of the tasks, the `Podział kompetencji` paragraph has to "
+        "carry the argument for it.",
         "- model is one of THAT side's models (its catalog, below).",
         "- where a side's catalog notes an implementation restriction, model= "
         "MUST be one of those implementation models; review= may use any model "

@@ -716,3 +716,52 @@ class TestImagePaste:
         # .spar/ is the one tree the artifact scope guard skips wholesale.
         files = sorted((tmp_path / ".spar" / "pasted").glob("paste-*.png"))
         assert len(files) == 1
+
+
+@pytest.mark.skipif(not _HAS_QT_DIALOG, reason="requires PySide6")
+class TestTranscriptFollowsTheStream:
+    """The live symptom: the grill transcript stopped following mid-answer and
+    had to be scrolled down by hand."""
+
+    def _dialog(self, qtbot, tmp_path):
+        fake = FakeGrillSession()
+        dialog = GrillDialog(tmp_path, None, 60, "draft", session=fake)
+        qtbot.addWidget(dialog)
+        dialog.resize(500, 240)
+        dialog.show()
+        return dialog, fake
+
+    def test_streamed_chunks_keep_the_transcript_pinned(self, qtbot, tmp_path):
+        dialog, fake = self._dialog(qtbot, tmp_path)
+
+        for i in range(40):
+            fake.stream_chunk.emit(f"akapit {i} " + "treść " * 20 + "\n\n")
+            qtbot.wait(5)
+
+        bar = dialog.transcript.verticalScrollBar()
+        assert bar.maximum() > 0  # really overflowed the viewport
+        assert bar.value() == bar.maximum()
+
+    def test_finished_turns_keep_the_transcript_pinned(self, qtbot, tmp_path):
+        dialog, fake = self._dialog(qtbot, tmp_path)
+
+        for i in range(15):
+            fake.turn_finished.emit(f"odpowiedź {i} " + "treść " * 30, [])
+            qtbot.wait(5)
+
+        bar = dialog.transcript.verticalScrollBar()
+        assert bar.value() == bar.maximum()
+
+    def test_scrolling_up_is_respected_while_the_model_streams(self, qtbot, tmp_path):
+        dialog, fake = self._dialog(qtbot, tmp_path)
+        fake.turn_finished.emit("długa " * 200, [])
+        qtbot.wait(10)
+
+        bar = dialog.transcript.verticalScrollBar()
+        parked = bar.maximum() // 3
+        bar.setValue(parked)
+
+        fake.stream_chunk.emit("nowa treść " * 40)
+        qtbot.wait(10)
+
+        assert bar.value() == parked  # reading is not interrupted
